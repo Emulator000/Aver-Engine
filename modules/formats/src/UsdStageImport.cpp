@@ -771,7 +771,10 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
         const std::string type = tokenOf(st, sk, cp, "typeName");
         if (type == "Material" || type == "Shader" || type == "GeomSubset") continue;
         if (type == "PointInstancer") {
-            st.note("a PointInstancer nested inside a prototype was not expanded");
+            // Inside a placed arc (`nested` set) nestedInstancers() registers it at its world transform;
+            // only inside a PointInstancer's own prototype does it stay unexpanded.
+            if (nested) { diagTrace(st.c, cp, "PointInstancer: expanded by the arc's instancer pass"); continue; }
+            st.note("a PointInstancer nested inside a PointInstancer prototype was not expanded");
             diagSkip(st.c, "nested-point-instancer", sk.prefix, cp);
             diagTrace(st.c, cp, "nested PointInstancer not expanded");
             continue;
