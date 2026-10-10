@@ -62,6 +62,24 @@ struct PreviewDraw {
     u32 materialHandle = 0;
 };
 
+// Largest instance count one drawMeshInstanced call carries. Each call suballocates count * 64 B from
+// the backend's 64 MB upload ring, so a bigger batch is split rather than risking the ring.
+constexpr u32 kMaxPreviewInstancesPerDraw = 8192;
+
+// Many copies of one mesh, drawn with one instanced call per chunk. For sets too large to be a
+// PreviewDraw list (a level's baked foliage): no selection, no material graph, the preview's own
+// key-plus-fill lighting. NON-OWNING: `worlds` must stay valid until the next setInstanceBatches.
+struct PreviewInstanceBatch {
+    rhi::MeshHandle mesh = 0;
+    // 12 f32 per instance in the .ocinst layout: the row-vector world matrix with its fourth column
+    // (always 0,0,0,1) dropped -- rows 0..2 the scaled basis, row 3 the translation, cm.
+    const f32* worlds = nullptr;
+    u32 count = 0;
+    f32 baseColor[4] = {0.8f, 0.8f, 0.82f, 1.0f};   // the tint
+    f32 metallic = 0.0f;
+    f32 roughness = 0.6f;
+};
+
 // How the preview shades its draws, as the asset editors' view-mode dropdown names them.
 enum class PreviewViewMode : u8 { Lit = 0, Unlit = 1, Wireframe = 2, Normals = 3 };
 
@@ -101,10 +119,31 @@ public:
     // Drops every draw naming `mesh` (when non-zero) or `materialHandle` (when non-zero), for a caller
     // about to destroy either.
     void dropDrawsUsing(rhi::MeshHandle mesh, u32 materialHandle = 0) {
+        if (mesh != 0)
+            batches_.erase(std::remove_if(batches_.begin(), batches_.end(),
+                                          [&](const PreviewInstanceBatch& b) { return b.mesh == mesh; }),
+                           batches_.end());
         draws_.erase(std::remove_if(draws_.begin(), draws_.end(), [&](const PreviewDraw& d) {
             return (mesh != 0 && d.mesh == mesh) || (materialHandle != 0 && d.materialHandle == materialHandle);
         }), draws_.end());
     }
+    // Instanced sets drawn after the draw list. The array is copied; each batch's `worlds` is not.
+    // Costs nothing until the first non-empty call (the instanced pipelines are built then).
+    void setInstanceBatches(const PreviewInstanceBatch* batches, u32 count) {
+        batches_.assign(batches, batches ? batches + count : batches);
+    }
+    // A world AABB standing in for content that is not in the draw list, so worldBounds() and
+    // frameAll() cover it (and the floor and bounds box follow it).
+    void setExternalBounds(const f32 lo[3], const f32 hi[3]) {
+        for (int i = 0; i < 3; ++i) { extLo_[i] = lo[i]; extHi_[i] = hi[i]; }
+        haveExternalBounds_ = true;
+    }
+    void clearExternalBounds() { haveExternalBounds_ = false; }
+    // False makes prePass return at once: the colour target keeps its last picture and nothing is
+    // recorded. For a preview whose tab is hidden. True by default.
+    void setEnabled(bool on) { enabled_ = on; }
+    bool enabled() const { return enabled_; }
+
     void setCamera(const PreviewCamera& c) { camera_ = c; }
     PreviewCamera& camera() { return camera_; }
     // Points the camera at the whole draw list.
@@ -120,8 +159,9 @@ public:
     void setShowFlags(const PreviewShowFlags& f) { show_ = f; }
     const PreviewShowFlags& showFlags() const { return show_; }
 
-    // The draw list's world-space AABB, from each mesh's own AABB where the backend measured one and
-    // its boundsRadius sphere otherwise. False when nothing in the list has a mesh.
+    // The draw list's world-space AABB (plus any external bounds), from each mesh's own AABB where the
+    // backend measured one and its boundsRadius sphere otherwise. False when nothing in the list has a
+    // mesh and no external bounds are set.
     bool worldBounds(f32 lo[3], f32 hi[3]) const;
 
     // The texture the panel draws. 0 before the first render.
@@ -180,6 +220,13 @@ private:
     // Builds the wireframe, backdrop, grid and bounds pipelines and their two meshes. Non-fatal:
     // whatever fails is skipped and the preview draws without it.
     void createChrome(const rhi::GraphicsPipelineDesc& meshDesc);
+    // Builds the instanced vertex shader and the solid and wireframe instanced pipelines, once, the
+    // first time a batch is drawn. False when the backend cannot run them; batches then draw one
+    // setConstants + drawMesh per instance.
+    bool ensureInstancedPipelines();
+    // Draws batches_ after the draw list. `frame` is the PreviewFrame block prePass built.
+    void drawInstanceBatches(rhi::IRenderContext& ctx, const void* frame, u32 frameBytes, bool wire,
+                             rhi::PipelineHandle meshPipeline);
 
 #if AVER_MODULE_PBR
     // (Re)builds materialPipeline_ against whatever pbr::materialGraphs() currently holds. Called
@@ -213,6 +260,18 @@ private:
     rhi::MeshHandle gridQuad_ = 0, boundsBox_ = 0;
     PreviewViewMode viewMode_ = PreviewViewMode::Lit;
     PreviewShowFlags show_{};
+
+    // Instanced batches. Pipelines are lazy so a preview that never draws one builds nothing extra.
+    rhi::GraphicsPipelineDesc meshDesc_{};   // pipeline_'s desc, the base for the instanced twins
+    rhi::ShaderHandle instVs_ = 0;
+    rhi::PipelineHandle instPipeline_ = 0, instWirePipeline_ = 0;
+    bool instTried_ = false;
+    std::string instDefines_;   // ShaderDesc::defines is a raw pointer; must outlive createShader
+    std::vector<PreviewInstanceBatch> batches_;
+    std::vector<f32> instScratch_;   // one chunk of worlds expanded to 16 f32 per instance
+    f32 extLo_[3] = {}, extHi_[3] = {};
+    bool haveExternalBounds_ = false;
+    bool enabled_ = true;
 
 #if AVER_MODULE_PBR
     // The SECOND pipeline: shades through averEvalMaterial instead of the fixed key-light-plus-fill

@@ -29,18 +29,35 @@ struct PreviewOut {
     float2 uv    : TEXCOORD1;
 };
 
-// Transforms a vertex to clip space and its normal to world space.
-PreviewOut PreviewVS(VSIn i) {
+// Transforms a vertex by `world` to clip space and its normal to world space.
+PreviewOut previewTransform(VSIn i, float4x4 world) {
     PreviewOut o;
-    float4 wp = mul(float4(i.pos, 1.0), gWorld);
+    float4 wp = mul(float4(i.pos, 1.0), world);
     o.wpos  = wp.xyz;
     o.pos   = mul(wp, gPreviewViewProj);
-    o.nrmWS = normalize(averTransformNormal(i.nrm, gWorld));
+    o.nrmWS = normalize(averTransformNormal(i.nrm, world));
     // Taken straight from VSIn, exactly like VSMain does in RHIShaders.cpp -- VSIn already carries
     // it (every mesh in this engine does), so nothing upstream of this shader has to change.
     o.uv    = i.uv;
     return o;
 }
+
+PreviewOut PreviewVS(VSIn i) {
+    return previewTransform(i, gWorld);
+}
+
+#ifdef AVER_INSTANCE_SRV
+// The instanced twin: one draw per chunk of a PreviewInstanceBatch, the world from a structured
+// buffer by SV_InstanceID. AVER_INSTANCE_SRV is the t-register ActorPreview computed from its layout,
+// as VoxiRenderer does for its shadow passes. Same pixel shaders as PreviewVS.
+#define AVER_PREVIEW_JOIN2(a, b) a##b
+#define AVER_PREVIEW_JOIN(a, b) AVER_PREVIEW_JOIN2(a, b)
+StructuredBuffer<float4x4> gInstanceWorlds : register(AVER_PREVIEW_JOIN(t, AVER_INSTANCE_SRV));
+
+PreviewOut PreviewVSInstanced(VSIn i, uint instanceID : SV_InstanceID) {
+    return previewTransform(i, gInstanceWorlds[instanceID]);
+}
+#endif
 
 // The wireframe line colour: the draw's own tint lifted toward white, orange when selected.
 float3 previewWireColor(float3 base) {

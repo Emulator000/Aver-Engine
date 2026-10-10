@@ -73,7 +73,7 @@ struct MockFactory final : public rhi::IResourceFactory {
 // One recorded render-context call: its kind, up to four scalars, and any constant payload.
 struct Call {
     enum class Kind { Pipeline, Viewport, Scissor, Targets, ClearDepth, ClearColor, Constants,
-                      ConstantBuffer, DrawMesh, Barrier };
+                      ConstantBuffer, DrawMesh, DrawInstanced, Barrier };
     Kind kind;
     u32 a = 0, b = 0, c = 0, d = 0;
     std::vector<f32> payload;   // for Constants / ConstantBuffer
@@ -106,6 +106,12 @@ struct MockContext final : public rhi::IRenderContext {
         calls.push_back(std::move(c));
     }
     void drawMesh(rhi::MeshHandle m) override { calls.push_back({Call::Kind::DrawMesh, m}); }
+    // a = mesh, b = instance count; payload = the 16-f32 world rows exactly as handed over.
+    void drawMeshInstanced(rhi::MeshHandle m, const f32* worlds, u32 n) override {
+        Call c{Call::Kind::DrawInstanced, m, n};
+        c.payload.assign(worlds, worlds + static_cast<size_t>(n) * 16);
+        calls.push_back(std::move(c));
+    }
     void dispatchMeshFor(rhi::MeshHandle) override {}
     void dispatch(u32, u32, u32) override {}
     void copyBuffer(rhi::BufferHandle, rhi::BufferHandle, u64, u64, u64) override {}
@@ -140,6 +146,13 @@ struct MockDevice final : public rhi::IDevice {
     // the cache returned. IDevice::createMesh defaults to 0, which would make "the handle is stable"
     // trivially true and hide the very failure this records.
     std::vector<std::pair<u32, u32>> meshUploads;   // (vertexCount, indexCount) in call order
+    bool instancedCaps = true;   // SM 6 + DXC, which the instanced pipelines need
+    rhi::DeviceCaps caps() const override {
+        rhi::DeviceCaps c;
+        c.shaderModel = instancedCaps ? 66 : 51;
+        c.dxcAvailable = instancedCaps;
+        return c;
+    }
     rhi::Backend backend() const override { return rhi::Backend::Null; }
     const char* adapterName() const override { return "recording device"; }
     rhi::IResourceFactory* resources() override { return &factory; }
@@ -562,6 +575,176 @@ int main() {
         }
     }
 #endif
+
+    AVER_INFO("=== enabling and disabling ===");
+    {
+        check(p->enabled(), "a preview is enabled by default");
+        PreviewDraw d;
+        d.mesh = 1;
+        p->setDrawList({d});
+        p->setEnabled(false);
+        MockContext off;
+        p->prePass(off);
+        check(off.calls.empty(), "a disabled preview records nothing at all: no barriers, no clears, no draws");
+        p->setEnabled(true);
+        MockContext on;
+        p->prePass(on);
+        check(on.count(Call::Kind::DrawMesh) >= 1 && on.count(Call::Kind::Barrier) == 2,
+              "and draws again, with its two barriers, once re-enabled");
+        p->setDrawList({});
+    }
+
+    AVER_INFO("=== instanced batches ===");
+    {
+        const MockFactory& f = dev.factory;
+        const usize pipesBefore = f.pipelines.size();
+        const usize shadersBefore = f.shaders.size();
+
+        // Rows are .ocinst order: 3 basis rows then the translation, 12 f32 per instance. The
+        // translation x is the instance's index, so a chunk boundary error shows up as a wrong x.
+        constexpr u32 kCount = 2 * kMaxPreviewInstancesPerDraw + 3616;
+        std::vector<f32> worlds(static_cast<size_t>(kCount) * 12, 0.0f);
+        for (u32 i = 0; i < kCount; ++i) {
+            f32* w = worlds.data() + static_cast<size_t>(i) * 12;
+            w[0] = 2.0f; w[4] = 3.0f; w[8] = 4.0f;       // diagonal scale
+            w[9] = static_cast<f32>(i); w[10] = 5.0f; w[11] = 6.0f;
+        }
+        PreviewInstanceBatch b;
+        b.mesh = 7;
+        b.worlds = worlds.data();
+        b.count = kCount;
+        b.baseColor[0] = 0.25f; b.baseColor[1] = 0.5f; b.baseColor[2] = 0.75f; b.baseColor[3] = 1.0f;
+        b.metallic = 0.5f;
+
+        bool hadInst = false;
+        for (const rhi::ShaderDesc& sd : f.shaders) hadInst = hadInst || (sd.entry && std::string(sd.entry) == "PreviewVSInstanced");
+        check(!hadInst, "no instanced shader exists before any batch is drawn");
+        p->setDrawList({});
+        p->setInstanceBatches(&b, 1);
+        MockContext ctx;
+        p->prePass(ctx);
+
+        check(f.pipelines.size() == pipesBefore + 2, "the first batch builds the solid and wireframe instanced pipelines");
+        check(f.shaders.size() == shadersBefore + 1, "and one instanced vertex shader");
+        const rhi::ShaderDesc& iv = f.shaders[shadersBefore];
+        check(iv.entry && std::string(iv.entry) == "PreviewVSInstanced", "the new shader is the instanced entry");
+        check(iv.defines && std::string(iv.defines) == "AVER_INSTANCE_SRV=0",
+              "gInstanceWorlds lands at the register after the layout's SRVs");
+        check(std::string(actorPreviewShaderSource()).find("SV_InstanceID") != std::string::npos,
+              "and the shader source reads the world by SV_InstanceID");
+        check(f.pipelines[pipesBefore].instanced && !f.pipelines[0].instanced,
+              "the instanced twin is marked instanced and the plain one is not");
+        check(f.pipelines[pipesBefore + 1].fill == rhi::FillMode::Wireframe &&
+              f.pipelines[pipesBefore + 1].instanced, "and the second twin is wireframe");
+
+        const std::vector<Call> inst = ctx.ofKind(Call::Kind::DrawInstanced);
+        check(inst.size() == 3, "20000 instances take three instanced calls");
+        check(ctx.count(Call::Kind::DrawMesh) == 0, "and no per-instance draws");
+        if (inst.size() == 3) {
+            check(inst[0].b == kMaxPreviewInstancesPerDraw && inst[1].b == kMaxPreviewInstancesPerDraw &&
+                  inst[2].b == 3616, "chunked at the cap, the remainder last");
+            check(inst[0].a == 7, "against the batch's mesh");
+            check(inst[0].payload[0] == 2.0f && inst[0].payload[3] == 0.0f && inst[0].payload[5] == 3.0f &&
+                  inst[0].payload[10] == 4.0f && inst[0].payload[15] == 1.0f &&
+                  inst[0].payload[12] == 0.0f && inst[0].payload[13] == 5.0f && inst[0].payload[14] == 6.0f,
+                  "12 f32 are expanded to a 4x4 with a (0,0,0,1) fourth column");
+            check(inst[1].payload[12] == static_cast<f32>(kMaxPreviewInstancesPerDraw),
+                  "the second chunk starts at instance 8192");
+            check(inst[2].payload[static_cast<size_t>(3615) * 16 + 12] == static_cast<f32>(kCount - 1),
+                  "and the last chunk ends at the last instance");
+        }
+
+        const std::vector<Call> pipe = ctx.ofKind(Call::Kind::Pipeline);
+        check(pipe.size() == 3 && pipe[2].a == pipesBefore + 1,
+              "one bind for the batch -- the solid instanced pipeline -- after the backdrop and the mesh pipeline");
+        const std::vector<Call> obj = ctx.ofKind(Call::Kind::Constants);
+        check(obj.size() == 1 && obj[0].payload[16] == 0.25f && obj[0].payload[18] == 0.75f &&
+              obj[0].payload[20] == 0.5f, "the tint and material factors reach b1 once per batch");
+        check(ctx.count(Call::Kind::ConstantBuffer) == 1, "with the camera block at b4");
+
+        // Wireframe selects the wireframe twin; the pipelines are not rebuilt.
+        p->setViewMode(PreviewViewMode::Wireframe);
+        MockContext wctx;
+        p->prePass(wctx);
+        const std::vector<Call> wp = wctx.ofKind(Call::Kind::Pipeline);
+        check(wp.size() == 3 && wp[2].a == pipesBefore + 2, "wireframe view draws the batch with the wireframe twin");
+        check(f.pipelines.size() == pipesBefore + 2, "and builds nothing more");
+        p->setViewMode(PreviewViewMode::Lit);
+
+        // Degenerate batches draw nothing and bind nothing.
+        PreviewInstanceBatch bad[3] = {};
+        bad[0].mesh = 0; bad[0].worlds = worlds.data(); bad[0].count = 4;
+        bad[1].mesh = 7; bad[1].worlds = nullptr;       bad[1].count = 4;
+        bad[2].mesh = 7; bad[2].worlds = worlds.data(); bad[2].count = 0;
+        p->setInstanceBatches(bad, 3);
+        MockContext dctx;
+        p->prePass(dctx);
+        check(dctx.count(Call::Kind::DrawInstanced) == 0 && dctx.count(Call::Kind::Pipeline) == 2,
+              "no mesh, no worlds or no instances is skipped");
+
+        // dropDrawsUsing takes batches naming the mesh with it.
+        p->setInstanceBatches(&b, 1);
+        p->dropDrawsUsing(7);
+        MockContext xctx;
+        p->prePass(xctx);
+        check(xctx.count(Call::Kind::DrawInstanced) == 0, "dropDrawsUsing removes batches of the dropped mesh");
+
+        p->setInstanceBatches(nullptr, 0);
+    }
+
+    AVER_INFO("=== instanced batches without instanced pipelines ===");
+    {
+        MockDevice old;
+        old.instancedCaps = false;
+        ActorPreview* q = ActorPreview::create(old, 256);
+        if (!q) { check(false, "a preview creates against a pre-SM6 device"); }
+        else {
+            PreviewShowFlags ng; ng.grid = false;
+            q->setShowFlags(ng);
+            const f32 worlds[24] = {1,0,0, 0,1,0, 0,0,1, 10,0,0,   1,0,0, 0,1,0, 0,0,1, 20,0,0};
+            PreviewInstanceBatch b;
+            b.mesh = 3; b.worlds = worlds; b.count = 2;
+            q->setInstanceBatches(&b, 1);
+            MockContext ctx;
+            q->prePass(ctx);
+            check(old.factory.pipelines.size() == 5, "no instanced pipeline is built");
+            check(ctx.count(Call::Kind::DrawInstanced) == 0 && ctx.count(Call::Kind::DrawMesh) == 2,
+                  "each instance is drawn on its own instead");
+            const std::vector<Call> obj = ctx.ofKind(Call::Kind::Constants);
+            check(obj.size() == 3 && obj[2].payload[12] == 20.0f && obj[2].payload[15] == 1.0f &&
+                  obj[2].payload[16] == b.baseColor[0],
+                  "with its own world in b1 and the batch's tint");
+            delete q;
+        }
+    }
+
+    AVER_INFO("=== external bounds ===");
+    {
+        p->setDrawList({});
+        f32 lo[3], hi[3];
+        check(!p->worldBounds(lo, hi), "an empty list has no bounds");
+
+        const f32 elo[3] = {1000.0f, -50.0f, 0.0f}, ehi[3] = {3000.0f, 50.0f, 400.0f};
+        p->setExternalBounds(elo, ehi);
+        check(p->worldBounds(lo, hi) && lo[0] == 1000.0f && hi[0] == 3000.0f && hi[2] == 400.0f,
+              "external bounds are the bounds of an empty list");
+        p->frameAll();
+        check(std::fabs(p->camera().pivot[0] - 2000.0f) < 1.0f && std::fabs(p->camera().pivot[2] - 200.0f) < 1.0f,
+              "frameAll centres on them");
+        check(p->camera().distance > 2000.0f, "and backs off to fit their span");
+
+        PreviewDraw d;
+        d.mesh = 1;   // the recording device measures no AABB, so this is a point at the origin
+        p->setDrawList({d});
+        check(p->worldBounds(lo, hi) && lo[0] <= 0.0f && hi[0] == 3000.0f,
+              "a draw list is merged with them into one box");
+        p->frameAll();
+        check(std::fabs(p->camera().pivot[0] - 1500.0f) < 1.0f, "frameAll frames the union");
+
+        p->clearExternalBounds();
+        p->setDrawList({});
+        check(!p->worldBounds(lo, hi), "clearing them restores the empty answer");
+    }
 
     AVER_INFO("=== the floor grid ===");
     {

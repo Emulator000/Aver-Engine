@@ -72,6 +72,8 @@ add_executable(Sandbox WIN32
   src/SoundEditor.cpp
   src/ParticleEditor.cpp
   src/FoliageTypeEditor.cpp
+  src/InstanceSetModel.cpp
+  src/PreviewGizmo.cpp
   src/InputSchemeEditor.cpp
   src/TextureEditor.cpp
   src/EditorKeybinds.cpp

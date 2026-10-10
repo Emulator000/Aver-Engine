@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <string>
 #include <vector>
 #include "aver/rhi/ShaderFiles.hpp"   // the preview HLSL is deployed files
 
@@ -205,6 +206,9 @@ ActorPreview::~ActorPreview() {
     if (boundsPipeline_) res_->destroyPipeline(boundsPipeline_);
     if (device_ && gridQuad_) device_->destroyMesh(gridQuad_);
     if (device_ && boundsBox_) device_->destroyMesh(boundsBox_);
+    if (instPipeline_) res_->destroyPipeline(instPipeline_);
+    if (instWirePipeline_) res_->destroyPipeline(instWirePipeline_);
+    if (instVs_) res_->destroyShader(instVs_);
     if (vs_) res_->destroyShader(vs_);
     if (ps_) res_->destroyShader(ps_);
     if (backdropVs_) res_->destroyShader(backdropVs_);
@@ -286,6 +290,7 @@ bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
     gp.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;   // a root CBV
     pipeline_ = res_->createGraphicsPipeline(gp);
     if (!pipeline_) { AVER_ERROR("[Preview] the preview pipeline would not build"); return false; }
+    meshDesc_ = gp;
     createChrome(gp);
 
     uiTextureId_ = device.uiTextureId(color_);
@@ -357,6 +362,42 @@ void ActorPreview::createChrome(const rhi::GraphicsPipelineDesc& meshDesc) {
     if (!backdropPipeline_ || !gridQuad_ || !boundsBox_)
         AVER_WARN("[Preview] preview chrome incomplete: backdrop {}, grid {}, bounds {}",
                   backdropPipeline_ != 0, gridQuad_ != 0, boundsBox_ != 0);
+}
+
+// Builds the instanced twins of the mesh pipelines the first time a batch is drawn, so a preview that
+// never draws one pays nothing. Needs SM 6 + DXC, as Voxi's instanced passes do: the FXC/SM 5.1 path
+// reads garbage world matrices from the structured buffer.
+bool ActorPreview::ensureInstancedPipelines() {
+    if (instTried_) return instPipeline_ != 0;
+    instTried_ = true;
+    const rhi::DeviceCaps caps = device_->caps();
+    if (caps.shaderModel < 60 || !caps.dxcAvailable) {
+        AVER_INFO("[Preview] instanced batches draw one instance per call (SM {}, DXC {})",
+                  caps.shaderModel, caps.dxcAvailable ? "yes" : "no");
+        return false;
+    }
+
+    // gInstanceWorlds sits one register past the layout's last SRV, as in VoxiRenderer.
+    instDefines_ = "AVER_INSTANCE_SRV=" + std::to_string(rhi::declaredSrvCount(meshDesc_.layout));
+    rhi::ShaderDesc vd;
+    vd.source = actorPreviewShaderSource();
+    vd.prelude = rhi::sharedShaderPrelude();
+    vd.entry = "PreviewVSInstanced";
+    vd.stage = rhi::ShaderStage::Vertex;
+    vd.defines = instDefines_.c_str();
+    instVs_ = res_->createShader(vd);
+    if (!instVs_) { AVER_WARN("[Preview] the instanced vertex shader would not compile"); return false; }
+
+    rhi::GraphicsPipelineDesc gp = meshDesc_;
+    gp.vs = instVs_;
+    gp.instanced = true;
+    instPipeline_ = res_->createGraphicsPipeline(gp);
+    rhi::GraphicsPipelineDesc wd = gp;
+    wd.fill = rhi::FillMode::Wireframe;
+    wd.cull = rhi::CullMode::None;
+    instWirePipeline_ = res_->createGraphicsPipeline(wd);
+    if (!instPipeline_) AVER_WARN("[Preview] the instanced pipeline would not build");
+    return instPipeline_ != 0;
 }
 
 #if AVER_MODULE_PBR
@@ -487,8 +528,12 @@ bool ActorPreview::resize(u32 width, u32 height) {
 
 // Points the camera at the whole draw list.
 void ActorPreview::frameAll() {
-    if (draws_.empty()) { camera_.distance = 400.0f; camera_.pivot[0] = camera_.pivot[1] = camera_.pivot[2] = 0.0f; return; }
+    if (draws_.empty() && !haveExternalBounds_) {
+        camera_.distance = 400.0f; camera_.pivot[0] = camera_.pivot[1] = camera_.pivot[2] = 0.0f; return;
+    }
     f32 lo[3] = {1e30f, 1e30f, 1e30f}, hi[3] = {-1e30f, -1e30f, -1e30f};
+    if (haveExternalBounds_)
+        for (int i = 0; i < 3; ++i) { lo[i] = extLo_[i]; hi[i] = extHi_[i]; }
     for (const PreviewDraw& d : draws_) {
         const f32 r = d.boundsRadius * maxAxisScale(d.world);
         for (int i = 0; i < 3; ++i) {
@@ -510,6 +555,10 @@ void ActorPreview::frameAll() {
 bool ActorPreview::worldBounds(f32 lo[3], f32 hi[3]) const {
     for (int i = 0; i < 3; ++i) { lo[i] = 1e30f; hi[i] = -1e30f; }
     bool any = false;
+    if (haveExternalBounds_) {
+        any = true;
+        for (int i = 0; i < 3; ++i) { lo[i] = extLo_[i]; hi[i] = extHi_[i]; }
+    }
     for (const PreviewDraw& d : draws_) {
         if (!d.mesh) continue;
         any = true;
@@ -552,9 +601,63 @@ void ActorPreview::buildViewProj(f32 out[16]) const {
     multiply(view, proj, out);
 }
 
+// Draws batches_: per batch one b4 and b1 write, then one instanced call per chunk of at most
+// kMaxPreviewInstancesPerDraw. Same shader and lighting as a plain PreviewDraw.
+void ActorPreview::drawInstanceBatches(rhi::IRenderContext& ctx, const void* frame, u32 frameBytes,
+                                       bool wire, rhi::PipelineHandle meshPipeline) {
+    if (batches_.empty()) return;
+    bool any = false;
+    for (const PreviewInstanceBatch& b : batches_) any = any || (b.mesh && b.worlds && b.count);
+    if (!any) return;
+
+    const bool instOk = ensureInstancedPipelines();
+    const rhi::PipelineHandle instPipe = wire ? instWirePipeline_ : instPipeline_;
+    const bool instanced = instOk && instPipe != 0;
+    // The one-instance-per-call fallback goes through the plain pipeline, wireframe included.
+    ctx.setPipeline(instanced ? instPipe : meshPipeline);
+
+    for (const PreviewInstanceBatch& b : batches_) {
+        if (!b.mesh || !b.worlds || !b.count) continue;
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, frame, frameBytes);
+
+        // b1 for the pixel shader: tint and material factors. The world is identity, unread by the
+        // instanced vertex shader and overwritten per instance by the fallback.
+        f32 obj[rhi::kObjectConstantDwords] = {};
+        obj[0] = obj[5] = obj[10] = obj[15] = 1.0f;
+        std::memcpy(obj + 16, b.baseColor, sizeof b.baseColor);
+        obj[20] = b.metallic; obj[21] = b.roughness;
+        ctx.setConstants(rhi::kObjectConstantRegister, obj, rhi::kObjectConstantDwords);
+
+        for (u32 first = 0; first < b.count; first += kMaxPreviewInstancesPerDraw) {
+            const u32 n = std::min(kMaxPreviewInstancesPerDraw, b.count - first);
+            // 12 f32 (.ocinst) to the 16 the structured buffer is indexed in.
+            instScratch_.resize(static_cast<usize>(n) * 16);
+            for (u32 i = 0; i < n; ++i) {
+                const f32* s = b.worlds + static_cast<usize>(first + i) * 12;
+                f32* d = instScratch_.data() + static_cast<usize>(i) * 16;
+                for (int r = 0; r < 4; ++r) {
+                    d[r * 4 + 0] = s[r * 3 + 0];
+                    d[r * 4 + 1] = s[r * 3 + 1];
+                    d[r * 4 + 2] = s[r * 3 + 2];
+                    d[r * 4 + 3] = r == 3 ? 1.0f : 0.0f;
+                }
+            }
+            if (instanced) {
+                ctx.drawMeshInstanced(b.mesh, instScratch_.data(), n);
+            } else {
+                for (u32 i = 0; i < n; ++i) {
+                    std::memcpy(obj, instScratch_.data() + static_cast<usize>(i) * 16, 16 * sizeof(f32));
+                    ctx.setConstants(rhi::kObjectConstantRegister, obj, rhi::kObjectConstantDwords);
+                    ctx.drawMesh(b.mesh);
+                }
+            }
+        }
+    }
+}
+
 // Draws the preview's targets: one barrier in, the draw list, one barrier back out for the UI.
 void ActorPreview::prePass(rhi::IRenderContext& ctx) {
-    if (!ready()) return;
+    if (!ready() || !enabled_) return;
 
 #if AVER_MODULE_PBR
     // DOES ANYTHING IN THIS FRAME'S LIST WANT THE MATERIAL PIPELINE. Two independent reasons a draw
@@ -755,6 +858,7 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     // After the meshes, so the grid depth-tests against them. Nudged below the floor so a mesh face
     // lying on it (a plane, a slab) wins rather than z-fighting.
     frame.ambient[3] = 0.0f;
+    drawInstanceBatches(ctx, &frame, sizeof(frame), wire, meshPipeline);
     if (show_.grid && gridPipeline_ && gridQuad_) {
         ctx.setPipeline(gridPipeline_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frame, sizeof(frame));

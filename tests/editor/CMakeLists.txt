@@ -274,6 +274,20 @@ target_include_directories(FoliageTypeEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/san
 target_link_libraries(FoliageTypeEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(FoliageTypeEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# InstanceSetModelTest -- the instance-set editing model (.ocinst select / add / delete / duplicate /
+# move, delta undo, spatial index, frustum culling, ray picking) and the preview gizmo maths.
+#
+# Compiles sandbox/src/InstanceSetModel.cpp and PreviewGizmo.cpp directly (Sandbox is
+# add_executable-only), AVER_WITH_IMGUI left undefined: PreviewGizmo.cpp's draw() sits behind it and
+# everything else is ImGui-free by design. Only needs the base Aver.Formats (.ocinst lives there).
+add_executable(InstanceSetModelTest
+  src/InstanceSetModelTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/InstanceSetModel.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/PreviewGizmo.cpp)
+target_include_directories(InstanceSetModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(InstanceSetModelTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(InstanceSetModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ProjectCopyTest -- copyProjectTree, the "Upgrade a Copy" branch of the upgrade prompt.
 #
 # Compiles sandbox/src/ProjectScaffold.cpp directly, for EditorPrefsTest's precedent above (Sandbox
