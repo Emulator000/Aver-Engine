@@ -2126,6 +2126,7 @@ void SandboxApp::buildUI(Engine& e) {
 #endif
             // Show Navigation works even without SCENE (reads a baked .ocnav).
             ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
+            ImGui::MenuItem("Show Post Volumes", nullptr, &showPostVolumes_);
 #if AVER_MODULE_SCENE
             ImGui::MenuItem("Show Decals", nullptr, &showDecals_);
             if (ImGui::IsItemHovered())
@@ -2235,6 +2236,12 @@ void SandboxApp::buildUI(Engine& e) {
         if (ImGui::Selectable("Decal")) spawnDecalAtCamera();
         uiReg_.track("toolbar.add.decal");
 #endif
+        if (ImGui::Selectable("Post Process Volume")) {
+            postVolumeTools_.addAtCamera(levelHeader_.postVolumes, viewPos());
+            sel_ = kSelPostVolume; selEntity_ = kInvalidId;
+            markLevelUnsaved();
+        }
+        uiReg_.track("toolbar.add.postProcessVolume");
         ImGui::EndPopup();
     }
     ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();

@@ -1990,6 +1990,7 @@ void SandboxApp::onRender(Engine& e)  {
     // it draws on top of geometry by design.
     if (!noEditorChrome_) {
         drawGizmo(e);
+        postVolumeTools_.drawOverlay(*e.device(), levelHeader_.postVolumes, showPostVolumes_);
 #if AVER_MODULE_SCENE
         // The selected decal's projector box and face handles (dim boxes for every decal under Show > Decals).
         decalGizmo_.draw(*e.device(), scene::World::instance(),

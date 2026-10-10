@@ -21,3 +21,10 @@ set_target_properties(PlayMobilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMA
 add_executable(LevelSequenceTest src/LevelSequenceTest.cpp)
 target_link_libraries(LevelSequenceTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
 set_target_properties(LevelSequenceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PostVolumesTest -- the post-process volume blend: weights, per-field lerp, priority, the grading-LUT
+# crossfade (against a fake resolver), and that every POSTVOLUME key reads back and re-applies as a no-op.
+# Arithmetic over rhi::PostSettings only: no device, no window.
+add_executable(PostVolumesTest src/PostVolumesTest.cpp)
+target_link_libraries(PostVolumesTest PRIVATE Aver.Runtime.Game.Core Aver.Core)
+set_target_properties(PostVolumesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

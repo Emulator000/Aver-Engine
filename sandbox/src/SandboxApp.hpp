@@ -145,6 +145,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // dependency either.
 #include "InputSchemeEditor.hpp"
 #include "SoftBodyPanel.hpp"
+#include "PostVolumeTools.hpp"
 #if AVER_MODULE_VOXI
 #include "SceneLightFeed.hpp"
 #include "DecalLevelIo.hpp"
@@ -3023,6 +3024,7 @@ private:
     std::vector<MeshObj> objects_;
     // Selection: sel_ >= 0 is objects_ index, -1 is nothing, -2/-3/-4 sun/sky/post, kSelScene is entity.
     static constexpr int kSelScene = -5;
+    static constexpr int kSelPostVolume = -6;   // the Post Process Volumes entry (levelHeader_.postVolumes)
     int sel_ = 1;
     // AvId (generic "nothing selected" sentinel).
     AvId selEntity_ = kInvalidId;
@@ -3183,6 +3185,8 @@ private:
     f32  fogMatchTargetOpacity_ = 0.9f;   // opacity WANTED at the load boundary itself
 #endif
     rhi::PostSettings post_{};
+    editor::PostVolumeTools postVolumeTools_;   // POSTVOLUME records: Add menu, boxes, Details, viewport blend
+    bool showPostVolumes_ = true;               // Show > Post Volumes: every volume's box, not just the selected one's
     // What this editor last handed the device, so per-frame push can tell when something ELSE (console post.* vars) changed it.
     rhi::PostSettings postPushed_{};
     bool postPushedValid_ = false;

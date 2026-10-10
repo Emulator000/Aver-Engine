@@ -275,6 +275,7 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         // SPAWN, the environment numbers the editor does not expose, and the header comments
         // (w.notes: credits/licence lines), which saveLevel writes straight back out.
         levelHeader_ = w;
+        postVolumeTools_.reset(eng.device());   // the previous level's selection and LUT textures
         levelHeader_.placements.clear();
         levelHeader_.pcgVolumes.clear();
         levelHeader_.lights.clear();   // rebuilt from the live CLight entities by saveLevel

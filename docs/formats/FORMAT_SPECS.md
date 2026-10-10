@@ -1017,6 +1017,29 @@ LIGHT kind rect pos 0 0 300 rot 0 90 0 colour 1 1 1 intensity 8000 size 120 60 n
 - Written after `WAVE` and before `FOLIAGE`; nothing is written when there are none, so a level without
   lights is byte-identical to before, and a parser that does not know the record skips it.
 
+**`POSTVOLUME`** (`OcWorldData::postVolumes`, `OcPostVolume` in `OcWorld.hpp`) overrides camera post-processing
+inside a box, or everywhere, blended by where the camera is (`docs/rendering/POST_VOLUMES.md`). One line,
+case-insensitive keywords, any order, unknown tokens skipped:
+
+```
+POSTVOLUME name Cave%20Mouth bounds -100 -200 0 1000 500 300 blend 150 priority 3 weight 0.75 saturation 0.4 vignette 0.6 lift 0.01 -0.02 0.03 lut Grades/teal%20orange.cube
+POSTVOLUME infinite autoexposure 0 bloom 0.3
+```
+
+- `infinite` covers the whole level; otherwise `bounds x0 y0 z0 x1 y1 z1` is a world-axis-aligned box in cm
+  (a backwards box is read as the same box; a volume naming neither gets a 10 m cube at the origin). `blend` is
+  the distance in cm outside the box over which the weight ramps to zero (omitted/0 = hard edge), `priority`
+  an integer (higher applies later and wins; default 0), `weight` 0..1 (default 1).
+- Every other `key value...` pair overrides one post setting and is **written only when set**; an unstated
+  field keeps the level's value. Keys (`kOcPostKeys` in `OcWorld.hpp`): `exposure autoexposure exposuremin
+  exposuremax exposurekey nightvision bloom bloomthreshold bloomknee tonemap maxradiance localshadows
+  localhighlights vignette grain chromatic lensflare motionblur dof doffocus dofstop dofmm saturation contrast
+  lift gamma gain wbk wbtint lutintensity`. `lift`/`gamma`/`gain` take three numbers (r g b), the rest one;
+  switches (`autoexposure`, `dof`) are 0 or 1. A key followed by too few tokens is dropped.
+- `lut <path>` is a content-relative `.cube` 3D LUT (percent-encoded like `name`).
+- Written after `DECAL` and before `FOLIAGE`; nothing is written when there are none, so a level without volumes
+  is byte-identical to before, and a parser that does not know the record skips it.
+
 ---
 
 ## 11a. `.ocparticle` — particle effect (text)

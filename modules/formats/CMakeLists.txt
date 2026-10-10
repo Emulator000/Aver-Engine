@@ -1,6 +1,8 @@
 aver_add_module(Aver.Formats
   SOURCES
     src/Avr1.cpp
+    # .cube 3D colour LUTs for post-process volumes and grading: text and arithmetic, no device.
+    src/CubeLut.cpp
     # The GI derived-data cache (.cache). Base target: it is the AVR1 container and arithmetic --
     # no device, no renderer -- which is what lets its test run with neither.
     src/GiCache.cpp

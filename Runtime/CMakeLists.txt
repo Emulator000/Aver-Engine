@@ -38,6 +38,8 @@ aver_add_module(Aver.Runtime.Game.Core
     src/GameContent.cpp
     src/GameLevel.cpp
     src/GameFoliage.cpp
+    # POSTVOLUME blending and the .cube LUT texture cache (rhi + formats only, no scene).
+    src/GamePostVolumes.cpp
     src/GameLandscape.cpp
     src/GameRender.cpp
     src/GameInput.cpp

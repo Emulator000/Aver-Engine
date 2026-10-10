@@ -947,6 +947,8 @@ void GameApp::installLevelHooks(Engine& e) {
     hooks.groundHeightAt = [this](f64 x, f64 y, f64& outZ) { return landscape_.groundHeightAt(x, y, outZ); };
 #  endif
     hooks.afterUnload = [this, &e] {
+        postVolumes_.clear();
+        postLuts_.clear(e.device());
         sequencePlayer_ = game::SequencePlayer{};
 #  if AVER_MODULE_FLUIDS
         water_.unload();
@@ -972,6 +974,8 @@ void GameApp::installLevelHooks(Engine& e) {
         // Records the placement loop does not know: bare CDecal entities, and prefab instances rebuilt from
         // their assets with their overrides on top.
         game::spawnLevelDecals(scene::World::instance(), loaded.world.decals);
+        postVolumes_ = loaded.world.postVolumes;
+        if (rhi::IDevice* dev = e.device()) postLuts_.preload(*dev, project_.contentDir(), postVolumes_);
         if (prefabSys_) prefabSys_->instantiateLevelInstances(loaded.world.prefabInstances);
         // The level's first sequence, bound to its placements' entities; it starts with the session.
         sequencePlayer_ = game::SequencePlayer{};
@@ -1659,7 +1663,9 @@ void GameApp::pushFrame(Engine& e) {
 #endif
     // Black: a game has no outside; anything the sky doesn't cover should read as a bug, not a colour.
     dev->setClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    dev->setPostProcess(post_);
+    dev->setPostProcess(postVolumes_.empty()
+                            ? post_
+                            : blendPostVolumes(postVolumes_, post_, camPos_, postLuts_.resolver(*dev, project_.contentDir())));
 }
 
 void GameApp::onInit(Engine& e) {
@@ -2216,6 +2222,7 @@ void GameApp::onShutdown(Engine& e) {
 #endif
     level_.unload();
 #endif
+    postLuts_.clear(dev);
 #if AVER_MODULE_FLUIDS
     // After level's volumes were despawned, before physics: retiring live volume calls into solver.
     water_.shutdown(dev);

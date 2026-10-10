@@ -74,6 +74,7 @@ add_executable(Sandbox WIN32
   src/FoliageTypeEditor.cpp
   src/InstanceSetModel.cpp
   src/InstanceSetEditor.cpp
+  src/PostVolumeTools.cpp
   src/PreviewGizmo.cpp
   src/InputSchemeEditor.cpp
   src/TextureEditor.cpp

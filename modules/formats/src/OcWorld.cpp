@@ -5,6 +5,7 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -179,6 +180,26 @@ const char* seqInterpName(OcSeqInterp i) {
 }
 
 } // namespace
+
+const OcPostValue* OcPostVolume::find(std::string_view key) const {
+    for (const OcPostValue& v : values)
+        if (equalsCI(v.key, key)) return &v;
+    return nullptr;
+}
+
+void OcPostVolume::set(std::string_view key, const f64* v, i32 count) {
+    OcPostValue* slot = nullptr;
+    for (OcPostValue& e : values)
+        if (equalsCI(e.key, key)) { slot = &e; break; }
+    if (!slot) { values.emplace_back(); slot = &values.back(); slot->key.assign(key); for (char& ch : slot->key) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch))); }
+    for (i32 i = 0; i < 3; ++i) slot->v[i] = (v && i < count) ? v[i] : 0.0;
+}
+
+void OcPostVolume::unset(std::string_view key) {
+    values.erase(std::remove_if(values.begin(), values.end(),
+                                [&](const OcPostValue& e) { return equalsCI(e.key, key); }),
+                 values.end());
+}
 
 // Parses an .ocworld or .ocmap from memory. Unknown records are skipped.
 //
@@ -596,6 +617,35 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "disabled"))      dc.disabled = true;
             }
             out.decals.push_back(std::move(dc));
+        } else if (equalsCI(key, "POSTVOLUME")) {
+            // Sparse overrides: any token in the key table takes its value count; anything else is skipped.
+            OcPostVolume pv;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")     && i + 1 < t.size()) pv.name = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "infinite")) pv.infinite = true;
+                else if (equalsCI(t[i], "bounds")   && i + 6 < t.size()) {
+                    for (usize c = 0; c < 6; ++c) pv.bounds[c] = parseF64(t[i + 1 + c]);
+                    pv.infinite = false;
+                    i += 6;
+                } else if (equalsCI(t[i], "blend")    && i + 1 < t.size()) pv.blendCm = std::max(0.0, parseF64(t[++i]));
+                else if (equalsCI(t[i], "priority") && i + 1 < t.size()) pv.priority = parseI32(t[++i]);
+                else if (equalsCI(t[i], "weight")   && i + 1 < t.size()) pv.weight = parseF64(t[++i], pv.weight);
+                else if (equalsCI(t[i], "lut")      && i + 1 < t.size()) pv.lut = percentDecode(t[++i]);
+                else {
+                    for (const OcPostKeyInfo& ki : kOcPostKeys) {
+                        if (!equalsCI(t[i], ki.key) || i + static_cast<usize>(ki.count) >= t.size()) continue;
+                        f64 v[3] = {0, 0, 0};
+                        for (i32 c = 0; c < ki.count; ++c) v[c] = parseF64(t[i + 1 + static_cast<usize>(c)]);
+                        pv.set(ki.key, v, ki.count);
+                        i += static_cast<usize>(ki.count);
+                        break;
+                    }
+                }
+            }
+            // A bounds box written backwards is the same box.
+            for (usize a = 0; a < 3; ++a)
+                if (pv.bounds[a] > pv.bounds[a + 3]) std::swap(pv.bounds[a], pv.bounds[a + 3]);
+            out.postVolumes.push_back(std::move(pv));
         } else if (equalsCI(key, "STREAM")) {
             out.stream.enabled = true;
             for (usize i = 1; i < t.size(); ++i) {
@@ -1123,6 +1173,28 @@ std::string writeOcworld(const OcWorldData& w) {
             if (dc.noNormal)    s += " nonormal";
             if (dc.noRoughness) s += " noroughness";
             if (dc.disabled)    s += " disabled";
+            s += "\n";
+        }
+    }
+
+    if (!w.postVolumes.empty()) {
+        s += "\n";
+        for (const OcPostVolume& pv : w.postVolumes) {
+            s += "POSTVOLUME";
+            if (!pv.name.empty()) { s += " name "; s += percentEncode(pv.name); }
+            if (pv.infinite) s += " infinite";
+            else s += " bounds " + num(pv.bounds[0]) + " " + num(pv.bounds[1]) + " " + num(pv.bounds[2]) + " " +
+                      num(pv.bounds[3]) + " " + num(pv.bounds[4]) + " " + num(pv.bounds[5]);
+            if (pv.blendCm > 0.0)   s += " blend " + num(pv.blendCm);
+            if (pv.priority != 0)   s += " priority " + std::to_string(pv.priority);
+            if (pv.weight != 1.0)   s += " weight " + num(pv.weight);
+            for (const OcPostValue& v : pv.values) {
+                const OcPostKeyInfo* ki = ocPostKeyInfo(v.key);
+                if (!ki) continue;   // a key the table does not know is not ours to write
+                s += " "; s += ki->key;
+                for (i32 c = 0; c < ki->count; ++c) s += " " + num(v.v[c]);
+            }
+            if (!pv.lut.empty()) { s += " lut "; s += percentEncode(pv.lut); }
             s += "\n";
         }
     }

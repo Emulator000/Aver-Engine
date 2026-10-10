@@ -1602,6 +1602,12 @@ void SandboxApp::buildOutlinerPanel() {
     uiReg_.track("outliner.sky");
     if (ImGui::Selectable("  Post Process", sel_==-4))            { sel_=-4; selEntity_=kInvalidId; }
     uiReg_.track("outliner.postProcess");
+    {
+        char pvLabel[64];
+        std::snprintf(pvLabel, sizeof pvLabel, "  Post Process Volumes (%zu)", levelHeader_.postVolumes.size());
+        if (ImGui::Selectable(pvLabel, sel_==kSelPostVolume)) { sel_=kSelPostVolume; selEntity_=kInvalidId; }
+        uiReg_.track("outliner.postVolumes");
+    }
     ImGui::End();
 }
 
@@ -2670,6 +2676,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
         ImGui::Separator();
         ImGui::SliderFloat("Bloom", &post_.bloomIntensity, 0.0f, 1.0f, "%.3f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zero skips the whole bloom pyramid, not just its weight");
+    } else if (sel_==kSelPostVolume){
+        if (postVolumeTools_.drawDetails(e.device(), project_.contentDir(), levelHeader_.postVolumes, post_, viewPos()))
+            markLevelUnsaved();
     } else ImGui::TextDisabled("Select an actor in the World Outliner");
     ImGui::End();
 

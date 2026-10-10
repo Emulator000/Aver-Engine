@@ -2457,8 +2457,11 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         e.device()->setPostProcess(dbg);
         postPushed_ = dbg;
     } else {
-        e.device()->setPostProcess(post_);
-        postPushed_ = post_;
+        // The level's post volumes blend onto a copy: post_ stays the base the panels edit (POST_VOLUMES.md).
+        const rhi::PostSettings shown = postVolumeTools_.blend(*e.device(), project_.contentDir(),
+                                                              levelHeader_.postVolumes, post_, viewPos());
+        e.device()->setPostProcess(shown);
+        postPushed_ = shown;
     }
     postPushedValid_ = true;
 }

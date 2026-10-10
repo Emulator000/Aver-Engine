@@ -1351,6 +1351,7 @@ std::string SandboxApp::selectionLabel() const {
     if (sel_ == -2) return "Directional Light (Sun)";
     if (sel_ == -3) return "Sky + Atmosphere";
     if (sel_ == -4) return "Post Process";
+    if (sel_ == kSelPostVolume) return "Post Process Volumes";
     return "nothing selected";
 }
 

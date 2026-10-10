@@ -31,6 +31,7 @@
 #include "aver/game/GameContent.hpp"
 #include "aver/game/GameLevel.hpp"
 #include "aver/game/GameFoliage.hpp"
+#include "aver/game/GamePostVolumes.hpp"
 #if AVER_WITH_SYNAPSE_AI && AVER_MODULE_SYNAPSE_GPU
 #  include "aver/synapse/CrowdGpu.hpp"
 #endif
@@ -299,6 +300,9 @@ private:
     // ---- environment ----
     rhi::SkyAtmosphere sky_;
     rhi::PostSettings  post_;
+    // The level's POSTVOLUME records, blended onto post_ at the camera each frame (GamePostVolumes.hpp).
+    std::vector<fmt::OcPostVolume> postVolumes_;
+    PostLutCache                   postLuts_;
     // Top-of-atmosphere colour (white; sky tints it by elevation).
     f32 sunColor_[3]  = {1.0f, 1.0f, 1.0f};
     f32 sunAmbient_   = 1.0f;

@@ -554,6 +554,80 @@ struct OcDecal {
     bool disabled = false;                  // present but not projected
 };
 
+// One POSTVOLUME record: a box (or the whole level) that overrides camera post-processing while the view is in
+// it, blended onto the level's base settings (Runtime/include/aver/game/GamePostVolumes.hpp;
+// docs/rendering/POST_VOLUMES.md). Fields are SPARSE: a volume carries only what it overrides, as key/value
+// pairs from ocPostKeys() below, so formats stays free of rhi::PostSettings and a field added there needs a
+// table row here, not a format change. Unknown keys in a file are skipped.
+struct OcPostValue {
+    std::string key;                        // lower-case, one of ocPostKeys()
+    f64 v[3] = {0, 0, 0};                   // count (per the key table) values are meaningful
+};
+
+struct OcPostVolume {
+    std::string name;
+    bool infinite = false;                  // covers the whole level; bounds is ignored
+    f64 bounds[6] = {-500, -500, -500, 500, 500, 500};   // cm, world axis-aligned: x0 y0 z0 x1 y1 z1
+    f64 blendCm = 0;                        // the weight ramps to 0 over this distance outside the box
+    i32 priority = 0;                       // higher applies later, so wins on conflicting fields
+    f64 weight = 1;                         // 0..1 overall strength
+    std::vector<OcPostValue> values;        // overridden fields only, file order
+    std::string lut;                        // content-relative .cube path; empty = none
+
+    const OcPostValue* find(std::string_view key) const;
+    // Sets (or replaces) an override; `count` values are copied from `v`.
+    void set(std::string_view key, const f64* v, i32 count);
+    void unset(std::string_view key);
+};
+
+// What a POSTVOLUME key means to the editor and the blender. kind: 0 float, 1 on/off, 2 whole-number choice.
+struct OcPostKeyInfo {
+    const char* key;
+    const char* label;
+    i32 count;          // values on the line (3 for lift/gamma/gain)
+    i32 kind;
+    f32 lo, hi;         // slider range
+};
+
+inline constexpr OcPostKeyInfo kOcPostKeys[] = {
+    {"exposure",        "Exposure (manual)",     1, 0, 0.01f, 64.0f},
+    {"autoexposure",    "Eye Adaptation",        1, 1, 0, 1},
+    {"exposuremin",     "Eye Adaptation Min",    1, 0, 0.01f, 16.0f},
+    {"exposuremax",     "Eye Adaptation Max",    1, 0, 1.0f, 256.0f},
+    {"exposurekey",     "Target Brightness",     1, 0, 0.01f, 1.0f},
+    {"nightvision",     "Night Vision",          1, 0, 0, 1},
+    {"bloom",           "Bloom Intensity",       1, 0, 0, 2.0f},
+    {"bloomthreshold",  "Bloom Threshold",       1, 0, 0, 32.0f},
+    {"bloomknee",       "Bloom Knee",            1, 0, 0, 1},
+    {"tonemap",         "Tonemap",               1, 2, 0, 2},
+    {"maxradiance",     "Max Radiance",          1, 0, 0, 64.0f},
+    {"localshadows",    "Local Exposure Shadows",1, 0, 0, 1},
+    {"localhighlights", "Local Exposure Highlights", 1, 0, 0, 1},
+    {"vignette",        "Vignette",              1, 0, 0, 1},
+    {"grain",           "Film Grain",            1, 0, 0, 1},
+    {"chromatic",       "Chromatic Aberration",  1, 0, 0, 1},
+    {"lensflare",       "Lens Flare",            1, 0, 0, 1},
+    {"motionblur",      "Motion Blur",           1, 0, 0, 1},
+    {"dof",             "Depth Of Field",        1, 1, 0, 1},
+    {"doffocus",        "Focus Distance (cm)",   1, 0, 10.0f, 100000.0f},
+    {"dofstop",         "Aperture (f-stop)",     1, 0, 0.7f, 32.0f},
+    {"dofmm",           "Focal Length (mm)",     1, 0, 10.0f, 300.0f},
+    {"saturation",      "Saturation",            1, 0, 0, 2.0f},
+    {"contrast",        "Contrast",              1, 0, 0, 2.0f},
+    {"lift",            "Lift",                  3, 0, -0.5f, 0.5f},
+    {"gamma",           "Gamma",                 3, 0, 0.2f, 3.0f},
+    {"gain",            "Gain",                  3, 0, 0, 4.0f},
+    {"wbk",             "White Balance (K)",     1, 0, 1500.0f, 15000.0f},
+    {"wbtint",          "White Balance Tint",    1, 0, -1, 1},
+    {"lutintensity",    "Grading LUT Intensity", 1, 0, 0, 1},
+};
+
+inline const OcPostKeyInfo* ocPostKeyInfo(std::string_view key) {
+    for (const OcPostKeyInfo& k : kOcPostKeys)
+        if (key == k.key) return &k;
+    return nullptr;
+}
+
 // STREAM header record: residency policy for the level's placements (docs/LEVEL_STREAMING.md).
 struct OcStreamSettings {
     bool enabled = false;
@@ -661,6 +735,9 @@ struct OcWorldData : OcWorldEnv {
 
     // DECAL records, in file order. Empty is the ordinary case: a level with none loads and writes as before.
     std::vector<OcDecal> decals;
+
+    // POSTVOLUME records, in file order. Empty is the ordinary case: the base post settings apply everywhere.
+    std::vector<OcPostVolume> postVolumes;
 
     std::vector<OcWorldPlacement> placements;
 
