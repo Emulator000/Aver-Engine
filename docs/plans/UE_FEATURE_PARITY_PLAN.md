@@ -77,6 +77,8 @@ Tonight: wave 0, then wave 1 as far as it gets verified.
   - The selection becomes CMake cache options / a preset.
   - The `scripts/module-guard-audit.py` and `module-matrix.ps1` checks are kept green.
 
+- **V. Vulkan Voxi shading** (found 2026-10-11, before wave 1b): Voxi's scene shading on Vulkan is wrong (black or garbage surfaces on a plain level, identical on the 2026-10-02 baseline build), so it is not a regression from this work. Parity needs it, and the Vulkan translucent replay (committed) cannot be judged until it is fixed. Suspects: the bindless gap, descriptor and register mapping, and the b1/b2 push-constant traps.
+
 ## Owner decisions (2026-10-11)
 - Scope and order approved. **Upgrade existing systems, do not add parallel ones**: virtualized geometry on Trifactor, GI and lighting in Voxi, particles in modules/particles, and so on.
 - Hair (#16) and Mass (#22) are done only if everything else finishes before the owner is back; otherwise the owner decides.
