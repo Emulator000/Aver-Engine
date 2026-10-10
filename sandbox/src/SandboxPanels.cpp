@@ -294,6 +294,27 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
     else if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
     ImGui::EndDisabled();
+    // The volume inside a transmissive material. Distance is the on/off (<= 0 = no volume), and the
+    // scatter pair does nothing without one, so those two are disabled at 0 like Subsurface above.
+    changed |= track(ImGui::DragFloat("Attenuation Distance (cm)", &d->attenuationDistance, 1.0f, 0.0f, 100000.0f, "%.1f"));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Distance over which light is reduced to Attenuation Color. 0 = no volume. "
+                          "Water is about 100 with (0.65, 0.93, 0.97).");
+    ImGui::BeginDisabled(d->attenuationDistance <= 0.0f);
+    changed |= track(ImGui::ColorEdit3("Attenuation Color", d->attenuationColor));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Fraction of each channel left after Attenuation Distance. Low channels die "
+                          "first: red in water, so depth goes cyan.");
+    changed |= track(ImGui::ColorEdit3("Scatter Color", d->scatterColor, ImGuiColorEditFlags_Float));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Single-scattering albedo per channel (linear, 0-1): the share of extinction "
+                          "that scatters light toward the eye instead of absorbing it. Gives deep water "
+                          "its haze. Black = pure absorber; open water is about (0.05, 0.35, 0.55).");
+    changed |= track(ImGui::SliderFloat("Scatter Anisotropy", &d->scatterAnisotropy, -0.99f, 0.99f));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Henyey-Greenstein g: 0 scatters evenly, above 0 favours forward (haze "
+                          "brightens toward the sun), below 0 favours back.");
+    ImGui::EndDisabled();
     changed |= track(ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f));
     changed |= track(ImGui::DragFloat("Light Intensity", &d->lightIntensity, 0.05f, 0.0f, 20.0f));
     if (ImGui::IsItemHovered())

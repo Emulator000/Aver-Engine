@@ -340,6 +340,13 @@ PARAM uvTiling 200.0                # world CENTIMETRES per tile; read only unde
 # PARAM subsurfaceWeight 0.6        # [0,1] how far light wraps past the terminator; 0 = off
 # PARAM subsurfaceRadius 0.4        # [0,1] thickness proxy; widens the back-scatter lobe
 
+# Optional: the medium inside a transmissive material (water, glass). Off unless attenuationDistance > 0.
+# PARAM attenuationColor 0.65 0.93 0.97   # transmittance per channel after attenuationDistance
+# PARAM attenuationDistance 100.0         # centimetres; <= 0 = no volume
+# Optional: single scattering in that volume. Off unless some scatterColor channel is > 0.
+# PARAM scatterColor 0.05 0.35 0.55       # LINEAR albedo sigma_s/sigma_t per channel, [0,1]; not sRGB
+# PARAM scatterAnisotropy 0.3             # Henyey-Greenstein g, [-0.99, 0.99]; 0 isotropic
+
 # Optional: makes this material a small sphere LIGHT, shaded like the sun, in ray-driven mode only
 # (staged D3D12; Settings::rayDrivenStages 1/2). Off unless lightIntensity is present and > 0.
 # PARAM lightIntensity 1.0          # multiplier on the light emissiveFactor+size already cast; 1=physical
@@ -396,6 +403,8 @@ a lamp may legitimately want to be far brighter than what its own glow and size 
 Like `slopeBlend`/`subsurfaceWeight`, the line is **omitted entirely when off** — `writeOcmat` emits
 it only `if (d.lightIntensity > 0.0f)` — for the same byte-stability reason: 0 is the feature's own
 off switch, and packMaterial's `MaterialFlag_Light` tracks it exactly.
+
+`attenuationColor`/`attenuationDistance` describe a Beer-Lambert volume: the colour is a **transmittance** per channel after exactly `attenuationDistance` centimetres (clamped to [1e-4, 1] — a channel of 0 would be an infinite extinction), the distance is floored at 0 and 0 is off. `scatterColor` and `scatterAnisotropy` add single scattering to it (`scatterColor` = sigma_s/sigma_t per channel, clamped to [0,1], linear and NOT sRGB-decoded; `scatterAnisotropy` = Henyey-Greenstein g, clamped to [-0.99, 0.99]) and are read only where `attenuationDistance > 0`. Both volume pairs follow the same byte-stability rule as `subsurfaceWeight`: `writeOcmat` emits the attenuation pair only `if (d.attenuationDistance > 0.0f)` and the scatter pair only if some `scatterColor` channel is above 0 (the anisotropy rides along with it), so every older file round-trips unchanged. The GPU block (`pbr::MaterialConstants`, mirrored by the `AverMaterial` cbuffer and `AverMaterialData` in `material_prelude.hlsl`) is **192 bytes**: the scatter row (`float scatterColor[3]; float scatterAnisotropy`) was appended last, growing it from 176, so no earlier offset moved (`scatterColor` at 176, `scatterAnisotropy` at 188).
 
 `GRAPHREF <path>` names a `DOMAIN material` `.ocgraph` (§`OCGRAPH`) by its content-relative path — the rest of the line, so a path containing spaces is not cut short, and the same content-root convention `COMP mesh=` uses (never with the content directory on the front). It is a different mechanism from the inline `GRAPH{}` block above: `GRAPHREF` points at a graph asset a project authors and iterates on in the graph editor, while `GRAPH{}` is a small node list written inline in the material file itself. A file may carry either, both, or neither. Nothing in the `.ocmat` reader/writer resolves the path, loads the graph, or checks that it compiles — it is recorded verbatim for a loader to pass to `pbr::MaterialGraphRegistry::add`, which compiles it and returns the id that ends up in `MaterialConstants::graphId` (never round-tripped through the file itself, since the id is only stable for the current process).
 
@@ -905,7 +914,7 @@ PLACE  Meshes/Cars/bus.ocmesh    5000 400 0  90 0 0  1  nocollide vehicle bus
 "WATER"/"WAVE")` in the same trailing-token loop `class` above is parsed by) author a level's own body
 of water instead of the host's `--water <heightCm>` CLI flag. `WATER name <n> level <cm> [infinite |
 bounds <x0> <y0> <x1> <y1>] [simulate] [compliance <f>] [damping <f>] [iterations <i>] [pressure <f>]
-[preset <name>] [density <f>] [viscosity <f>]` declares one surface; `infinite` (the default —
+[preset <name>] [density <f>] [viscosity <f>] [material <name>] [cell <cm>] [radius <cm>]` declares one surface; `infinite` (the default —
 matching the endless plane every level had before this record existed) and `bounds` (a horizontal-only
 X/Y rectangle, narrowing it to a pool) are mutually exclusive statements about the surface's *shape*,
 same "bare token vs. `key value` pair" split `PCGVOLUME`'s own `infinite` already uses, and both must
@@ -923,7 +932,13 @@ the format's. `WAVE [water <name>] dir <x> <z> wavelength <cm> amplitude <cm> st
 one Gerstner swell contributing to a `WATER` surface's animation; `water <name>` cross-references its
 target by name exactly as `SCATTER`'s own `volume <name>` cross-references a `PCGVOLUME`, and an
 omitted `water` means "the first declared `WATER` record," so the overwhelmingly common
-one-`WATER`-per-level case needs no name at all. A level may declare several `WATER` records — the
+one-`WATER`-per-level case needs no name at all. `material <name>` names an `.ocmat`; with it (and no
+`simulate`) the surface is a real vertex-displaced mesh drawn through the material path
+(`fluids::WaterSurface`), seen by ray tracing, and `cell <cm>` (grid cell, default 100) and `radius <cm>`
+(half-extent of the camera-following grid, default 12800) size its grid — a `bounds` record fills its
+bounds instead. A record with no `material` keeps the analytic ocean. A non-positive `cell`/`radius`
+keeps its default, and both are written only when they differ from it.
+A level may declare several `WATER` records — the
 format does not stop it — but `SandboxApp::applyLevelWater` draws only the first and logs a named
 warning about the rest, a consumer limit rather than a parser one. See
 [`FLUIDS.md`](../FLUIDS.md) for the full authoring story, including

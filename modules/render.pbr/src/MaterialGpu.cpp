@@ -81,6 +81,10 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // The scatter tint, decoded like baseColorFactor above: it is picked as a colour, in the same
     // swatch widget, and multiplies the same (linear) albedo.
     for (u32 i = 0; i < 3; ++i) c.subsurfaceColor[i] = srgbToLinear(d.subsurfaceColor[i]);
+    // Volume scatter, forwarded verbatim: an albedo is a ratio, not a picked colour, so NO sRGB decode
+    // (unlike subsurfaceColor above). Already clamped by pbr::sanitize.
+    for (u32 i = 0; i < 3; ++i) c.scatterColor[i] = d.scatterColor[i];
+    c.scatterAnisotropy = d.scatterAnisotropy;
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)

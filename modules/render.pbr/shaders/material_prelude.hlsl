@@ -87,6 +87,12 @@ cbuffer AverMaterial : register(b2) {
     // Mirrors MaterialConstants::subsurfaceColor, LINEAR -- the tint light takes inside a subsurface
     // material. Read through AverAuthored::subsurfaceColor, never directly (see that field).
     float3 gSubsurfaceColor;
+
+    // Volume scatter, mirroring scatterColor/scatterAnisotropy (row 176->192 bytes): LINEAR
+    // single-scattering albedo per channel (0 = off) and the Henyey-Greenstein g. Read through
+    // AverAuthored::scatterColor, only meaningful with gAttenuationDistance > 0.
+    float3 gScatterColor;
+    float  gScatterAnisotropy;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -140,6 +146,41 @@ float3 averVolumeTransmittance(float3 attenuationColor, float attenuationDistanc
     // through the medium", not a negative exponent that would AMPLIFY the light into a glowing pool.
     const float t = max(thicknessCm, 0.0);
     return pow(max(attenuationColor, 1e-4), t / attenuationDistance);
+}
+
+// ---- volume in-scatter: the light a slab sends back to the eye ----
+//
+// Added to a blended draw's premultiplied rgb (or a path's throughput-weighted accumulator). PARAMETERS
+// ONLY, like averVolumeTransmittance. Slab under a surface with normal N (toward the viewer). A view
+// path of length L has depth s*mu_v at s, and the sun (refracted path taken straight, as rtShadowEx
+// does) reaches it over s*mu_v/mu_s, so both legs decay as T(s*k), k = 1 + mu_v/mu_s, and
+//     L_sun = integral_0^L sigma_s p_HG E T(s k) ds = omega p_HG E (1 - T(L k)) / k,   omega = sigma_s/sigma_t
+// per channel. The sky is the same with an isotropic p = 1/(4 pi) over the upper hemisphere (integral
+// L dOmega = 2 pi L_sky, so 1/2 L_sky) and a mean sky path of mu_s = 1/2: ka = 1 + 2 mu_v.
+//
+// sunIrradiance is the BEAM-NORMAL irradiance, i.e. AverLight.radiance * visibility * (1 - Fresnel)
+// with no N.L cosine (the integral above carries the geometry). skyAmbient is ind.ambient *
+// ind.ambientScale, the quantity averIndirectTerms multiplies by albedo (kD ~ albedo): sky E / pi,
+// the mean sky radiance. viewTravelDir points from the eye INTO the water, toSun toward the sun.
+// Returns 0 with no volume, no thickness or no scattering albedo.
+float3 averVolumeInscatter(float3 attC, float attD, float3 omega, float g, float thicknessCm,
+                           float3 viewTravelDir, float3 N, float3 toSun,
+                           float3 sunIrradiance, float3 skyAmbient) {
+    if (attD <= 0.0 || thicknessCm <= 0.0 || all(omega <= 0.0)) return float3(0.0, 0.0, 0.0);
+    const float3 w    = max(omega, 0.0);
+    const float3 c    = max(attC, 1e-4);
+    const float  muV  = abs(dot(viewTravelDir, N));
+    const float  muS  = max(dot(toSun, N), 1e-3);
+    const float  k    = 1.0 + muV / muS;
+    const float  ka   = 1.0 + 2.0 * muV;
+    // Scattering angle between the sun's travel direction (-toSun) and the direction toward the eye
+    // (-viewTravelDir); g > 0 is forward, so looking at the sun gives cosT = 1.
+    const float  cosT = dot(toSun, viewTravelDir);
+    const float  gg   = clamp(g, -0.99, 0.99);
+    const float  phase = (1.0 - gg * gg) / (4.0 * PI * pow(max(1.0 + gg * gg - 2.0 * gg * cosT, 1e-4), 1.5));
+    const float3 sun  = w * phase * sunIrradiance * (1.0 - pow(c, thicknessCm * k / attD)) / k;
+    const float3 sky  = w * (0.5 * skyAmbient) * (1.0 - pow(c, thicknessCm * ka / attD)) / ka;
+    return sun + sky;
 }
 // GGX normal distribution. Takes alpha (rough*rough).
 float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
@@ -232,6 +273,10 @@ struct AverSurface {
     // overridden these per pixel, and reading gAttenuationColor directly would ignore that.
     float3 attenuationColor;
     float  attenuationDistance;
+    // Its single scattering (see MaterialDesc::scatterColor); (0,0,0) = none. PSRayDriven hand-builds
+    // this struct and must set them -- HLSL does not zero one for you.
+    float3 scatterColor;
+    float  scatterAnisotropy;
     // Carried through from AverVertex -- see its own comment. Read only by the transmissive branch
     // below, for total internal reflection.
     bool   backFace;
@@ -474,6 +519,9 @@ struct AverAuthored {
     // constant could express neither of. attenuationDistance <= 0 still means "no volume".
     float3 attenuationColor;
     float  attenuationDistance;
+    // Its single scattering, drivable per pixel like the pair above (a depth map driving the haze).
+    float3 scatterColor;
+    float  scatterAnisotropy;
     // NOT BEHIND AVER_LAYERED_BSDF, though only that define reads it: gating it would make
     // AverAuthored's shape depend on a render setting, so graph-generated HLSL compiled for one
     // setting could fail to compile under the other. Three dead floats is the cheaper trade.
@@ -520,6 +568,8 @@ struct AverMaterialData {
     float  attenuationDistance;
     float  lightIntensity;
     float3 subsurfaceColor;
+    float3 scatterColor;
+    float  scatterAnisotropy;
 };
 
 // The b2 cbuffer as one AverMaterialData.
@@ -556,6 +606,8 @@ AverMaterialData averMaterialData() {
     m.attenuationDistance = gAttenuationDistance;
     m.lightIntensity = gLightIntensity;
     m.subsurfaceColor = gSubsurfaceColor;
+    m.scatterColor = gScatterColor;
+    m.scatterAnisotropy = gScatterAnisotropy;
     return m;
 }
 
@@ -610,6 +662,8 @@ AverAuthored averAuthoredFrom(AverMaterialData m, AverMaps map) {
     a.transmission     = m.transmission;
     a.attenuationColor    = m.attenuationColor;
     a.attenuationDistance = m.attenuationDistance;
+    a.scatterColor        = m.scatterColor;
+    a.scatterAnisotropy   = m.scatterAnisotropy;
     a.coatWeight       = (m.flags & AVER_MAT_COAT) ? saturate(m.coatWeight)    : 0.0;
     a.coatRoughness    = (m.flags & AVER_MAT_COAT) ? saturate(m.coatRoughness) : 0.0;
     a.coatF0           = (m.flags & AVER_MAT_COAT) ? saturate(m.coatF0)        : 0.0;
@@ -679,6 +733,8 @@ AverSurface averComposeSurface(AverVertex v, AverLight l, AverAuthored a, AverMa
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(a.transmission));
     s.attenuationColor    = a.attenuationColor;
     s.attenuationDistance = a.attenuationDistance;
+    s.scatterColor        = a.scatterColor;
+    s.scatterAnisotropy   = a.scatterAnisotropy;
     s.backFace  = v.backFace;
     // FROM THE AUTHORED STRUCT, not the cbuffer: reading gSubsurfaceWeight directly would work for
     // the stock material but silently ignore any graph that drove the pin -- the defect this struct
@@ -1162,6 +1218,7 @@ float4 averBlendedOutputVolume(AverSurface s, float3 diffuse, float3 specular, f
     // gains red and blue -- the complement of the right colour. Measured on an 8 cm M_Glass pane
     // authored (0.15, 0.85, 0.35) at 4 cm: darkened uniformly by (29, 28, 27), no green anywhere, the
     // tint cancelling itself against the term meant to produce it. glTF's volume is pure ABSORPTION
-    // (no scattering albedo), so there is nothing for a correct in-scattering term to be made of.
+    // (no scattering albedo), so there is nothing for a correct in-scattering term to be made of --
+    // the correct one is averVolumeInscatter above, built from scatterColor (omega), not from 1-T.
     return float4(specular + diffuse * alpha, alpha);
 }

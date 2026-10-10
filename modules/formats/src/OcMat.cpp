@@ -245,6 +245,19 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const f32 v = tokF(t, 2, out.attenuationDistance);
                 out.attenuationDistance = v < 0.0f ? 0.0f : v;
             }
+            // Single-scattering albedo of that volume: a LINEAR ratio sigma_s / sigma_t per channel
+            // (no sRGB decode anywhere), [0,1]; all-zero is the off state and the default.
+            else if (equalsCI(p, "scatterColor")) {
+                for (int i = 0; i < 3; ++i) {
+                    const f32 v = tokF(t, 2 + static_cast<usize>(i), out.scatterColor[i]);
+                    out.scatterColor[i] = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                }
+            }
+            // Henyey-Greenstein g, held off +-1 where the phase function degenerates.
+            else if (equalsCI(p, "scatterAnisotropy")) {
+                const f32 v = tokF(t, 2, out.scatterAnisotropy);
+                out.scatterAnisotropy = v < -0.99f ? -0.99f : (v > 0.99f ? 0.99f : v);
+            }
             // ---- the coat: a clear film over the base material ----
             // Clamped into [0,1] like the two above, and for the same reason -- a weight outside that
             // range is an authoring slip, and letting it through gives a lobe that adds energy.
@@ -444,6 +457,13 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
                                          num(d.attenuationColor[1]) + " " +
                                          num(d.attenuationColor[2]) + "\n"
              "PARAM attenuationDistance " + num(d.attenuationDistance) + "\n";
+
+    // Gated on the albedo being non-zero (all-zero is the off state, so older files stay byte-stable);
+    // the anisotropy rides along because a phase function with nothing to scatter says nothing.
+    if (d.scatterColor[0] > 0.0f || d.scatterColor[1] > 0.0f || d.scatterColor[2] > 0.0f)
+        s += "PARAM scatterColor " + num(d.scatterColor[0]) + " " + num(d.scatterColor[1]) + " " +
+                                     num(d.scatterColor[2]) + "\n"
+             "PARAM scatterAnisotropy " + num(d.scatterAnisotropy) + "\n";
 
     // Gated on coatWeight for exactly the reason stated above, and the other two ride along with it:
     // a roughness or an F0 with no weight describes a coat that is not there.

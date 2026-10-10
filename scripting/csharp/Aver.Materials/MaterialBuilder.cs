@@ -42,6 +42,10 @@ public sealed class MaterialBuilder
     private float _coatRoughness;
     private float _coatF0 = 0.04f;   // the field default, so an unset coat emits nothing
     private float _lightIntensity;   // 0 = not a light, MaterialDesc's own default
+    private float[] _attenuationColor = { 1f, 1f, 1f };   // MaterialDesc's own default: no absorption
+    private float _attenuationDistance;                    // cm; <= 0 = no volume
+    private float[] _scatterColor = { 0f, 0f, 0f };        // linear albedo; all zero = no in-scatter
+    private float _scatterAnisotropy;
 
     private readonly Dictionary<Slot, string> _textures = new();
 
@@ -128,6 +132,22 @@ public sealed class MaterialBuilder
     /// yellow-green, wax an orange. Meaningless while <see cref="SubsurfaceWeight"/> is 0.
     /// </summary>
     public MaterialBuilder SubsurfaceColor(float r, float g, float b) { _subsurfaceColor = new[] { r, g, b }; return this; }
+
+    /// <summary>
+    /// The medium inside a transmissive material: per-channel transmittance in [0,1] after
+    /// <paramref name="distanceCm"/> centimetres (water is about 0.65, 0.93, 0.97 at 100). A distance
+    /// of 0 or less is no volume.
+    /// </summary>
+    public MaterialBuilder Attenuation(float r, float g, float b, float distanceCm)
+    { _attenuationColor = new[] { r, g, b }; _attenuationDistance = distanceCm; return this; }
+
+    /// <summary>
+    /// Single scattering in that volume: LINEAR per-channel albedo sigma_s / sigma_t in [0,1] (open
+    /// water is about 0.05, 0.35, 0.55) and the Henyey-Greenstein <paramref name="anisotropy"/> g in
+    /// (-1,1). All-zero albedo is no in-scatter; meaningless without <see cref="Attenuation"/>.
+    /// </summary>
+    public MaterialBuilder Scatter(float r, float g, float b, float anisotropy = 0f)
+    { _scatterColor = new[] { r, g, b }; _scatterAnisotropy = anisotropy; return this; }
 
     /// <summary>
     /// [0,1] clear coat over the base material -- car paint, varnish, a wet stone. 0 is no coat.
@@ -265,6 +285,21 @@ public sealed class MaterialBuilder
             s.Append("PARAM coatWeight ").Append(Num(_coatWeight)).Append('\n');
             s.Append("PARAM coatRoughness ").Append(Num(_coatRoughness)).Append('\n');
             s.Append("PARAM coatF0 ").Append(Num(_coatF0)).Append('\n');
+        }
+
+        // Volume, gated and ordered exactly as OcMat.cpp's writer: the pair on the distance, the scatter
+        // pair on a non-zero albedo.
+        if (_attenuationDistance > 0f)
+        {
+            s.Append("PARAM attenuationColor ").Append(Num(_attenuationColor[0])).Append(' ')
+             .Append(Num(_attenuationColor[1])).Append(' ').Append(Num(_attenuationColor[2])).Append('\n');
+            s.Append("PARAM attenuationDistance ").Append(Num(_attenuationDistance)).Append('\n');
+        }
+        if (_scatterColor[0] > 0f || _scatterColor[1] > 0f || _scatterColor[2] > 0f)
+        {
+            s.Append("PARAM scatterColor ").Append(Num(_scatterColor[0])).Append(' ')
+             .Append(Num(_scatterColor[1])).Append(' ').Append(Num(_scatterColor[2])).Append('\n');
+            s.Append("PARAM scatterAnisotropy ").Append(Num(_scatterAnisotropy)).Append('\n');
         }
 
         // OMITTED WHEN OFF, same reasoning as the subsurface/coat blocks above: 0 is not merely a

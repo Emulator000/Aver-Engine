@@ -733,6 +733,10 @@ constexpr OutputField kOutputFields[] = {
     // which is what every material that never mentions them keeps getting.
     {"AttenuationColor",    "attenuationColor",    MatType::Float3},
     {"AttenuationDistance", "attenuationDistance", MatType::Float},
+    // Single-scattering albedo and phase anisotropy of that volume (see MaterialDesc::scatterColor);
+    // all-zero scatterColor means no in-scatter, so a graph that never mentions them is unchanged.
+    {"ScatterColor",        "scatterColor",        MatType::Float3},
+    {"ScatterAnisotropy",   "scatterAnisotropy",   MatType::Float},
     // THE COAT, drivable per pixel. This is where a coat earns a graph rather than three numbers on
     // the material: a weight mask is the difference between a uniformly lacquered object and one
     // that is polished where it is handled and bare where it is worn, and a roughness mask is how a

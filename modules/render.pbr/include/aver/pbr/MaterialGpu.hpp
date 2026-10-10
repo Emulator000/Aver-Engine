@@ -202,17 +202,30 @@ struct MaterialConstants {
     // The row's other three floats, which were padding: MaterialDesc::subsurfaceColor, LINEAR
     // (packMaterial decodes it like baseColorFactor). Read only under MaterialFlag_Subsurface.
     f32 subsurfaceColor[3];
+
+    // ---- volume scattering, and the growth to 192 ----
+    //
+    // Mirrors MaterialDesc::scatterColor/scatterAnisotropy (see there): LINEAR single-scattering
+    // albedo per channel and the Henyey-Greenstein g. Read through averVolumeInscatter in
+    // material_prelude.hlsl, only where attenuationDistance > 0 and any channel is > 0; all-zero (every
+    // material authored before this row) is off and shades bit-identically. ONE MORE 16-BYTE ROW, the
+    // smallest legal growth, appended last so no existing offset moves; 192 leaves 64 bytes under
+    // kMaxDrawConstantBytes (256, RHIResources.hpp). The mirrors to revisit are the same as at every
+    // growth: material_prelude.hlsl's cbuffer and AverMaterialData, voxi_rt.hlsli's RtMaterial,
+    // VoxiShaders.hpp, and the layout test in tests/formats/src/MaterialTest.cpp.
+    f32 scatterColor[3];
+    f32 scatterAnisotropy;
 };
 
 // No texture in that slot. Deliberately not 0; see MaterialConstants::texIndex.
 inline constexpr u32 kUnboundTexture = 0xFFFFFFFFu;
 
 // SIZED FROM THE ENUM, so adding a TextureSlot is a compile error here rather than a silent
-// mismatch against the HLSL mirror. 8 is asserted separately because the 176-byte figure below
+// mismatch against the HLSL mirror. 8 is asserted separately because the 192-byte figure below
 // depends on it: a ninth slot is a deliberate decision about the constant-buffer size, not a
 // change to wave through.
-static_assert(kTextureSlotCount == 8, "texIndex sizing and the 176-byte block below assume 8 slots");
-static_assert(sizeof(MaterialConstants) == 176, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(kTextureSlotCount == 8, "texIndex sizing and the 192-byte block below assume 8 slots");
+static_assert(sizeof(MaterialConstants) == 192, "the HLSL cbuffer mirrors this byte for byte");
 static_assert(sizeof(MaterialConstants) % 16 == 0, "must be a legal constant-buffer size");
 
 // Packs the authored description into the block the GPU reads. A slot counts as bound when either

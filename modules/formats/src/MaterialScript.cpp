@@ -171,6 +171,15 @@ std::string materialConfigureChain(const pbr::MaterialDesc& d, const OcMatExtras
              num(d.subsurfaceColor[2]) + ")");
     }
 
+    // The volume and its scattering, gated as OcMat.cpp's writer gates them: without these a
+    // Save-to-C# round trip would drop an authored water.
+    if (d.attenuationDistance > 0.0f)
+        line(".Attenuation(" + num(d.attenuationColor[0]) + ", " + num(d.attenuationColor[1]) + ", " +
+             num(d.attenuationColor[2]) + ", " + num(d.attenuationDistance) + ")");
+    if (d.scatterColor[0] > 0.0f || d.scatterColor[1] > 0.0f || d.scatterColor[2] > 0.0f)
+        line(".Scatter(" + num(d.scatterColor[0]) + ", " + num(d.scatterColor[1]) + ", " +
+             num(d.scatterColor[2]) + ", " + num(d.scatterAnisotropy) + ")");
+
     // OMITTED WHEN OFF, same convention as subsurfaceWeight just above: 0 is the feature's own off
     // switch (packMaterial sets MaterialFlag_Light exactly when this is > 0), not a default worth
     // stating on a material that never asked to be a light.

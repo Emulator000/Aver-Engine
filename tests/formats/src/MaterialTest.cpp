@@ -91,6 +91,8 @@ static const MirrorField kMirror[] = {
     {"attenuationDistance", "gAttenuationDistance", "attenuationDistance"},
     {"lightIntensity",      "gLightIntensity",     "lightIntensity"},
     {"subsurfaceColor",     "gSubsurfaceColor",    "subsurfaceColor"},
+    {"scatterColor",        "gScatterColor",       "scatterColor"},
+    {"scatterAnisotropy",   "gScatterAnisotropy",  "scatterAnisotropy"},
 };
 
 // Reads a repo-relative file whole. Empty on failure, which the caller MUST treat as a failure:
@@ -673,6 +675,135 @@ static void testLightIntensity() {
     check(near(bright.lightIntensity, 500.0f), "...and is kept exactly, not capped to some ceiling");
 }
 
+// CPU twin of material_prelude.hlsl's averVolumeInscatter, for limit checks only. It repeats the
+// HLSL's arithmetic, so it pins the MATH (and the documented limits), not the shader text; the text
+// is pinned separately below by reading the prelude.
+static void inscatterCpu(const f32 attC[3], f32 attD, const f32 omega[3], f32 g, f32 thicknessCm,
+                         const f32 viewDir[3], const f32 N[3], const f32 toSun[3], f32 sunE, f32 skyL,
+                         f32 out[3]) {
+    out[0] = out[1] = out[2] = 0.0f;
+    if (attD <= 0.0f || thicknessCm <= 0.0f || (omega[0] <= 0.0f && omega[1] <= 0.0f && omega[2] <= 0.0f)) return;
+    const auto dot3 = [](const f32* a, const f32* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    const f32 muV = std::fabs(dot3(viewDir, N));
+    const f32 muS = std::fmax(dot3(toSun, N), 1e-3f);
+    const f32 k = 1.0f + muV / muS, ka = 1.0f + 2.0f * muV;
+    const f32 cosT = dot3(toSun, viewDir);
+    const f32 pi = 3.14159265f;
+    const f32 phase = (1.0f - g * g) / (4.0f * pi * std::pow(std::fmax(1.0f + g * g - 2.0f * g * cosT, 1e-4f), 1.5f));
+    for (int i = 0; i < 3; ++i) {
+        const f32 c = std::fmax(attC[i], 1e-4f), w = std::fmax(omega[i], 0.0f);
+        out[i] = w * phase * sunE * (1.0f - std::pow(c, thicknessCm * k / attD)) / k
+               + w * 0.5f * skyL * (1.0f - std::pow(c, thicknessCm * ka / attD)) / ka;
+    }
+}
+
+static void testVolumeScatter() {
+    AVER_INFO("=== .ocmat: PARAM scatterColor / scatterAnisotropy ===");
+    std::string err;
+
+    // OFF IS BYTE-STABLE: a material that never authored scatter writes no scatter line, loads with
+    // the off defaults, packs to zero, and survives write -> parse -> write unchanged.
+    pbr::MaterialDesc plain;
+    plain.attenuationColor[0] = 0.65f; plain.attenuationColor[1] = 0.93f; plain.attenuationColor[2] = 0.97f;
+    plain.attenuationDistance = 100.0f;
+    const std::string plainText = fmt::writeOcmat(plain, nullptr);
+    check(plainText.find("scatter") == std::string::npos, "a material without scatter writes no scatter PARAMs");
+    pbr::MaterialDesc plainBack;
+    check(fmt::parseOcmat(plainText, plainBack, nullptr, &err), "...and re-parses: " + err);
+    check(plainBack.scatterColor[0] == 0.0f && plainBack.scatterColor[1] == 0.0f
+          && plainBack.scatterColor[2] == 0.0f && plainBack.scatterAnisotropy == 0.0f,
+          "...with scatter in its off state");
+    check(fmt::writeOcmat(plainBack, nullptr) == plainText, "...and write -> parse -> write is byte-identical");
+    const pbr::MaterialConstants off = pbr::packMaterial(plain);
+    check(off.scatterColor[0] == 0.0f && off.scatterColor[1] == 0.0f && off.scatterColor[2] == 0.0f
+          && off.scatterAnisotropy == 0.0f, "...and packs to all-zero scatter");
+
+    // Water-like authored values round-trip, in channel order, and pack LINEAR (no sRGB decode).
+    pbr::MaterialDesc w = plain;
+    w.scatterColor[0] = 0.05f; w.scatterColor[1] = 0.35f; w.scatterColor[2] = 0.55f;
+    w.scatterAnisotropy = 0.4f;
+    const std::string text = fmt::writeOcmat(w, nullptr);
+    check(text.find("PARAM scatterColor") != std::string::npos
+          && text.find("PARAM scatterAnisotropy") != std::string::npos, "an authored scatter IS written");
+    pbr::MaterialDesc back;
+    check(fmt::parseOcmat(text, back, nullptr, &err), "...and re-parses: " + err);
+    check(near(back.scatterColor[0], 0.05f) && near(back.scatterColor[1], 0.35f)
+          && near(back.scatterColor[2], 0.55f), "scatterColor round-trips all three channels, in order");
+    check(near(back.scatterAnisotropy, 0.4f), "scatterAnisotropy round-trips");
+    const pbr::MaterialConstants on = pbr::packMaterial(w);
+    check(near(on.scatterColor[1], 0.35f) && near(on.scatterAnisotropy, 0.4f),
+          "packMaterial forwards scatter linear (0.35 stays 0.35, not pow 2.2)");
+
+    // Out-of-range input clamps instead of failing the file.
+    pbr::MaterialDesc wild;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM scatterColor 2 -1 0.5\nPARAM scatterAnisotropy 7\n", wild, nullptr, &err),
+          "an out-of-range scatter parses");
+    check(near(wild.scatterColor[0], 1.0f) && near(wild.scatterColor[1], 0.0f) && near(wild.scatterColor[2], 0.5f),
+          "...scatterColor clamps to [0,1] per channel");
+    check(near(wild.scatterAnisotropy, 0.99f), "...scatterAnisotropy clamps to 0.99");
+
+    // Save-to-C# must not drop the volume or its scatter.
+    {
+        static const char* kSrc =
+            "using Aver.Materials;\n\n"
+            "[AverMaterial(\"M_Sea\")]\n"
+            "public sealed class Sea : Material\n"
+            "{\n"
+            "    public static void Configure(MaterialBuilder b) => b.Roughness(0.1f);\n"
+            "}\n";
+        pbr::MaterialDesc d = w;
+        d.name = "M_Sea";
+        std::string out, out2;
+        check(fmt::rewriteMaterialScript(kSrc, "M_Sea", d, nullptr, out, &err), "a scatter material rewrites: " + err);
+        check(out.find(".Attenuation(") != std::string::npos && out.find(".Scatter(") != std::string::npos,
+              "...and the chain carries .Attenuation and .Scatter");
+        check(fmt::rewriteMaterialScript(kSrc, "M_Sea", plain, nullptr, out2, &err)
+              && out2.find(".Scatter(") == std::string::npos, "...while an unscattered material emits no .Scatter");
+    }
+
+    // The helper's documented limits, on the CPU twin.
+    {
+        const f32 attC[3] = {0.65f, 0.93f, 0.97f}, omega[3] = {0.05f, 0.35f, 0.55f}, zero[3] = {0, 0, 0};
+        const f32 N[3] = {0, 1, 0};
+        const f32 view[3] = {0.0f, -1.0f, 0.0f}, sun[3] = {0.0f, 1.0f, 0.0f};   // straight down, sun overhead
+        f32 r[3];
+        inscatterCpu(attC, 100.0f, omega, 0.0f, 0.0f, view, N, sun, 5.0f, 0.4f, r);
+        check(r[0] == 0.0f && r[1] == 0.0f && r[2] == 0.0f, "inscatter: zero thickness gives zero");
+        inscatterCpu(attC, 100.0f, zero, 0.0f, 500.0f, view, N, sun, 5.0f, 0.4f, r);
+        check(r[0] == 0.0f && r[1] == 0.0f && r[2] == 0.0f, "inscatter: zero albedo gives zero");
+        inscatterCpu(attC, 0.0f, omega, 0.0f, 500.0f, view, N, sun, 5.0f, 0.4f, r);
+        check(r[0] == 0.0f && r[1] == 0.0f && r[2] == 0.0f, "inscatter: no volume gives zero");
+        // Deep column, isotropic: sun term -> omega * E / (4 pi) / k with k = 2, sky -> omega * L / 2 / 3.
+        inscatterCpu(attC, 100.0f, omega, 0.0f, 1.0e6f, view, N, sun, 5.0f, 0.4f, r);
+        bool conv = true;
+        for (int i = 0; i < 3; ++i) {
+            const f32 expect = omega[i] * 5.0f / (4.0f * 3.14159265f) / 2.0f + omega[i] * 0.5f * 0.4f / 3.0f;
+            conv = conv && near(r[i], expect, 1e-4f);
+        }
+        check(conv, "inscatter: a deep column converges to omega * (p E / k + L / 2 / ka)");
+        // Forward lobe: looking toward the sun (view dir = toSun) beats looking away, for g > 0.
+        const f32 toward[3] = {0.0f, 1.0f, 0.0f}, away[3] = {0.0f, -1.0f, 0.0f}, slant[3] = {0.6f, 0.8f, 0.0f};
+        f32 fwd[3], bwd[3];
+        inscatterCpu(attC, 100.0f, omega, 0.6f, 300.0f, toward, N, slant, 5.0f, 0.0f, fwd);
+        inscatterCpu(attC, 100.0f, omega, 0.6f, 300.0f, away, N, slant, 5.0f, 0.0f, bwd);
+        check(fwd[2] > bwd[2], "inscatter: with g > 0 looking toward the sun scatters more than looking away");
+    }
+
+    // The shader text: the frozen signature exists, and the function body reads no cbuffer global (the
+    // ray-driven pass has no material cbuffer bound).
+    {
+        const std::string prelude = readRepoFile("modules/render.pbr/shaders/material_prelude.hlsl");
+        const usize a = prelude.find("float3 averVolumeInscatter(float3 attC, float attD, float3 omega, float g, float thicknessCm,");
+        check(a != std::string::npos, "material_prelude.hlsl declares averVolumeInscatter with the frozen signature");
+        if (a != std::string::npos) {
+            const usize b = prelude.find("\n}", a);   // CRLF or LF
+            const std::string body = prelude.substr(a, b == std::string::npos ? std::string::npos : b - a);
+            check(body.find("gScatter") == std::string::npos && body.find("gAttenuation") == std::string::npos,
+                  "...and its body reads no material cbuffer global");
+        }
+    }
+}
+
 // Checks packMaterial: the 96-byte block the shader reads.
 static void testPack() {
     AVER_INFO("=== material: the packed GPU block ===");
@@ -687,7 +818,7 @@ static void testPack() {
     // subtly wrong with nothing to grep for. Note this is a RUNTIME check rather than a
     // static_assert, which is why the 80 -> 96 growth compiled clean and would have failed the suite
     // instead -- keep it that way, since the point is to be told, not to be stopped.
-    check(sizeof(pbr::MaterialConstants) == 176, "MaterialConstants is 176 bytes");
+    check(sizeof(pbr::MaterialConstants) == 192, "MaterialConstants is 192 bytes");
     check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
 
     // ---- THE FIELD LAYOUT, NOT JUST THE TOTAL ----
@@ -761,6 +892,9 @@ static void testPack() {
     // subsurfaceColor spends the row's other three floats -- the ones lightIntensity's own comment
     // said were padding -- so the block stays 176 bytes. Same reasoning as every offset above.
     check(offsetof(pbr::MaterialConstants, subsurfaceColor)     == 164, "subsurfaceColor at 164");
+    // The volume-scatter row, appended last when the block grew 176 -> 192; nothing above moved.
+    check(offsetof(pbr::MaterialConstants, scatterColor)        == 176, "scatterColor at 176");
+    check(offsetof(pbr::MaterialConstants, scatterAnisotropy)   == 188, "scatterAnisotropy at 188");
 
     // ---- AND NOW THE OTHER TWO MIRRORS, WHICH THIS BLOCK NEVER USED TO OPEN ----
     //
@@ -841,7 +975,7 @@ static void testPack() {
         // The table must not itself fall behind the struct. sizeof is the only handle the test has
         // on "a field was added": if someone appends a row to MaterialConstants and does not extend
         // kMirror, the loops above would still pass while checking a prefix.
-        check(sizeof(pbr::MaterialConstants) == 176,
+        check(sizeof(pbr::MaterialConstants) == 192,
               "...and kMirror covers the whole struct (extend it if this size ever changes)");
     }
     {
@@ -1516,6 +1650,7 @@ int main() {
     testDielectric();
     testSubsurface();
     testLightIntensity();
+    testVolumeScatter();
     testPack();
     testTranslucency();
     testRoundTrip();

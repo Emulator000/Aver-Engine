@@ -136,6 +136,19 @@ struct MaterialDesc {
     f32 attenuationColor[3] = {1.0f, 1.0f, 1.0f};   // transmittance at exactly attenuationDistance
     f32 attenuationDistance = 0.0f;                 // cm; <= 0 disables volume absorption entirely
 
+    // SINGLE SCATTERING IN THAT VOLUME. Absorption alone makes water a dark filter; the cyan haze you
+    // see looking into a sea is light scattered toward the eye from inside it. scatterColor is the
+    // per-channel single-scattering ALBEDO sigma_s / sigma_t (the share of an extinction event that
+    // scatters instead of absorbing), LINEAR and not sRGB-decoded: it is a ratio, not a colour. The
+    // extinction itself still comes from attenuationColor/Distance, so scatter needs a volume
+    // (attenuationDistance > 0) and is ignored without one. 0 (the default) is off and every term it
+    // gates is skipped, so a material that never set it shades bit-identically. Open water is about
+    // (0.05, 0.35, 0.55) beside attenuationColor (0.65, 0.93, 0.97) at 100.
+    // scatterAnisotropy is the Henyey-Greenstein g of the phase function: 0 isotropic, > 0 forward
+    // (sunlit haze brightens looking toward the sun), < 0 back.
+    f32 scatterColor[3] = {0.0f, 0.0f, 0.0f};
+    f32 scatterAnisotropy = 0.0f;                   // [-0.99, 0.99]
+
     // ---- subsurface scattering: skin, wax, marble, leaves, curtains, paper ----
     // Weight 0 (the default) is off, so every material authored before this existed shades
     // bit-identically and the gate baselines do not move until something opts in.

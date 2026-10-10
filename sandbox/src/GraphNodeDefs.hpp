@@ -998,9 +998,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
 
     // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
     //    MaterialOutput, since it's where the backward walk starts. NO DEFAULT on any of its
-    //    eighteen inputs, load-bearing not an oversight: compileMaterialGraph treats an input as
+    //    twenty inputs, load-bearing not an oversight: compileMaterialGraph treats an input as
     //    DRIVEN when linked OR carrying a NON-EMPTY literal, so a default would make a fresh node
-    //    drive all eighteen fields immediately, destroying partial-graph behaviour (a graph saying
+    //    drive all twenty fields immediately, destroying partial-graph behaviour (a graph saying
     //    only "base colour is red" leaving roughness/normal/alpha at the stock material's values --
     //    see compileMaterialGraph's "ONLY THE FIELDS THE AUTHOR ACTUALLY DROVE"). Do not add a "0"
     //    defaultValue here without reading that comment first.
@@ -1022,6 +1022,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         // (kOutputFields, MaterialGraphHlsl.cpp) -- per-pixel driving gives a thin clear pane and a
         // deep green edge instead of one tint. Same no-default rule; 0-or-less already means "no volume".
         pin("AttenuationColor", "float3", false), pin("AttenuationDistance", "float", false),
+        // Its single scattering: ScatterColor is the per-channel albedo (the haze colour of deep
+        // water), ScatterAnisotropy the phase g. All-zero ScatterColor is the old pure absorber.
+        pin("ScatterColor", "float3", false), pin("ScatterAnisotropy", "float", false),
         // The coat: a weight mask makes one material polished where handled, bare where worn; a
         // roughness mask puts a clear panel and a scuffed edge on the same car paint. Present
         // whether or not the layered BSDF is compiled in -- AverAuthored carries the fields

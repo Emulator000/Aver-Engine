@@ -63,6 +63,10 @@ void sanitise(MaterialDesc& d) {
     // Negative is meaningless and would flip the sign of the extinction; clamping to 0 lands it on
     // the documented "no volume" state rather than on something inside-out.
     d.attenuationDistance = d.attenuationDistance < 0.0f ? 0.0f : d.attenuationDistance;
+    // An albedo is a ratio; above 1 the medium would emit energy. g stays off +-1, where the HG phase
+    // function degenerates.
+    for (f32& ch : d.scatterColor) ch = std::clamp(ch, 0.0f, 1.0f);
+    d.scatterAnisotropy = std::clamp(d.scatterAnisotropy, -0.99f, 0.99f);
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
 }
 
