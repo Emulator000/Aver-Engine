@@ -23,8 +23,11 @@ GENERATED data lives under the project's `Binaries/Streaming` and is never autho
   it out of date), `FOLIAGE <content .ocinst> <cell-sorted copy>` per table, and `B <id> <world AABB>` per
   placement. Bounds are matched to placements by id at load (`OcWorldPlacement::hasBounds/boundsMin/Max`,
   runtime-only).
-- `<level>/<table>.ocinst`: each FOLIAGE table re-sorted into cells (`ICEL`/`IRUN` chunks,
-  `cellOcInstances`); the Content original is untouched.
+- `<level>/<path>.ocinst`: each FOLIAGE table re-sorted into cells (`ICEL`/`IRUN` chunks,
+  `cellOcInstances`); the Content original is untouched. `<path>` is the table's content-relative path with
+  `/` flattened to `_` (`Instances/City.ocinst` -> `Instances_City.ocinst`), so tables sharing a file name in
+  different folders do not collide. An existing `.ocstream` stores the copy's path, so older bakes (named by
+  file name alone) keep loading.
 
 The editor rewrites the `.ocstream` on every save of a streamed level (bounds from the records and live
 meshes). World Settings > Level Streaming > Regenerate Streaming Data (and `AverAssetC stream`) rebuild it

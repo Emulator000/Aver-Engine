@@ -6,10 +6,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <sstream>
 #include <string_view>
 
 namespace aver::fmt {
@@ -97,6 +100,74 @@ M4 inverseAffine(const M4& a) {
     for (int j = 0; j < 3; ++j)
         r.m[12 + j] = -(m[12] * r.m[j] + m[13] * r.m[4 + j] + m[14] * r.m[8 + j]);
     return r;
+}
+
+// Row-vector rotation by a quaternion (x, y, z, w) -- aver::Mat4::fromQuat and GfMatrix4d::SetRotate.
+static M4 quatRowM(f32 x, f32 y, f32 z, f32 w) {
+    const f32 n = std::sqrt(x * x + y * y + z * z + w * w);
+    if (n > 1e-12f) { x /= n; y /= n; z /= n; w /= n; }
+    M4 r = M4::identity();
+    r.m[0] = 1 - 2 * (y * y + z * z); r.m[1] = 2 * (x * y + w * z);     r.m[2]  = 2 * (x * z - w * y);
+    r.m[4] = 2 * (x * y - w * z);     r.m[5] = 1 - 2 * (x * x + z * z); r.m[6]  = 2 * (y * z + w * x);
+    r.m[8] = 2 * (x * z + w * y);     r.m[9] = 2 * (y * z - w * x);     r.m[10] = 1 - 2 * (x * x + y * y);
+    return r;
+}
+
+// The op KIND is the second namespace component: "xformOp:rotateXYZ:pivot" is a rotateXYZ.
+bool xformOpMatrix(const std::string& op, const std::vector<f32>& n, M4& om, bool* nonUniformScale) {
+    om = M4::identity();
+    std::string kind = op.size() > 8 ? op.substr(8) : std::string();
+    if (const usize colon = kind.find(':'); colon != std::string::npos) kind = kind.substr(0, colon);
+    if (kind == "translate" && n.size() >= 3)      om = translate(n[0], n[1], n[2]);
+    else if (kind == "scale" && n.size() >= 3) {
+        if (nonUniformScale && (std::fabs(n[0] - n[1]) > 1e-6f || std::fabs(n[0] - n[2]) > 1e-6f)) *nonUniformScale = true;
+        om = scaleM(n[0], n[1], n[2]);
+    }
+    else if (kind == "scale" && n.size() == 1)     om = scaleM(n[0], n[0], n[0]);
+    else if (kind == "rotateX" && !n.empty())      om = rotateAxis(0, n[0]);
+    else if (kind == "rotateY" && !n.empty())      om = rotateAxis(1, n[0]);
+    else if (kind == "rotateZ" && !n.empty())      om = rotateAxis(2, n[0]);
+    else if (kind.rfind("rotate", 0) == 0 && kind.size() == 9 && n.size() >= 3) {
+        // rotateXYZ: X first, then Y, then Z -- row-vector Rx * Ry * Rz. Any other order the same way;
+        // the value is always (x, y, z) angles, whatever order they are applied in.
+        for (int a = 0; a < 3; ++a) {
+            const char axis = kind[6 + a];
+            const int ai = axis == 'X' ? 0 : axis == 'Y' ? 1 : 2;
+            om = mul(om, rotateAxis(ai, n[static_cast<usize>(ai)]));
+        }
+    }
+    else if (kind == "orient" && n.size() >= 4)    om = quatRowM(n[0], n[1], n[2], n[3]);
+    else if (kind == "transform" && n.size() >= 16) for (int i = 0; i < 16; ++i) om.m[i] = n[static_cast<usize>(i)];
+    else return false;
+    return true;
+}
+
+// ---- diagnostics ------------------------------------------------------------------------------
+
+void diagSkip(Ctx& c, const char* reason, const std::string& prefix, const std::string& path) {
+    if (!c.out) return;
+    if (!c.diagSeen.insert(std::string(reason) + '|' + prefix + path).second) return;
+    auto& list = c.out->diagnostics.skipped;
+    usize at = 0;
+    while (at < list.size() && list[at].reason != reason) ++at;
+    if (at == list.size()) { list.emplace_back(); list.back().reason = reason; }
+    ++list[at].count;
+    if (list[at].examples.size() < kDiagExamples) list[at].examples.push_back(path);
+}
+
+bool diagTracing(const Ctx& c, const std::string& path) {
+    if (!c.opt) return false;
+    for (const std::string& pre : c.opt->tracePrims)
+        if (!pre.empty() && path.compare(0, pre.size(), pre) == 0 &&
+            (path.size() == pre.size() || pre.back() == '/' || path[pre.size()] == '/'))
+            return true;
+    return false;
+}
+
+void diagTrace(Ctx& c, const std::string& path, const std::string& msg) {
+    if (!c.out || !diagTracing(c, path)) return;
+    auto& t = c.out->diagnostics.trace;
+    if (t.size() < 20000) t.push_back(path + ": " + msg);
 }
 
 // ---- scanning ---------------------------------------------------------------------------------
@@ -455,6 +526,96 @@ void rebuildSmoothNormals(MeshAttrs& a) {
     }
 }
 
+// Triangles that two slots of one mesh both hold -- the same three vertex positions (quantised to 1e-3
+// units, 0.01 mm in centimetres), either winding -- reported, and with DropLater removed from the
+// later slot. Run on the finished submeshes, so a slot is exactly what a GeomSubset (or the leftover
+// group) became.
+constexpr usize kCoplanarMaxTris = 8000000;
+constexpr usize kCoplanarMaxPairs = 512;
+
+static u64 mix64(u64 x) {
+    x ^= x >> 33; x *= 0xff51afd7ed558ccdull;
+    x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull;
+    return x ^ (x >> 33);
+}
+
+static void resolveCoplanar(Ctx& c, OcMeshData& m, const std::string& primPath) {
+    if (m.submeshes.size() < 2) return;
+    const usize triCount = m.indices.size() / 3;
+    if (triCount > kCoplanarMaxTris) { diagSkip(c, "coplanar-scan-too-large", c.pathPrefix, primPath); return; }
+    const bool drop = c.opt->resolveCoplanar == UsdCoplanarPolicy::DropLater;
+
+    const usize vn = m.positions.size() / 3;
+    std::vector<u64> vh(vn);
+    for (usize v = 0; v < vn; ++v) {
+        u64 h = 0x9E3779B97F4A7C15ull;
+        for (usize k = 0; k < 3; ++k)
+            h = mix64(h ^ static_cast<u64>(std::llround(static_cast<f64>(m.positions[v * 3 + k]) * 1000.0)));
+        vh[v] = h;
+    }
+    struct Tri { u64 k[3]; u32 sub, tri; };
+    std::vector<Tri> tris;
+    tris.reserve(triCount);
+    for (u32 s = 0; s < m.submeshes.size(); ++s) {
+        const OcMeshSubmesh& sm = m.submeshes[s];
+        for (u32 i = 0; i + 2 < sm.indexCount; i += 3) {
+            Tri x{{0, 0, 0}, s, (sm.indexStart + i) / 3};
+            bool ok = true;
+            for (u32 k = 0; k < 3; ++k) {
+                const usize vi = static_cast<usize>(m.indices[sm.indexStart + i + k]) + sm.baseVertex;
+                if (vi >= vn) { ok = false; break; }
+                x.k[k] = vh[vi];
+            }
+            if (!ok) continue;
+            std::sort(x.k, x.k + 3);
+            tris.push_back(x);
+        }
+    }
+    std::sort(tris.begin(), tris.end(), [](const Tri& a, const Tri& b) {
+        for (int k = 0; k < 3; ++k) if (a.k[k] != b.k[k]) return a.k[k] < b.k[k];
+        return a.sub != b.sub ? a.sub < b.sub : a.tri < b.tri;
+    });
+    std::map<std::pair<u32, u32>, u64> pairs;
+    std::vector<u8> dropTri;
+    if (drop) dropTri.assign(triCount, 0);
+    for (usize i = 0; i < tris.size();) {
+        usize j = i + 1;
+        while (j < tris.size() && tris[j].k[0] == tris[i].k[0] && tris[j].k[1] == tris[i].k[1] && tris[j].k[2] == tris[i].k[2]) ++j;
+        for (usize k = i + 1; k < j; ++k)
+            if (tris[k].sub != tris[i].sub) {
+                ++pairs[{tris[i].sub, tris[k].sub}];
+                if (drop) dropTri[tris[k].tri] = 1;
+            }
+        i = j;
+    }
+    if (pairs.empty()) return;
+
+    UsdDiagnostics& d = c.out->diagnostics;
+    if (c.diagSeen.insert("coplanar|" + c.pathPrefix + primPath).second)
+        for (const auto& [slots, n] : pairs) {
+            d.coplanarTriangles += n;
+            if (d.coplanar.size() >= kCoplanarMaxPairs) { ++d.coplanarPairsOmitted; continue; }
+            d.coplanar.push_back(UsdCoplanarPair{primPath, m.submeshes[slots.first].name, m.submeshes[slots.second].name, n, drop});
+        }
+    if (!drop) return;
+
+    std::vector<u32> kept;
+    kept.reserve(m.indices.size());
+    std::vector<OcMeshSubmesh> subs;
+    for (OcMeshSubmesh sm : m.submeshes) {
+        const u32 start = static_cast<u32>(kept.size());
+        for (u32 i = 0; i + 2 < sm.indexCount; i += 3) {
+            if (dropTri[(sm.indexStart + i) / 3]) continue;
+            kept.insert(kept.end(), m.indices.begin() + sm.indexStart + i, m.indices.begin() + sm.indexStart + i + 3);
+        }
+        sm.indexStart = start;
+        sm.indexCount = static_cast<u32>(kept.size()) - start;
+        if (sm.indexCount) subs.push_back(std::move(sm));
+    }
+    m.indices = std::move(kept);
+    m.submeshes = std::move(subs);
+}
+
 // Turns a gathered UsdGeomMesh into an OcMeshData in engine space.
 void buildMesh(Ctx& c, const MeshAttrs& authored, const M4& world, const std::string& primPath,
                const std::vector<GeomSubsetDef>& subsets) {
@@ -470,6 +631,11 @@ void buildMesh(Ctx& c, const MeshAttrs& authored, const M4& world, const std::st
     const MeshAttrs& a = *chosen;
     if (!a.hasPoints || a.points.size() < 9) return;
     if (a.faceVertexIndices.empty() || a.faceVertexCounts.empty()) return;
+    if ((a.hasDisplayOpacity || a.hasDisplayColor) && c.diagSeen.insert("display|" + c.pathPrefix + primPath).second) {
+        UsdDiagnostics& d = c.out->diagnostics;
+        if (a.hasDisplayOpacity) { ++d.displayOpacityMeshes; if (d.displayOpacityNames.size() < 256) d.displayOpacityNames.push_back(primPath); }
+        if (a.hasDisplayColor)   { ++d.displayColorMeshes;   if (d.displayColorNames.size() < 256)   d.displayColorNames.push_back(primPath); }
+    }
 
     const usize pointCount = a.points.size() / 3;
 
@@ -586,6 +752,9 @@ void buildMesh(Ctx& c, const MeshAttrs& authored, const M4& world, const std::st
     std::vector<u32> reordered;
     reordered.reserve(m.indices.size());
     std::vector<bool> claimed(faceRange.size(), false);
+    // A face two subsets both list would be built twice (z-fighting, double lighting): the FIRST
+    // subset keeps it, later listings are skipped and counted.
+    u64 duplicateFaces = 0;
 
     const auto appendGroup = [&](const std::vector<i32>& faces, const std::string& binding,
                                  const std::string& name) {
@@ -593,6 +762,7 @@ void buildMesh(Ctx& c, const MeshAttrs& authored, const M4& world, const std::st
         for (const i32 f : faces) {
             if (f < 0 || usize(f) >= faceRange.size()) continue;
             const auto& r = faceRange[usize(f)];
+            if (claimed[usize(f)]) { if (r.second) ++duplicateFaces; continue; }
             reordered.insert(reordered.end(), m.indices.begin() + r.first,
                              m.indices.begin() + r.first + r.second);
             claimed[usize(f)] = true;
@@ -623,7 +793,13 @@ void buildMesh(Ctx& c, const MeshAttrs& authored, const M4& world, const std::st
         appendGroup(leftover, a.materialBinding, primPath);
 
     if (m.submeshes.empty()) return;
+    if (duplicateFaces && c.diagSeen.insert("dupsub|" + c.pathPrefix + primPath).second) {
+        UsdDiagnostics& d = c.out->diagnostics;
+        d.duplicateSubsetFaces += duplicateFaces;
+        if (d.duplicateSubsetMeshes.size() < kDiagExamples) d.duplicateSubsetMeshes.push_back(primPath);
+    }
     m.indices = std::move(reordered);
+    resolveCoplanar(c, m, primPath);
     // EMPTY FOR NOW, always: a binding names a prim path that may not have been read yet, so the
     // slots are filled in after the walk -- see resolveBindings.
     m.materialSlots.assign(slotBinding.size(), std::string());
@@ -1278,6 +1454,7 @@ bool parseMember(Scanner& s, Ctx& c, MeshAttrs& attrs,
     else if (is("subdivisionScheme")) { attrs.subdivisionScheme = strVal; if (!strVal.empty() && strVal != "none") c.sawSubdiv = true; }
     else if (is("orientation")) attrs.orientation = strVal;
     else if (is("elementType")) attrs.subsetElementType = strVal;
+    else if (is("familyName"))  attrs.subsetFamily = strVal;
     else if (is("indices")) allInts(region, attrs.subsetIndices);
     else if (is("doubleSided")) {
         // `uniform bool doubleSided = 1`, or `= true`. Both spellings occur.
@@ -1304,29 +1481,33 @@ bool parseMember(Scanner& s, Ctx& c, MeshAttrs& attrs,
         // purpose-qualified one that follows it and neither silently replaces the other.
         if (attrs.materialBinding.empty()) attrs.materialBinding = connectionTarget(region);
     }
-    else if (is("xformOp:translate")) {
-        std::vector<f32> v; allNumbers(region, v);
-        if (v.size() >= 3) ops.emplace_back("translate", translate(v[0], v[1], v[2]));
-    }
-    else if (is("xformOp:scale")) {
-        std::vector<f32> v; allNumbers(region, v);
-        if (v.size() >= 3) {
-            if (std::fabs(v[0] - v[1]) > 1e-6f || std::fabs(v[0] - v[2]) > 1e-6f) c.sawNonUniformScale = true;
-            ops.emplace_back("scale", scaleM(v[0], v[1], v[2]));
+    else if (is("primvars:displayOpacity")) attrs.hasDisplayOpacity = true;
+    else if (is("primvars:displayColor"))   attrs.hasDisplayColor = true;
+    else if (is("xformOpOrder")) {
+        // `uniform token[] xformOpOrder = ["xformOp:translate", "!invert!xformOp:rotateZ"]`.
+        attrs.xformOpOrder.clear();
+        attrs.hasXformOpOrder = true;
+        for (usize k = 0; k < region.size();) {
+            if (region[k] != '"' && region[k] != '\'') { ++k; continue; }
+            const char q = region[k];
+            const usize close = region.find(q, k + 1);
+            if (close == std::string_view::npos) break;
+            attrs.xformOpOrder.emplace_back(region.substr(k + 1, close - k - 1));
+            k = close + 1;
         }
     }
-    else if (is("xformOp:rotateXYZ") || is("xformOp:rotateX") || is("xformOp:rotateY") || is("xformOp:rotateZ")) {
+    else if (name.rfind("xformOp:", 0) == 0 && name.find('.') == std::string_view::npos) {
+        // Any xformOp, suffixed ones ("xformOp:translate:pivot") included: whether it applies is
+        // xformOpOrder's say, so every one is kept under its full name.
         std::vector<f32> v; allNumbers(region, v);
-        M4 r = M4::identity();
-        if (name == "xformOp:rotateX" && v.size() >= 1) r = rotateAxis(0, v[0]);
-        else if (name == "xformOp:rotateY" && v.size() >= 1) r = rotateAxis(1, v[0]);
-        else if (name == "xformOp:rotateZ" && v.size() >= 1) r = rotateAxis(2, v[0]);
-        else if (v.size() >= 3) r = mul(mul(rotateAxis(0, v[0]), rotateAxis(1, v[1])), rotateAxis(2, v[2]));
-        ops.emplace_back("rotate", r);
-    }
-    else if (is("xformOp:transform")) {
-        std::vector<f32> v; allNumbers(region, v);
-        if (v.size() >= 16) { M4 t{}; for (int i = 0; i < 16; ++i) t.m[i] = v[i]; ops.emplace_back("transform", t); }
+        // Text quaternions are (real, i, j, k); xformOpMatrix wants x y z w.
+        if (name.rfind("xformOp:orient", 0) == 0 && v.size() >= 4) std::rotate(v.begin(), v.begin() + 1, v.begin() + 4);
+        M4 om;
+        bool nonUniform = false;
+        if (xformOpMatrix(std::string(name), v, om, &nonUniform)) {
+            if (nonUniform) c.sawNonUniformScale = true;
+            ops.emplace_back(std::string(name), om);
+        }
     }
     return true;
 }
@@ -1338,15 +1519,51 @@ void parsePrimBody(Scanner& s, Ctx& c, const M4& parent, const std::string& path
 
     while (parseMember(s, c, attrs, ops, children, path)) {}
 
-    // Order is scale, then rotate, then translate: USD's convention when xformOpOrder is absent,
-    // and the order xformOpOrder itself lists in practice. Row-vector composition puts the matrix
-    // applied FIRST on the left, which is why scale leads.
     M4 node = M4::identity();
-    for (const char* want : {"scale", "rotate", "transform"})
-        for (const auto& o : ops) if (o.first == want) node = mul(node, o.second);
-    for (const auto& o : ops) if (o.first == "translate") node = mul(node, o.second);
+    bool reset = false;
+    if (attrs.hasXformOpOrder) {
+        // xformOpOrder is authoritative: only the ops it lists apply. It lists the OUTERMOST op first
+        // (column-vector reading), so the row-vector product runs it in reverse. `!invert!` inverts
+        // an op, `!resetXformStack!` drops the parents' transform.
+        for (usize k = attrs.xformOpOrder.size(); k-- > 0;) {
+            std::string op = attrs.xformOpOrder[k];
+            bool invert = false;
+            if (op.rfind("!invert!", 0) == 0) { invert = true; op = op.substr(8); }
+            if (op == "!resetXformStack!") { reset = true; continue; }
+            const M4* om = nullptr;
+            for (const auto& o : ops) if (o.first == op) om = &o.second;
+            if (!om) continue;
+            node = mul(node, invert ? inverseAffine(*om) : *om);
+        }
+    } else {
+        // No xformOpOrder (hand-written files): scale, then rotate, then translate. Row-vector
+        // composition puts the matrix applied FIRST on the left, which is why scale leads.
+        static const char* const kLegacy[4][7] = {
+            {"xformOp:scale"},
+            {"xformOp:rotateX", "xformOp:rotateY", "xformOp:rotateZ", "xformOp:rotateXYZ"},
+            {"xformOp:transform"},
+            {"xformOp:translate"}};
+        for (const auto& group : kLegacy)
+            for (const auto& o : ops) {
+                bool in = false;
+                for (const char* want : group) if (want && o.first == want) in = true;
+                if (in) node = mul(node, o.second);
+            }
+    }
 
-    const M4 world = mul(node, parent);
+    // A reset prim's world is its own local: the parents' transform is dropped.
+    const M4 world = reset ? node : mul(node, parent);
+    if (reset) {
+        if (c.primResets) c.primResets->insert(path);
+        diagSkip(c, "reset-xform-stack", c.pathPrefix, path);
+    }
+    if (diagTracing(c, path)) {
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "text layer: %zu ops%s, resetXformStack=%d, world translation (%g, %g, %g)",
+                      ops.size(), attrs.hasXformOpOrder ? " (xformOpOrder)" : "", reset ? 1 : 0,
+                      static_cast<double>(world.m[12]), static_cast<double>(world.m[13]), static_cast<double>(world.m[14]));
+        diagTrace(c, path, buf);
+    }
     // The stage importer's view of this layer: every prim's transform, so a reference to any prim in
     // it can be resolved relative to that prim (see UsdImportInternal.hpp).
     if (c.primWorlds) (*c.primWorlds)[path] = world;
@@ -1361,9 +1578,10 @@ void parsePrimBody(Scanner& s, Ctx& c, const M4& parent, const std::string& path
         std::vector<DeferredChild> skids;
         while (parseMember(ss, c, sa, sops, skids, ch.path)) {}
         // `face` is the only elementType this can act on; a "point" or "edge" subset addresses
-        // something OcMeshData has no submesh concept for. familyName is not required to be
-        // materialBind, but a subset with no binding at all has nothing to contribute.
-        if (sa.subsetElementType != "face" || sa.materialBinding.empty()) continue;
+        // something OcMeshData has no submesh concept for. An unbound subset is kept only when its
+        // family is materialBind: it still names its material, for a material map (as the crate reader does).
+        if (sa.subsetElementType != "face") continue;
+        if (sa.materialBinding.empty() && sa.subsetFamily != "materialBind") continue;
         GeomSubsetDef g;
         const usize slash = ch.path.find_last_of('/');
         g.name    = slash == std::string::npos ? ch.path : ch.path.substr(slash + 1);
@@ -1489,6 +1707,14 @@ void reportUnsupported(Ctx& c) {
         out.unsupported.push_back("a material connected metallic to a texture other than the blue channel of its "
                                   "roughness image; .ocmat reads both from one image, so that metallic map was not "
                                   "applied and the literal metallic value (default 0) was used");
+    if (out.diagnostics.duplicateSubsetFaces)
+        out.unsupported.push_back(std::to_string(out.diagnostics.duplicateSubsetFaces) + " face(s) were listed by more than one GeomSubset; "
+                                  "the first subset kept each and the later listings were skipped (usdImportReportText names the meshes)");
+    if (out.diagnostics.coplanarTriangles)
+        out.unsupported.push_back(std::to_string(out.diagnostics.coplanarTriangles) + " triangle(s) are held by more than one material slot of "
+                                  "the same mesh (exact coplanar duplicates, z-fighting); " +
+                                  (c.opt->resolveCoplanar == UsdCoplanarPolicy::DropLater ? "the later slot's copies were dropped"
+                                                                                          : "kept -- UsdImportOptions::resolveCoplanar can drop them"));
     if (c.sawTimeSamples) out.unsupported.push_back("time-sampled attributes were ignored; the default (non-animated) value was used");
     if (c.sawSubdiv)      out.unsupported.push_back("subdivisionScheme was not 'none'; the control cage was imported as-is, NOT subdivided, so the model will look faceted");
     if (c.sawNonUniformScale) out.unsupported.push_back("a non-uniform xformOp:scale was applied to normals without an inverse-transpose, so shading on that prim is approximate");
@@ -1666,6 +1892,50 @@ bool importUsdFromMemory(const u8* bytes, usize size, const std::string& baseDir
         return fail(why, "USD: the stage parsed, but it contains no UsdGeomMesh with points -- "
                          "geometry behind references, payloads or variants is not composed by this importer");
     return true;
+}
+
+std::string usdImportReportText(const UsdImportResult& r) {
+    std::ostringstream o;
+    const UsdDiagnostics& d = r.diagnostics;
+    o << "USD import report\n";
+    o << "  encoding " << usdEncodingName(r.encoding) << ", up axis " << (r.sourceUpAxis.empty() ? "?" : r.sourceUpAxis)
+      << ", metersPerUnit " << r.sourceMetersPerUnit << "\n";
+    usize exact = 0;
+    for (const UsdPlacement& p : r.placements) if (p.exact) ++exact;
+    o << "  " << r.meshes.size() << " meshes, " << r.placements.size() << " placements ("
+      << exact << " with an exact matrix: shear or mirrored)\n";
+
+    o << "Prims skipped or re-posed, by reason (distinct prims)\n";
+    if (d.skipped.empty()) o << "  none\n";
+    for (const UsdSkipCount& s : d.skipped) {
+        o << "  " << s.reason << ": " << s.count << "\n";
+        for (const std::string& e : s.examples) o << "    " << e << "\n";
+        if (s.count > s.examples.size()) o << "    ... " << (s.count - s.examples.size()) << " more\n";
+    }
+
+    o << "GeomSubsets listing the same face: " << d.duplicateSubsetFaces << " face(s) skipped (first subset wins)\n";
+    for (const std::string& m : d.duplicateSubsetMeshes) o << "    " << m << "\n";
+
+    o << "Exact-coplanar duplicate triangles across slots of one mesh: " << d.coplanarTriangles << "\n";
+    for (const UsdCoplanarPair& p : d.coplanar)
+        o << "    " << p.mesh << ": " << p.slotA << " / " << p.slotB << " x" << p.triangles
+          << (p.dropped ? " (later slot dropped)" : " (kept)") << "\n";
+    if (d.coplanarPairsOmitted) o << "    ... " << d.coplanarPairsOmitted << " more slot pair(s)\n";
+
+    o << "Meshes with primvars:displayOpacity (not read): " << d.displayOpacityMeshes << "\n";
+    for (const std::string& m : d.displayOpacityNames) o << "    " << m << "\n";
+    o << "Meshes with primvars:displayColor (not read): " << d.displayColorMeshes << "\n";
+    for (const std::string& m : d.displayColorNames) o << "    " << m << "\n";
+
+    if (!r.unsupported.empty()) {
+        o << "Reported by the importer\n";
+        for (const std::string& u : r.unsupported) o << "  " << u << "\n";
+    }
+    if (!d.trace.empty()) {
+        o << "Trace\n";
+        for (const std::string& t : d.trace) o << "  " << t << "\n";
+    }
+    return o.str();
 }
 
 bool importUsd(const std::string& path, UsdImportResult& out,

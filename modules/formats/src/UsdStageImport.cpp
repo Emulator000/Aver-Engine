@@ -14,6 +14,9 @@
 //     referenced prims are expanded too (nestedInstancers).
 //   - VARIANTS: the authored selection only (variantSelection); a prim's selected variant adds its arcs
 //     and children. Guide/proxy-purpose and invisible prims are skipped.
+//   - !resetXformStack!: a reset prim's world is its own local transform, at every site that composes
+//     one (the stage walk, what an arc brings in, nested instancers, nested arcs). Inside a prototype
+//     "world" is the prototype's space, so a reset prim there drops the ancestors up to the prototype.
 // Not composed: specializes, relocates, and text layers are not merged by path with
 // binary ones (each text layer contributes what it defines itself). Time-sampled attributes use their
 // default. Each of these is reported in `unsupported` when met, never silently skipped.
@@ -81,6 +84,7 @@ struct Source {
     std::unordered_map<std::string, M4> worlds;
     std::vector<std::string> cameraPaths;
     std::vector<LightPrim> lights;
+    std::unordered_set<std::string> resets;     // prims that authored !resetXformStack!
     // Header metadata, either encoding.
     f32 metersPerUnit = 1.0f;
     bool yUp = true;
@@ -116,6 +120,7 @@ struct Piece {
 struct NestedArc {
     Loc loc;
     M4 toProto;
+    bool reset = false;          // the prim authored !resetXformStack!: toProto is its world, parents dropped
 };
 
 struct Proto {
@@ -220,8 +225,10 @@ i32 loadSource(Stage& st, const std::string& path, std::string* why) {
         c.primWorlds = &s->worlds;
         c.cameraPaths = &s->cameraPaths;
         c.lights = &s->lights;
+        c.primResets = &s->resets;
         UsdaHeader hdr;
         parseUsdaText(text, c, hdr, /*applyUnits=*/false);
+        c.primResets = nullptr;
         c.rawSink = nullptr;
         c.primWorlds = nullptr;
         c.cameraPaths = nullptr;
@@ -343,7 +350,12 @@ int specifierOf(Stage& st, const Stack& sk, const std::string& path) {
 
 bool isActive(Stage& st, const Stack& sk, const std::string& path) {
     UsdCrateValue v;
-    return !(fieldOf(st, sk, path, "active", v) && !v.i.empty() && v.i[0] == 0);
+    if (fieldOf(st, sk, path, "active", v) && !v.i.empty() && v.i[0] == 0) {
+        diagSkip(st.c, "inactive", sk.prefix, path);
+        diagTrace(st.c, path, "skipped: inactive");
+        return false;
+    }
+    return true;
 }
 
 // Guide/proxy purpose and invisible prims (collision, occlusion, lighting volumes) are not rendered geometry.
@@ -351,10 +363,14 @@ bool hiddenPrim(Stage& st, const Stack& sk, const std::string& path) {
     UsdCrateValue v;
     if (attr(st, sk, path, "purpose", v) && v.str() && (*v.str() == "guide" || *v.str() == "proxy")) {
         st.note("prims with purpose guide/proxy were skipped");
+        diagSkip(st.c, "guide-proxy-purpose", sk.prefix, path);
+        diagTrace(st.c, path, "skipped: purpose " + *v.str());
         return true;
     }
     if (attr(st, sk, path, "visibility", v) && v.str() && *v.str() == "invisible") {
         st.note("invisible prims were skipped");
+        diagSkip(st.c, "invisible", sk.prefix, path);
+        diagTrace(st.c, path, "skipped: invisible");
         return true;
     }
     return false;
@@ -400,13 +416,15 @@ M4 quatRow(f32 x, f32 y, f32 z, f32 w) {
     return r;
 }
 
-// A prim's own xformOps, in xformOpOrder. `has` says whether it authored any.
+// A prim's own xformOps, in xformOpOrder. `has` says whether it authored any; `reset` whether the
+// order carries !resetXformStack! (the prim's world is then its own local, parents dropped).
 //
 // ORDER: USD lists ops outermost first and applies them to COLUMN vectors, so [translate, rotate,
 // scale] means "scale, then rotate, then translate". In this row-vector convention that is
 // S * R * T -- the list multiplied in reverse.
-M4 localXform(Stage& st, const Stack& sk, const std::string& path, bool& has) {
+M4 localXform(Stage& st, const Stack& sk, const std::string& path, bool& has, bool& reset) {
     has = false;
+    reset = false;
     UsdCrateValue order;
     if (!attr(st, sk, path, "xformOpOrder", order) || order.s.empty()) return M4::identity();
     has = true;
@@ -415,34 +433,13 @@ M4 localXform(Stage& st, const Stack& sk, const std::string& path, bool& has) {
         std::string op = order.s[k];
         bool invert = false;
         if (op.rfind("!invert!", 0) == 0) { invert = true; op = op.substr(8); }
-        if (op == "!resetXformStack!") { st.note("xformOp !resetXformStack! was ignored"); continue; }
+        if (op == "!resetXformStack!") { reset = true; continue; }
         UsdCrateValue v;
         if (!attr(st, sk, path, op, v)) continue;
-        const std::vector<f32> n = v.asFloats();
-        // The op KIND is the second namespace component: "xformOp:rotateXYZ:pivot" is a rotateXYZ.
-        std::string kind = op.size() > 8 ? op.substr(8) : std::string();
-        if (const usize colon = kind.find(':'); colon != std::string::npos) kind = kind.substr(0, colon);
-        M4 om = M4::identity();
-        if (kind == "translate" && n.size() >= 3)      om = translate(n[0], n[1], n[2]);
-        else if (kind == "scale" && n.size() >= 3) {
-            if (std::fabs(n[0] - n[1]) > 1e-6f || std::fabs(n[0] - n[2]) > 1e-6f) st.c.sawNonUniformScale = true;
-            om = scaleM(n[0], n[1], n[2]);
-        }
-        else if (kind == "scale" && n.size() == 1)     om = scaleM(n[0], n[0], n[0]);
-        else if (kind == "rotateX" && !n.empty())      om = rotateAxis(0, n[0]);
-        else if (kind == "rotateY" && !n.empty())      om = rotateAxis(1, n[0]);
-        else if (kind == "rotateZ" && !n.empty())      om = rotateAxis(2, n[0]);
-        else if (kind.rfind("rotate", 0) == 0 && kind.size() == 9 && n.size() >= 3) {
-            // rotateXYZ: X first, then Y, then Z -- row-vector Rx * Ry * Rz. Any other order the same way.
-            for (int a = 0; a < 3; ++a) {
-                const char axis = kind[6 + a];
-                const int ai = axis == 'X' ? 0 : axis == 'Y' ? 1 : 2;
-                om = mul(om, rotateAxis(ai, n[static_cast<usize>(ai)]));
-            }
-        }
-        else if (kind == "orient" && n.size() >= 4)    om = quatRow(n[0], n[1], n[2], n[3]);
-        else if (kind == "transform" && n.size() >= 16) for (int i = 0; i < 16; ++i) om.m[i] = n[static_cast<usize>(i)];
-        else { st.note("xformOp '" + op + "' is not a kind this importer applies; it was ignored"); continue; }
+        M4 om;
+        bool nonUniform = false;
+        if (!xformOpMatrix(op, v.asFloats(), om, &nonUniform)) { st.note("xformOp '" + op + "' is not a kind this importer applies; it was ignored"); continue; }
+        if (nonUniform) st.c.sawNonUniformScale = true;
         if (invert) om = inverseAffine(om);
         m = mul(m, om);
     }
@@ -634,40 +631,75 @@ bool resolveRef(Stage& st, const Loc& from, i32 authoringSource, const UsdCrateR
 }
 
 // The prim's local transform as composed, strongest opinion first: its own ops, else an inherited
-// class's (which may itself come through the class's reference), else a reference target's. A text
-// layer's prim: its world relative to its parent's. False when nothing along the way authored one.
-bool composedLocal(Stage& st, const Loc& loc, M4& out, int depth) {
+// class's (which may itself come through the class's reference), else a reference's or payload's
+// target (the asset root's own xform). A text layer's prim: its world relative to its parent's, or its
+// world outright when it reset the stack. False when nothing along the way authored one. `reset`, when
+// given, says the winning opinion carried !resetXformStack!.
+bool composedLocal(Stage& st, const Loc& loc, M4& out, int depth, bool* reset = nullptr) {
     out = M4::identity();
+    if (reset) *reset = false;
     if (depth > 32) return false;
     if (loc.text >= 0) {
         const Source& s = *st.sources[static_cast<usize>(loc.text)];
         const auto self = s.worlds.find(loc.path);
         if (self == s.worlds.end()) return false;
+        const bool rst = s.resets.count(loc.path) != 0;
         const auto par = s.worlds.find(parentPath(loc.path));
-        out = par == s.worlds.end() ? self->second : mul(self->second, inverseAffine(par->second));
+        out = rst || par == s.worlds.end() ? self->second : mul(self->second, inverseAffine(par->second));
+        if (reset) *reset = rst;
         return true;
     }
-    bool has = false;
-    out = localXform(st, *loc.stack, loc.path, has);
-    if (has) return true;
+    bool has = false, rst = false;
+    out = localXform(st, *loc.stack, loc.path, has, rst);
+    if (has) {
+        if (reset) *reset = rst;
+        if (rst) diagSkip(st.c, "reset-xform-stack", loc.stack->prefix, loc.path);
+        if (diagTracing(st.c, loc.path))
+            diagTrace(st.c, loc.path, std::string("local xform from its own ops") + (rst ? ", resetXformStack" : ""));
+        return true;
+    }
     UsdCrateValue v;
     if (fieldOf(st, *loc.stack, loc.path, "inheritPaths", v))
         for (const std::string& cls : v.s)
-            if (composedLocal(st, Loc{loc.stack, -1, cls}, out, depth + 1)) return true;
+            if (composedLocal(st, Loc{loc.stack, -1, cls}, out, depth + 1, reset)) {
+                if (diagTracing(st.c, loc.path)) diagTrace(st.c, loc.path, "local xform from inherited class " + cls);
+                return true;
+            }
     i32 from = -1;
-    if (fieldOf(st, *loc.stack, loc.path, "references", v, &from))
-        for (const UsdCrateRef& ref : v.refs) {
-            Loc t;
-            if (resolveRef(st, loc, from, ref, t) && composedLocal(st, t, out, depth + 1)) return true;
-        }
+    for (const char* arc : {"references", "payload"})
+        if (fieldOf(st, *loc.stack, loc.path, arc, v, &from))
+            for (const UsdCrateRef& ref : v.refs) {
+                Loc t;
+                if (resolveRef(st, loc, from, ref, t) && composedLocal(st, t, out, depth + 1, reset)) {
+                    if (diagTracing(st.c, loc.path))
+                        diagTrace(st.c, loc.path, std::string("local xform from the ") + arc + " target " + t.path);
+                    return true;
+                }
+            }
     out = M4::identity();
+    if (reset) *reset = false;
     return false;
 }
 
-M4 composedLocal(Stage& st, const Loc& loc) {
+M4 composedLocal(Stage& st, const Loc& loc, bool* reset = nullptr) {
     M4 m;
-    composedLocal(st, loc, m, 0);
+    composedLocal(st, loc, m, 0, reset);
     return m;
+}
+
+// A child's transform to the output space: its local one on top of `up`, or alone when it reset.
+M4 childToOut(Stage& st, const Loc& child, const M4& up, bool* reset = nullptr) {
+    bool rst = false;
+    const M4 lc = composedLocal(st, child, &rst);
+    if (reset) *reset = rst;
+    return rst ? lc : mul(lc, up);
+}
+
+// Text layer: whether a prim between `mesh` (inclusive) and `root` (exclusive) reset the stack.
+bool resetBetween(const Source& s, const std::string& mesh, const std::string& root) {
+    for (std::string p = mesh; p.size() > root.size() && p != "/"; p = parentPath(p))
+        if (s.resets.count(p)) return true;
+    return false;
 }
 
 bool hasArcs(Stage& st, const Stack& sk, const std::string& path) {
@@ -691,8 +723,13 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
         const auto self = s.worlds.find(loc.path);
         if (self == s.worlds.end()) { st.note("a reference named " + loc.path + ", which " + s.path + " does not define"); return; }
         const M4 base = inverseAffine(self->second);
+        const bool anyReset = !s.resets.empty();
         for (const RawMesh& rm : s.raw)
-            if (under(rm.path, loc.path)) out.push_back(Piece{&rm, mul(mul(rm.world, base), toOut), s.prefix, groupOf(s)});
+            if (under(rm.path, loc.path)) {
+                // A mesh under a reset prim: rm.world already starts at that prim.
+                const bool rb = anyReset && resetBetween(s, rm.path, loc.path);
+                out.push_back(Piece{&rm, rb ? rm.world : mul(mul(rm.world, base), toOut), s.prefix, groupOf(s)});
+            }
         return;
     }
     Stack& sk = *loc.stack;
@@ -720,7 +757,11 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
         const UsdCrate& cr = *st.sources[static_cast<usize>(li)]->cr;
         const i32 spec = cr.specIndex(loc.path);
         if (spec < 0) continue;
-        if (cr.hasField(spec, "specializes")) st.note("specializes arcs were not composed");
+        if (cr.hasField(spec, "specializes")) {
+            st.note("specializes arcs were not composed");
+            diagSkip(st.c, "specializes", sk.prefix, loc.path);
+            diagTrace(st.c, loc.path, "specializes arc not composed");
+        }
         if (cr.hasField(spec, "variantSetNames") && variants.empty()) st.c.sawVariant = true;
     }
 
@@ -729,10 +770,17 @@ void contents(Stage& st, const Loc& loc, const M4& toOut, std::vector<Piece>& ou
         if (specifierOf(st, sk, cp) == 2 || !isActive(st, sk, cp) || hiddenPrim(st, sk, cp)) continue;
         const std::string type = tokenOf(st, sk, cp, "typeName");
         if (type == "Material" || type == "Shader" || type == "GeomSubset") continue;
-        if (type == "PointInstancer") { st.note("a PointInstancer nested inside a prototype was not expanded"); continue; }
+        if (type == "PointInstancer") {
+            st.note("a PointInstancer nested inside a prototype was not expanded");
+            diagSkip(st.c, "nested-point-instancer", sk.prefix, cp);
+            diagTrace(st.c, cp, "nested PointInstancer not expanded");
+            continue;
+        }
         const Loc child{loc.stack, -1, cp};
-        if (nested && hasArcs(st, sk, cp)) { nested->push_back(NestedArc{child, mul(composedLocal(st, child), toOut)}); continue; }
-        contents(st, child, mul(composedLocal(st, child), toOut), out, depth + 1, nested);
+        bool rst = false;
+        const M4 toChild = childToOut(st, child, toOut, &rst);
+        if (nested && hasArcs(st, sk, cp)) { nested->push_back(NestedArc{child, toChild, rst}); continue; }
+        contents(st, child, toChild, out, depth + 1, nested);
     }
 }
 
@@ -864,6 +912,27 @@ UsdPlacement placementFor(const Ctx& c, i32 meshIndex, const M4& m) {
     pl.rotation[0] = tr.rotation.x; pl.rotation[1] = tr.rotation.y;
     pl.rotation[2] = tr.rotation.z; pl.rotation[3] = tr.rotation.w;
     pl.scale = tr.scale;
+
+    // A mirror (negative determinant) or a shear is no position + quaternion + scale; the TRS above is
+    // then only the nearest one, and the true matrix rides along (UsdPlacement::exact). Shear is
+    // measured as GltfImport's decomposeTrs does: the cosine between normalised basis rows.
+    const f32 det = e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1]) - e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0]) +
+                    e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
+    bool exact = det < 0.0f;
+    f32 len[3];
+    for (int i = 0; i < 3; ++i) len[i] = std::sqrt(e[i][0] * e[i][0] + e[i][1] * e[i][1] + e[i][2] * e[i][2]);
+    if (!exact && len[0] > 1e-8f && len[1] > 1e-8f && len[2] > 1e-8f)
+        for (int a = 0; a < 3 && !exact; ++a)
+            for (int b = a + 1; b < 3 && !exact; ++b) {
+                f32 d = 0.0f;
+                for (int k = 0; k < 3; ++k) d += (e[a][k] / len[a]) * (e[b][k] / len[b]);
+                exact = std::fabs(d) > 1e-3f;
+            }
+    if (exact) {
+        pl.exact = true;
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) pl.matrix[i * 4 + j] = e[i][j];
+        pl.matrix[12] = pl.position.x; pl.matrix[13] = pl.position.y; pl.matrix[14] = pl.position.z;
+    }
     return pl;
 }
 
@@ -1125,7 +1194,7 @@ void nestedInstancers(Stage& st, const Loc& loc, const M4& toWorld, int depth) {
         const std::string type = tokenOf(st, sk, cp, "typeName");
         if (type == "Material" || type == "Shader" || type == "GeomSubset" || type == "Mesh") continue;
         const Loc child{loc.stack, -1, cp};
-        const M4 world = mul(composedLocal(st, child), toWorld);
+        const M4 world = childToOut(st, child, toWorld);
         if (type == "PointInstancer") registerInstancer(st, sk, cp, world);
         else nestedInstancers(st, child, world, depth + 1);
     }
@@ -1162,7 +1231,7 @@ void placeArc(Stage& st, const Loc& loc, const M4& world, const std::string& nam
         st.c.out->placements.push_back(std::move(pl));
     }
     if (depth >= 32) { if (!nested.empty()) st.note("arcs nested deeper than 32 levels were not placed"); return; }
-    for (const NestedArc& n : nested) placeArc(st, n.loc, mul(n.toProto, world), name, depth + 1);
+    for (const NestedArc& n : nested) placeArc(st, n.loc, n.reset ? n.toProto : mul(n.toProto, world), name, depth + 1);
 }
 
 // A nested asset placed many times is scatter (props, rocks, furniture): an empty name sends it to foliage.
@@ -1182,7 +1251,13 @@ void walkStatic(Stage& st, Stack& sk, const std::string& path, const M4& parent,
         const std::string type = tokenOf(st, sk, cp, "typeName");
         if (type == "Material" || type == "Shader" || type == "GeomSubset") continue;
         const Loc loc{&sk, -1, cp};
-        const M4 world = mul(composedLocal(st, loc), parent);
+        const M4 world = childToOut(st, loc, parent);
+        if (diagTracing(st.c, cp)) {
+            char buf[120];
+            std::snprintf(buf, sizeof buf, "%s: world translation (%g, %g, %g)", type.empty() ? "prim" : type.c_str(),
+                          static_cast<double>(world.m[12]), static_cast<double>(world.m[13]), static_cast<double>(world.m[14]));
+            diagTrace(st.c, cp, buf);
+        }
         if (type == "PointInstancer") { registerInstancer(st, sk, cp, world); continue; }
         if (type == "Camera") st.c.out->cameras.push_back(cameraPose(st.c, cp, world));
         UsdCrateValue v;
@@ -1480,7 +1555,11 @@ void normalisePrototypeScale(Stage& st) {
         m.boundsMin = Vec3{m.boundsMin.x * s, m.boundsMin.y * s, m.boundsMin.z * s};
         m.boundsMax = Vec3{m.boundsMax.x * s, m.boundsMax.y * s, m.boundsMax.z * s};
         for (UsdPlacement& pl : out.placements)
-            if (pl.meshIndex == mesh) pl.scale = Vec3{pl.scale.x / s, pl.scale.y / s, pl.scale.z / s};
+            if (pl.meshIndex == mesh) {
+                pl.scale = Vec3{pl.scale.x / s, pl.scale.y / s, pl.scale.z / s};
+                if (pl.exact)
+                    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) pl.matrix[i * 4 + j] /= s;
+            }
     }
 }
 
@@ -1501,6 +1580,10 @@ void collectLayerStack(Stage& st, i32 src, std::vector<i32>& order, std::unorder
 }
 
 } // namespace
+
+namespace usd_detail {
+UsdPlacement placementForMatrix(const Ctx& c, i32 meshIndex, const M4& m) { return placementFor(c, meshIndex, m); }
+}
 
 bool importUsdStage(const std::string& path, UsdImportResult& out, const UsdImportOptions& opt,
                     std::string* why) {

@@ -12,6 +12,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace aver::fmt::usd_detail {
@@ -47,6 +48,7 @@ struct MeshAttrs {
     // the same member reader. `indices` on a face subset are FACE numbers, which is why they cannot
     // share faceVertexIndices.
     std::string      subsetElementType;
+    std::string      subsetFamily;      // GeomSubset familyName
     std::vector<i32> subsetIndices;
     // USD puts doubleSided on the GEOMETRY; glTF and .ocmat put it on the material. Carried here and
     // folded into the bound material by resolveBindings.
@@ -55,6 +57,12 @@ struct MeshAttrs {
     // Blender's `primvars:sharp_face` (uniform bool, one per face), when the file has it: nonzero =
     // flat-shaded. Read so buildMesh can catch normals that contradict it (rebuildSmoothNormals).
     std::vector<i32> sharpFace;
+    // primvars:displayOpacity / displayColor present (never read; only reported, see UsdDiagnostics).
+    bool hasDisplayOpacity = false, hasDisplayColor = false;
+    // The prim's xformOpOrder, when it authored one (text layers; the crate reads its own). Only the
+    // ops it lists apply, in this order, `!invert!` and `!resetXformStack!` included.
+    std::vector<std::string> xformOpOrder;
+    bool hasXformOpOrder = false;
 };
 
 // One `def GeomSubset` under a Mesh: a named set of FACE indices with its own material binding.
@@ -162,7 +170,26 @@ struct Ctx {
     // Prefixed onto every Material path this context registers AND every binding buildMesh records,
     // so two layers declaring the same material path cannot bind each other's materials.
     std::string pathPrefix;
+    // Text layers: the paths of prims that authored !resetXformStack! (their world drops the parents).
+    std::unordered_set<std::string>* primResets = nullptr;
+    // Diagnostics already recorded, by key, so a prim or mesh reached through several arcs counts once.
+    std::unordered_set<std::string> diagSeen;
 };
+
+constexpr usize kDiagExamples = 8;
+// UsdDiagnostics::skipped: one distinct prim (`prefix` + `path`) under `reason`.
+void diagSkip(Ctx& c, const char* reason, const std::string& prefix, const std::string& path);
+// UsdImportOptions::tracePrims: whether `path` is under a traced prefix, and a line into the trace.
+bool diagTracing(const Ctx& c, const std::string& path);
+void diagTrace(Ctx& c, const std::string& path, const std::string& msg);
+
+// One xformOp as a matrix. `op` is the full attribute name ("xformOp:rotateXYZ:pivot" is a rotateXYZ),
+// `n` its numbers (orient as x y z w). False for a kind this importer does not apply.
+bool xformOpMatrix(const std::string& op, const std::vector<f32>& n, M4& out, bool* nonUniformScale);
+
+// The placement UsdPlacement carries for USD-space row-vector matrix `m`, as importUsdStage builds it
+// (exposed so tests can check the exact-matrix flag without authoring a binary stage).
+UsdPlacement placementForMatrix(const Ctx& c, i32 meshIndex, const M4& m);
 
 // A USDA layer's header metadata.
 struct UsdaHeader {

@@ -18,6 +18,7 @@
 // trustworthy result lines -- a caller that never saw the summary line treats the whole run as
 // incomplete, but nothing already reported as ok+verified is a lie.
 #include "aver/formats/GltfImport.hpp"
+#include "aver/formats/MaterialMap.hpp"   // --material-map
 #include "aver/formats/ObjImport.hpp"
 #include "aver/formats/UsdImport.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -707,85 +708,7 @@ void applyLodAndClustering(fmt::OcMeshData& m, f32 lodRatio, const std::string& 
 }
 #endif
 
-// ---- --material-map: unbound USD subsets to materials by name ----
-
-struct MaterialRule { std::string pattern, stem; };   // pattern "*" matches anything; stem "-" drops the faces
-
-bool loadMaterialMap(const std::string& path, std::vector<MaterialRule>& rules) {
-    std::ifstream f(path);
-    if (!f) return false;
-    std::string line;
-    while (std::getline(f, line)) {
-        std::istringstream ls(line);
-        MaterialRule r;
-        if (!(ls >> r.pattern) || r.pattern[0] == '#' || !(ls >> r.stem)) continue;
-        for (char& ch : r.pattern) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        rules.push_back(std::move(r));
-    }
-    return true;
-}
-
-// A drop rule matches whole name tokens only ('_'-separated; trailing digits allowed), so `clip` drops
-// clip_player_ai but not a clipboard prop, and `stain` drops wall_stain_01 but not metal_stainless_steel.
-bool tokenMatch(const std::string& name, const std::string& pat) {
-    for (usize at = name.find(pat); at != std::string::npos; at = name.find(pat, at + 1)) {
-        const usize end = at + pat.size();
-        const bool startOk = at == 0 || name[at - 1] == '_';
-        const bool endOk = end == name.size() || name[end] == '_' || std::isdigit(static_cast<unsigned char>(name[end]));
-        if (startOk && endOk) return true;
-    }
-    return false;
-}
-
-// Empty slots take the first rule whose pattern is in their submesh's leaf name (a GeomSubset's name), then
-// each touched mesh is regrouped to one submesh per material. A mesh the drops empty entirely is logged
-// with what emptied it, so a rule that eats real geometry shows up in the import log.
-void applyMaterialMap(std::vector<fmt::OcMeshData>& meshes, const std::vector<std::string>& names,
-                      const std::vector<MaterialRule>& rules) {
-    usize mapped = 0, dropped = 0, unmatched = 0, emptied = 0;
-    for (usize mi = 0; mi < meshes.size(); ++mi) {
-        fmt::OcMeshData& m = meshes[mi];
-        bool touched = false;
-        std::vector<fmt::OcMeshSubmesh> keep;
-        std::vector<std::string> droppedHere;
-        for (fmt::OcMeshSubmesh& sm : m.submeshes) {
-            if (sm.materialSlot >= m.materialSlots.size() || !m.materialSlots[sm.materialSlot].empty()) {
-                keep.push_back(sm);
-                continue;
-            }
-            std::string leaf = sm.name.substr(sm.name.find_last_of('/') + 1);
-            for (char& ch : leaf) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            const MaterialRule* hit = nullptr;
-            for (const MaterialRule& r : rules) {
-                const bool match = r.pattern == "*" || (r.stem == "-" ? tokenMatch(leaf, r.pattern)
-                                                                       : leaf.find(r.pattern) != std::string::npos);
-                if (match) { hit = &r; break; }
-            }
-            if (!hit) { ++unmatched; keep.push_back(sm); continue; }
-            touched = true;
-            if (hit->stem == "-") {
-                ++dropped;
-                if (droppedHere.size() < 6) droppedHere.push_back(leaf + " (" + hit->pattern + ")");
-                continue;
-            }
-            // Each subset has its own slot (buildMesh), so writing it in place touches no other submesh.
-            m.materialSlots[sm.materialSlot] = hit->stem;
-            ++mapped;
-            keep.push_back(sm);
-        }
-        if (!touched && m.submeshes.size() <= 255) continue;
-        if (keep.empty() && !m.submeshes.empty()) {
-            ++emptied;
-            std::string why;
-            for (const std::string& d : droppedHere) why += (why.empty() ? "" : ", ") + d;
-            AVER_INFO("--material-map: '{}' dropped whole: {}", mi < names.size() ? names[mi] : std::string("?"), why);
-        }
-        m.submeshes = std::move(keep);
-        fmt::groupSubmeshesByMaterial(m);
-    }
-    AVER_INFO("--material-map: {} submesh(es) mapped, {} dropped, {} matched no rule, {} mesh(es) emptied",
-              mapped, dropped, unmatched, emptied);
-}
+// --material-map: rules and matching live in aver/formats/MaterialMap.hpp.
 
 // ---- writing and verifying one mesh, ported from ConvertTool.cpp unchanged ----
 
@@ -929,6 +852,10 @@ struct ScenePlacement {
     // Stem of the object clip this placement plays (an animated glTF node), "" for none. The level
     // writer makes it content-relative and adds the extension, exactly as it does for a mesh stem.
     std::string animClip;
+    // A placement a position+rotation+scale cannot carry (shear or a mirror): `matrix` is its engine-space
+    // row-vector world matrix (m[r*4+c]) and a PLACE line cannot hold it, so it goes to the .ocinst.
+    bool exact = false;
+    f32  matrix[16] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
 };
 
 // The viewpoint a level opens at, when the source scene named one (a USD stage's camera).
@@ -944,31 +871,25 @@ struct SceneSun {
 };
 
 // Fills 12 contiguous floats at `out` with the row-vector world transform OcInstances.hpp's own
-// convention describes, for one kept USD PointInstancer instance being written as FOLIAGE instead of
-// a PLACE/PLACEG entity.
+// convention describes, for one kept USD placement written as FOLIAGE instead of a PLACE/PLACEG entity.
 //
-// THIS MUST MATCH TODAY'S ENTITY PLACEMENT EXACTLY, and that is why it is not simply
-// `Transform{position, rotation, scale}.toMatrix()`. A PLACEG line's rotation is not stored as this
-// quaternion -- writeSceneLevel converts it to degrees with world::eulerDegFromQuat first (see its
-// own `op.roll/pitch/yaw` lines, a few lines below), and world::instantiate (LevelInstance.cpp)
-// reconstructs the rotation those degrees encode with world::quatFromEulerDeg when the level loads.
-// That round trip is not always lossless -- eulerDegFromQuat's own header comment documents the one
-// gimbal-lock corner where it can only recover the rotation up to a pinned roll/yaw split -- so an
-// instance within 0.26 degrees of vertical built straight from `rotation` would end up at a visibly
-// DIFFERENT orientation than the identical prim gets today as an ordinary entity. Going through the
-// same two functions LevelInstance.cpp's instantiate() calls (both already reachable here via
-// LevelTransform.hpp) reproduces that round trip bit for bit instead of inventing a second, mismatched
-// quaternion-to-matrix path.
-//
-// Transform::toMatrix() (aver::Transform, Math.hpp) is the SAME row-vector scale*rotate*translate matrix
-// world::instantiate builds for a root placement (an instancer instance is always a root -- USD
-// PointInstancers are never nested under a level's own BEGIN/END scopes), so dropping its trailing
-// (0,0,0,1) column is exactly OcInstances.hpp's own t[r*3+c] = M.m[r][c] convention.
-void foliageInstanceTransform(const Vec3& position, const Quat& rotation, const Vec3& scale, f32* out) {
+// BUILT FROM THE QUATERNION AND SCALE DIRECTLY, or from the exact matrix when the placement has shear or
+// a mirror. This used to go through world::eulerDegFromQuat / quatFromEulerDeg to reproduce what a PLACE
+// line gets, but that round trip is only lossy at gimbal lock, where it gives the ENTITY the wrong
+// orientation; a foliage row has no reason to inherit that. Transform::toMatrix() is the same
+// scale*rotate*translate row-vector matrix world::instantiate builds for a root placement, so dropping
+// its trailing (0,0,0,1) column is OcInstances.hpp's t[r*3+c] = M.m[r][c] convention.
+void foliageInstanceTransform(const ScenePlacement& p, f32* out) {
+    if (p.exact) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 3; ++c)
+                out[r * 3 + c] = p.matrix[r * 4 + c];
+        return;
+    }
     Transform xf;
-    xf.position = position;
-    xf.rotation = world::quatFromEulerDeg(world::eulerDegFromQuat(rotation));
-    xf.scale = scale;
+    xf.position = p.position;
+    xf.rotation = p.rotation;
+    xf.scale = p.scale;
     const Mat4 m = xf.toMatrix();
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 3; ++c)
@@ -984,7 +905,9 @@ bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
                      // as PLACE/PLACEG entities -- null or empty when there are none, or when
                      // --instances-as entities asked for the old behaviour instead (they are folded
                      // into `placements` in that case, and this stays null).
-                     const std::vector<ScenePlacement>* foliageInstances = nullptr) {
+                     const std::vector<ScenePlacement>* foliageInstances = nullptr,
+                     // Content-relative folder the .ocinst goes in ("Instances" by default).
+                     const std::string& instancesDir = "Instances") {
     const bool haveFoliage = foliageInstances && !foliageInstances->empty();
     if (placements.empty() && !haveFoliage) return true; // a single-object file needs no level
     if (contentDir.empty()) {
@@ -1059,10 +982,9 @@ bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
                   path, alt);
         path = alt;
     }
-    // THE .ocinst SITS BESIDE THE .ocworld IT WAS BUILT FOR, under the SAME (possibly suffixed) stem
-    // -- so a re-import that lands as "JungleRuins_2.ocworld" (because "JungleRuins.ocworld" already
-    // existed) gets "JungleRuins_2.ocinst" rather than a table silently misnamed after the level that
-    // did NOT get overwritten. `path` already carries that final stem, decided by the dedup loop above.
+    // THE .ocinst CARRIES THE (possibly suffixed) STEM OF THE .ocworld IT WAS BUILT FOR -- a re-import that
+    // lands as "JungleRuins_2.ocworld" gets "JungleRuins_2.ocinst", not a table misnamed after the level
+    // that did NOT get overwritten. `path` already carries that stem, decided by the dedup loop above.
     const std::string levelStem = stemOf(path);
     if (haveFoliage) {
         // GROUP BY PROTOTYPE MESH ASSET. Two passes rather than one: the first counts each prototype's
@@ -1101,22 +1023,27 @@ bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
             if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size() || stems[usize(p.meshIndex)].empty())
                 continue;
             u32& cursor = cursorOf[p.meshIndex];
-            foliageInstanceTransform(p.position, p.rotation, p.scale,
-                                     &inst.transforms[usize(baseOf[p.meshIndex] + cursor) * 12]);
+            foliageInstanceTransform(p, &inst.transforms[usize(baseOf[p.meshIndex] + cursor) * 12]);
             ++cursor;
         }
 
-        const std::string instPath = mapsDir + "/" + levelStem + ".ocinst";
+        // Under the level's stem, but never over a table that is already there (a different level's, or
+        // one whose .ocworld was deleted): the same _2 rule the level itself follows.
+        const std::string instDir = contentDir + "/" + instancesDir;
+        createDirectories(instDir);
+        std::string instStem = levelStem;
+        for (int n = 2; fileExists(instDir + "/" + instStem + ".ocinst") && n < 1000; ++n)
+            instStem = levelStem + "_" + std::to_string(n);
+        const std::string instPath = instDir + "/" + instStem + ".ocinst";
         std::string instWhy;
         if (!fmt::saveOcInstances(instPath, inst, &instWhy)) {
             AVER_WARN("could not write the foliage instance table {}: {}", instPath, instWhy);
             return false;
         }
         // Content-relative, exactly like every other asset path this function writes (`op.asset`
-        // above) -- but relative to `contentDir` directly, NOT through `prefix` (which is `outDir`'s
-        // own relative path, the Meshes folder): mapsDir is always literally `contentDir + "/Maps"`,
-        // so the .ocinst's own content-relative path is always exactly "Maps/<levelStem>.ocinst".
-        w.foliageFiles.push_back("Maps/" + levelStem + ".ocinst");
+        // above) -- but relative to `contentDir` directly, NOT through `prefix` (`outDir`'s own
+        // relative path, the Meshes folder).
+        w.foliageFiles.push_back(instancesDir + "/" + instStem + ".ocinst");
 
         std::error_code sizeEc;
         const std::uintmax_t bytes = std::filesystem::file_size(instPath, sizeEc);
@@ -1284,6 +1211,34 @@ int runStream(int argc, char** argv) {
     return exitCode(ExitCode::Ok);
 }
 
+// "a,b,,c" -> {a, b, c}; appended to `out`.
+void splitCommaList(const std::string& list, std::vector<std::string>& out) {
+    usize start = 0;
+    while (start <= list.size()) {
+        const usize comma = list.find(',', start);
+        const std::string one = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+        if (!one.empty()) out.push_back(one);
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+}
+
+// A content-relative folder: forward slashes, no trailing slash, nothing absolute and no ".." -- the
+// level's FOLIAGE path is stored relative to the content root and must stay inside it. "" = invalid.
+std::string cleanContentRelDir(std::string d) {
+    std::replace(d.begin(), d.end(), '\\', '/');
+    while (!d.empty() && d.back() == '/') d.pop_back();
+    if (d.empty() || d.front() == '/' || d.find(':') != std::string::npos) return {};
+    for (usize at = 0; at <= d.size();) {
+        const usize slash = d.find('/', at);
+        const std::string seg = d.substr(at, slash == std::string::npos ? std::string::npos : slash - at);
+        if (seg == ".." || seg.empty()) return {};
+        if (slash == std::string::npos) break;
+        at = slash + 1;
+    }
+    return d;
+}
+
 } // namespace
 
 // `convert` converts argv[2] (a glTF/GLB, OBJ, USD stage, or -- when this build has audio import -- a
@@ -1303,8 +1258,13 @@ int main(int argc, char** argv) {
         "\n                                                              defaults depend on --instances-as (see docs/ASSET_IMPORT.md)"
         "\n                          [--focus camera|none|<x>,<y>] [--focus-radius <cm>] [--keep-all-below <n>]"
         "\n                          [--exclude <prim path>[,<prim path>...]]   USD prims to leave out"
-        "\n                          [--material-map <file>]   USD: '<name substring> <material stem|->' per line,"
-        "\n                                                              for subsets with no bound material"
+        "\n                          [--material-map <file>]   USD: '<pattern> <material stem|->' per line, for subsets with"
+        "\n                                                              no bound material; most specific rule wins (see docs/ASSET_IMPORT.md)"
+        "\n                          [--material-map-legacy]   first substring match in file order, as before the wildcard syntax"
+        "\n                          [--instances-dir <content-relative dir>]   where the level's .ocinst goes (Instances)"
+        "\n                          [--import-report <file>]   USD: write the importer's diagnostics as text"
+        "\n                          [--resolve-coplanar report|drop-later]   USD: coplanar duplicate triangles (report)"
+        "\n                          [--trace-prims <prim>[,<prim>...]]   USD: log how these prims were composed"
 #if AVER_HAVE_MATERIAL_COMPILE
         "\n                          [--content-dir <dir>]   write materials and textures too"
         "\n                          [--max-texture <n>]     downscale imported textures to n px"
@@ -1358,6 +1318,11 @@ int main(int argc, char** argv) {
     u64 keepAllBelow = 2000;
     std::vector<std::string> excludePrims;   // --exclude, repeatable and/or comma-separated
     std::string materialMapPath;              // --material-map
+    bool materialMapLegacy = false;           // --material-map-legacy
+    std::string instancesDir = "Instances";   // --instances-dir, content-relative
+    std::string importReportPath;             // --import-report
+    bool resolveCoplanarDrop = false;         // --resolve-coplanar drop-later
+    std::vector<std::string> tracePrims;      // --trace-prims
     bool merge = false;
     bool haveInput = false;
     f32 lodRatio = 0.0f;
@@ -1408,17 +1373,26 @@ int main(int argc, char** argv) {
         else if (a == "--focus-radius" && i + 1 < argc) focusRadius = static_cast<f32>(std::atof(argv[++i]));
         else if (a == "--keep-all-below" && i + 1 < argc) keepAllBelow = std::strtoull(argv[++i], nullptr, 10);
         else if (a == "--material-map" && i + 1 < argc) materialMapPath = argv[++i];
-        else if (a == "--exclude" && i + 1 < argc) {
-            const std::string list = argv[++i];
-            usize start = 0;
-            while (start <= list.size()) {
-                const usize comma = list.find(',', start);
-                const std::string one = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
-                if (!one.empty()) excludePrims.push_back(one);
-                if (comma == std::string::npos) break;
-                start = comma + 1;
+        else if (a == "--material-map-legacy") materialMapLegacy = true;
+        else if (a == "--import-report" && i + 1 < argc) importReportPath = argv[++i];
+        else if (a == "--instances-dir" && i + 1 < argc) {
+            instancesDir = cleanContentRelDir(argv[++i]);
+            if (instancesDir.empty()) {
+                AVER_ERROR("--instances-dir must be a folder inside the content directory (relative, no '..')");
+                return exitCode(ExitCode::Usage);
             }
         }
+        else if (a == "--resolve-coplanar" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if (v == "drop-later")  resolveCoplanarDrop = true;
+            else if (v == "report") resolveCoplanarDrop = false;
+            else {
+                AVER_ERROR("--resolve-coplanar must be 'report' or 'drop-later', not '{}'", v);
+                return exitCode(ExitCode::Usage);
+            }
+        }
+        else if (a == "--trace-prims" && i + 1 < argc) splitCommaList(argv[++i], tracePrims);
+        else if (a == "--exclude" && i + 1 < argc) splitCommaList(argv[++i], excludePrims);
         else if (!haveInput) { input = a; haveInput = true; }
     }
     if (!haveInput || outDir.empty()) {
@@ -1633,6 +1607,8 @@ int main(int argc, char** argv) {
         uopt.focusRadius = focusRadius;
         uopt.keepAllBelow = keepAllBelow;
         uopt.excludePrims = excludePrims;
+        uopt.tracePrims = tracePrims;
+        uopt.resolveCoplanar = resolveCoplanarDrop ? fmt::UsdCoplanarPolicy::DropLater : fmt::UsdCoplanarPolicy::Report;
         // Instanced foliage is thinned by what can be SEEN at a distance (a tree stays dense far out,
         // moss does not): UsdImportOptions::focusBySize. Entities keep the per-prototype share.
         uopt.focusBySize = !instancesAsEntities;
@@ -1642,6 +1618,15 @@ int main(int argc, char** argv) {
             return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
+        if (!importReportPath.empty()) {
+            std::ofstream rf(importReportPath, std::ios::binary);
+            if (rf) {
+                rf << fmt::usdImportReportText(res);
+                AVER_INFO("--import-report: wrote {}", importReportPath);
+            } else {
+                AVER_WARN("--import-report: cannot write {}", importReportPath);
+            }
+        }
         if (res.instancing.instancers) {
             AVER_INFO("PointInstancers: {} instancer(s), {} prototype mesh(es), {} of {} instance(s) kept "
                       "(--max-instances {}, --max-instance-tris {}, --instances-as {})",
@@ -1676,13 +1661,23 @@ int main(int argc, char** argv) {
         // not compose -- is untouched, and the import said so under `unsupported`.
         cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
         if (!materialMapPath.empty()) {
-            std::vector<MaterialRule> rules;
-            if (!loadMaterialMap(materialMapPath, rules)) {
+            fmt::MaterialMap mmap;
+            if (!fmt::loadMaterialMap(materialMapPath, materialMapLegacy, mmap)) {
                 emitArtifact(input, {}, "mesh", false, false, "cannot read --material-map " + materialMapPath, stats);
                 emitSummary(input, stats, 2);
                 return exitCode(ExitCode::Usage);
             }
-            applyMaterialMap(res.meshes, res.meshNames, rules);
+            for (const std::string& w : mmap.warnings) AVER_WARN("--material-map {}: {}", materialMapPath, w);
+            fmt::MaterialMapReport mmReport;
+            const fmt::MaterialMapStats mmStats = fmt::applyMaterialMap(res.meshes, res.meshNames, mmap, &mmReport);
+            const std::string mmReportPath = outDir + "/" + base + ".materialmap.report.txt";
+            std::ofstream rf(mmReportPath, std::ios::binary);
+            if (rf) {
+                rf << fmt::materialMapReportText(mmap, mmReport, mmStats, input);
+                AVER_INFO("--material-map: report written to {}", mmReportPath);
+            } else {
+                AVER_WARN("--material-map: cannot write the report {}", mmReportPath);
+            }
         }
 
         // A stage spread over several folders is written the same way, one subfolder per source
@@ -1711,6 +1706,7 @@ int main(int argc, char** argv) {
         bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats, &stems);
         std::vector<ScenePlacement> scene;
         std::vector<ScenePlacement> foliageInstances;
+        usize exactPlacements = 0;
         scene.reserve(res.placements.size());
         for (const fmt::UsdPlacement& p : res.placements) {
             ScenePlacement sp{p.meshIndex, p.position,
@@ -1721,12 +1717,24 @@ int main(int argc, char** argv) {
             // UsdPlacement marks a PointInstancer instance (see its own header comment).
             const bool isInstancerInstance = p.name.empty();
             sp.collide = !isInstancerInstance;
+            // SHEAR OR A MIRROR: a PLACE line holds position+Euler+scale and cannot carry it, so the
+            // exact matrix goes to the .ocinst whatever the instance count or --instances-as says.
+            if (p.exact) {
+                sp.exact = true;
+                for (int k = 0; k < 16; ++k) sp.matrix[k] = p.matrix[k];
+                foliageInstances.push_back(sp);
+                ++exactPlacements;
+                continue;
+            }
             // FOLIAGE, NOT AN ENTITY, unless --instances-as entities asked for the old behaviour: a
             // kept instance goes into its own list instead of `scene`, so writeSceneLevel writes it
             // into the level's .ocinst table and a FOLIAGE record rather than a PLACE/PLACEG line.
             if (isInstancerInstance && !instancesAsEntities) foliageInstances.push_back(sp);
             else scene.push_back(sp);
         }
+        if (exactPlacements)
+            AVER_INFO("{} placement(s) carry shear or a mirror and were written as instanced foliage "
+                      "(no collision, not individually selectable)", exactPlacements);
         SceneCamera cam;
         if (!res.cameras.empty()) {
             const fmt::UsdCameraPose& c = res.cameras.front();
@@ -1743,7 +1751,7 @@ int main(int argc, char** argv) {
         }
         if (!writeSceneLevel(outDir, contentDir, base, scene, stems, res.cameras.empty() ? nullptr : &cam,
                              res.sun.found ? &sun : nullptr,
-                             foliageInstances.empty() ? nullptr : &foliageInstances))
+                             foliageInstances.empty() ? nullptr : &foliageInstances, instancesDir))
             anyFailed = true;
         emitSummary(input, stats, anyFailed ? 1 : 0);
         return exitCode(anyFailed ? ExitCode::Failed : ExitCode::Ok);

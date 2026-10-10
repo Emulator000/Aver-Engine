@@ -46,6 +46,12 @@ struct UsdPlacement {
     // PointInstancer instance carries its own here, because every instance shares ONE mesh.
     f32  rotation[4] = {0, 0, 0, 1};
     Vec3 scale{1, 1, 1};
+    // A matrix with SHEAR or a NEGATIVE DETERMINANT (a mirrored placement) is not any position +
+    // quaternion + scale: the decomposition above is then only the nearest TRS. `exact` says so, and
+    // `matrix` is the true engine-space world matrix (row-major, row-vector, translation in
+    // matrix[12..14] = position) for a consumer that can write it as-is (an .ocinst row).
+    bool exact = false;
+    f32  matrix[16] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
 };
 
 // A UsdGeomCamera in the stage, as a viewpoint: engine-space position and the direction it looks
@@ -100,6 +106,42 @@ struct UsdInstancingStats {
     u64 keptInFocus = 0;
 };
 
+// WHAT THE IMPORT SKIPPED OR CHANGED, countable, so a stage that "looks wrong" can be told apart from
+// one that imported what it said. One entry per reason, in first-seen order.
+struct UsdSkipCount {
+    // "invisible", "guide-proxy-purpose", "inactive", "nested-point-instancer", "specializes" and
+    // "reset-xform-stack" (honoured, not skipped; listed because it changes where a prim lands).
+    std::string reason;
+    u64 count = 0;                           // DISTINCT prims, however many arcs reached them
+    std::vector<std::string> examples;       // up to 8 prim paths
+};
+
+// Two material slots of ONE mesh holding the same triangle (same three quantised vertex positions,
+// either winding): the z-fight / double-lit surface a DCC leaves when two subsets overlap in space.
+struct UsdCoplanarPair {
+    std::string mesh;            // the prim path
+    std::string slotA, slotB;    // submesh names; A is the earlier slot, whose copy is kept
+    u64 triangles = 0;
+    bool dropped = false;        // UsdCoplanarPolicy::DropLater removed B's copies
+};
+
+struct UsdDiagnostics {
+    std::vector<UsdSkipCount> skipped;
+    // Faces listed by more than one GeomSubset (or twice in one). Each is built ONCE, by the first
+    // subset that lists it; the rest are skipped and counted here.
+    u64 duplicateSubsetFaces = 0;
+    std::vector<std::string> duplicateSubsetMeshes;      // up to 8 prim paths
+    std::vector<UsdCoplanarPair> coplanar;               // capped at 512 pairs
+    u64 coplanarPairsOmitted = 0;
+    u64 coplanarTriangles = 0;
+    // Meshes carrying primvars:displayOpacity / primvars:displayColor, which the importer does not
+    // read (a translucent look authored there is lost). Counted in full; names capped at 256.
+    u64 displayOpacityMeshes = 0, displayColorMeshes = 0;
+    std::vector<std::string> displayOpacityNames, displayColorNames;
+    // Composition steps for the prims named in UsdImportOptions::tracePrims, in the order taken.
+    std::vector<std::string> trace;
+};
+
 struct UsdImportResult {
     // One per UsdGeomMesh prim in the stage, with the prim's ROTATION AND SCALE baked in.
     //
@@ -141,6 +183,8 @@ struct UsdImportResult {
     UsdInstancingStats instancing;           // importUsdStage only
     std::vector<UsdCameraPose> cameras;      // importUsdStage only, in stage order
     UsdSun sun;                              // importUsdStage only
+
+    UsdDiagnostics diagnostics;              // see usdImportReportText
 };
 
 // Where importUsdStage's instance budget concentrates (UsdImportOptions::focus).
@@ -148,6 +192,12 @@ enum class UsdInstanceFocus : u8 {
     Uniform,        // every instance equally likely to be kept, wherever it stands
     FirstCamera,    // around the stage's first UsdGeomCamera; Uniform, with a note, when it has none
     Point,          // around UsdImportOptions::focusPoint
+};
+
+// What to do with exact-coplanar duplicate triangles across the slots of one mesh.
+enum class UsdCoplanarPolicy : u8 {
+    Report,       // keep them, list the slot pairs in UsdImportResult::diagnostics
+    DropLater,    // remove the LATER slot's copies (a slot emptied by it is removed as a submesh)
 };
 
 struct UsdImportOptions {
@@ -209,6 +259,15 @@ struct UsdImportOptions {
     // "cinematic" terrain tiles exactly over four of its backdrop tiles, and the coarse copy pokes
     // through as faint facets once nothing covers the ground.
     std::vector<std::string> excludePrims;
+
+    // Triangles of two slots of one mesh with the same three vertex positions (quantised to 0.01 mm
+    // after the transform, winding ignored) are reported either way; DropLater also removes the later
+    // slot's copy. Meshes over 8M triangles are not scanned.
+    UsdCoplanarPolicy resolveCoplanar = UsdCoplanarPolicy::Report;
+
+    // Prim-path prefixes ("/root/Tower") whose composition steps are logged into
+    // diagnostics.trace: the transform each arc resolved to, resets, skips, placements.
+    std::vector<std::string> tracePrims;
 };
 
 // Imports a .usda from disk. A material's `inputs:file` paths resolve against the file's own
@@ -235,10 +294,17 @@ bool importUsdFromMemory(const u8* bytes, usize size, const std::string& baseDir
 // Materials and textures come through exactly as importUsd's do -- the same conversion runs on both.
 // Everything is in the ROOT stage's units and up axis, which is how USD itself composes a stage.
 //
+// `!resetXformStack!` is honoured at every composition site: the prim's world is its own local and its
+// ancestors (within the stage walk, or within the prototype it sits in) are dropped.
+//
 // Not composed, and reported in `unsupported`: variant sets, specializes, relocates, UsdLux area
 // lights, and time-sampled values (the default is used). A file importUsd can read imports identically here
 // except that it also gains its sublayers and references.
 bool importUsdStage(const std::string& path, UsdImportResult& out,
                     const UsdImportOptions& opt = {}, std::string* why = nullptr);
+
+// The diagnostics, the unsupported list and the placement counts as plain text, for a report file
+// next to a converted stage.
+std::string usdImportReportText(const UsdImportResult& r);
 
 } // namespace aver::fmt

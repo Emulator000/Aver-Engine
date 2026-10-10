@@ -267,16 +267,48 @@ UVs and a transform.
   stage into matching subfolders instead of one flat directory.
 - **Purpose and visibility**: prims with `purpose` guide or proxy, or `visibility = invisible`, are skipped
   with their subtrees (collision, occlusion and lighting volumes in game data such as Activision's Caldera).
+- **`!resetXformStack!`** is honoured everywhere a transform is composed (the stage walk, what a
+  reference/payload/inherit brings in, nested instancers, nested arcs, text layers): the prim's world is
+  its own local transform and its ancestors are dropped. Inside a prototype "world" is the prototype's
+  space, so a reset prim there drops the ancestors up to the prototype root. A reference or payload's
+  asset root now also supplies the prim's own xform (it used to be inherits and references only).
+- **The text reader obeys `xformOpOrder`** (also `!invert!`, `!resetXformStack!`, suffixed ops such as
+  `xformOp:translate:pivot`, `xformOp:orient`): only the listed ops apply, in USD's order. A prim with no
+  `xformOpOrder` keeps the old fixed order (scale, rotate, transform, translate).
+- **Overlapping `GeomSubset`s**: a face listed by more than one subset is built once, by the first;
+  later listings are skipped and counted (`diagnostics.duplicateSubsetFaces`). Before this each overlap
+  was a second copy of the triangle: z-fighting and double lighting.
+- **Exact-coplanar duplicate triangles** across the slots of one mesh (same three vertex positions
+  quantised to 0.01 mm, either winding) are reported per slot pair (`diagnostics.coplanar`).
+  `UsdImportOptions::resolveCoplanar = DropLater` also removes the later slot's copy (a slot it empties
+  loses its submesh). Meshes over 8M triangles are not scanned.
+- **Exact placements**: a placement whose matrix has shear or a negative determinant (a mirror) is no
+  position + quaternion + scale, so `UsdPlacement::exact` is set and `UsdPlacement::matrix` holds the
+  true engine-space world matrix (row-major, row-vector, translation in `matrix[12..14]`). `rotation`/
+  `scale` then hold only the nearest TRS.
+- **Diagnostics** (`UsdImportResult::diagnostics`, as text via `usdImportReportText`): distinct prims
+  skipped or re-posed by reason (`invisible`, `guide-proxy-purpose`, `inactive`,
+  `nested-point-instancer`, `specializes`, `reset-xform-stack`) with up to 8 example paths each;
+  duplicate-subset faces; coplanar pairs; meshes carrying `primvars:displayOpacity`/`displayColor`
+  (never read). `UsdImportOptions::tracePrims` (path prefixes) logs the composition steps of those
+  prims into `diagnostics.trace`.
 - **`--material-map <file>`**: a stage with no materials but named `familyName = materialBind` subsets
-  (Caldera) keeps each subset as its own submesh; each line `<substring> <material stem>` assigns the
-  first matching stem to subsets whose name contains it (`*` matches all; stem `-` drops the faces and
-  matches whole `_`-separated name tokens only, and every mesh it empties is logged), and
-  the mesh is regrouped to one submesh per material (`groupSubmeshesByMaterial`) before clustering.
+  (Caldera) keeps each subset as its own submesh; each line `<pattern> <material stem>` (stem `-` drops
+  the faces) binds the subsets that arrived with no material, and the mesh is regrouped to one submesh
+  per material (`groupSubmeshesByMaterial`) before clustering. Matching is `fmt::MaterialMap`
+  (`aver/formats/MaterialMap.hpp`): the pattern is matched against the lowercased leaf name split on `_`,
+  as WHOLE tokens (trailing digits allowed, so `stain` hits `wall_stain_01` and not `metal_stainless`);
+  `a_b` matches contiguous tokens; `*x*` is a substring, `x*` a prefix, `*x` a suffix, `*` anything. **The
+  most specific matching rule wins** (more tokens, then the longer pattern; file order only breaks an
+  exact tie), so `water_tank Tank` beats `water Water` wherever each sits. `--material-map-legacy` keeps
+  the old first-substring-in-file-order behaviour. Every run writes `<out-dir>/<base>.materialmap.report.txt`:
+  each distinct name with the rule line that won and its material, every dropped and every unmatched
+  name, and the rules that won nothing; every mesh a drop empties is also logged.
 
 `AverAssetC convert <root.usda> --out-dir … --content-dir …` takes `--instances-as foliage|entities`
 (`foliage`), `--max-instances` (4000000 in `foliage` mode, 12000 in `entities` mode), `--max-instance-tris`
 (0 — unlimited — in `foliage` mode, 150000000 in `entities` mode), `--focus camera|none|<x>,<y>`
-(camera), `--focus-radius <cm>` (10000), `--keep-all-below <n>` (2000) and `--exclude <prim>[,<prim>…]`.
+(camera), `--focus-radius <cm>` (10000), `--keep-all-below <n>` (2000) and `--exclude <prim>[,<prim>…]`; `--instances-dir`, `--material-map-legacy` and `--import-report <file>` (the importer's diagnostics as text) are described below, and `--resolve-coplanar report|drop-later` and `--trace-prims <prim>[,<prim>…]` pass straight through to `UsdImportOptions`.
 
 **The refusals are the point of the design.** A silent empty import looks identical to a model that
 legitimately has no geometry, and it sends the user to look at the renderer. Every failure path here
@@ -300,20 +332,19 @@ container (the same one `.ocmesh`/`.ocland`/`.ocfoliage` use) holding a header, 
 prototype asset paths, a group table (one `{asset, flags, first, count}` run per prototype mesh) and
 one bulk chunk of `12 f32` per instance: the engine's own row-vector world matrix
 (`v * M`, translation in the last row) with its trailing `(0, 0, 0, 1)` column dropped —
-`t[r*3 + c] = M[r][c]` for `r` in `0..3`, `c` in `0..2`. `AverAssetC` writes `<Maps>/<level>.ocinst`
-next to the `.ocworld` it belongs to (same stem, so a de-duplicated `Foo_2.ocworld` gets
-`Foo_2.ocinst`, never a table silently misnamed after a level import that did **not** overwrite an
-existing one).
+`t[r*3 + c] = M[r][c]` for `r` in `0..3`, `c` in `0..2`. `AverAssetC` writes `<content>/<instances-dir>/<level>.ocinst`
+(`--instances-dir <content-relative folder>`, default `Instances`, created if missing; the level's
+`FOLIAGE` record is `<instances-dir>/<level>.ocinst`). The stem is the `.ocworld`'s, so a de-duplicated
+`Foo_2.ocworld` gets `Foo_2.ocinst`, never a table silently misnamed after a level import that did
+**not** overwrite an existing one; an `.ocinst` already in the folder is never overwritten either
+(`_2`, `_3`, ...).
 
-**The transform is bit-for-bit what the identical prim would have gotten as an ordinary entity.**
-`AverAssetC` builds it through the exact same two functions `aver::world::instantiate`
-(`modules/world/src/LevelInstance.cpp`) uses for a `PLACE`/`PLACEG` line — `world::eulerDegFromQuat`
-then `world::quatFromEulerDeg` (`LevelTransform.hpp`), followed by `Transform::toMatrix()`
-(`aver/core/Math.hpp`) — rather than building a matrix from the instance's quaternion directly. That
-round trip through degrees is not perfectly lossless at gimbal lock (see `eulerDegFromQuat`'s own
-comment), so skipping it would leave a near-vertical instance at a visibly different orientation than
-the same prim gets as an entity; going through it reproduces the discrepancy identically instead of
-avoiding it inconsistently.
+**Rows are built from the instance's quaternion and scale directly** (`Transform::toMatrix()`,
+`aver/core/Math.hpp`), with no Euler round trip: `world::eulerDegFromQuat` is only lossy at gimbal lock,
+and there it gives a `PLACE` entity the wrong orientation, which a foliage row has no reason to inherit.
+A placement with **shear or a mirror** (`UsdPlacement::exact`) cannot be a position, Euler angles and a
+scale at all, so its exact matrix is written as the row and it goes to the `.ocinst` even when it has
+too few copies to count as scatter, or `--instances-as entities` is set.
 
 **`--instances-as entities`** restores the pre-`.ocinst` behaviour verbatim: every kept instance goes
 back to being an ordinary `PLACE`/`PLACEG` line with `nocollide`, and the instance budget defaults
@@ -342,7 +373,8 @@ USD records `upAxis` and `metersPerUnit` explicitly, so unlike OBJ there is no g
 ### Supported
 
 `UsdGeomMesh` `points`, `faceVertexIndices`, `faceVertexCounts`, `normals`, `primvars:st`;
-`xformOp:translate` / `scale` / `rotateX|Y|Z|XYZ` / `transform`, composed down the prim tree;
+`xformOp:translate` / `scale` / `rotateX|Y|Z|XYZ` (and the other axis orders) / `orient` / `transform`,
+in `xformOpOrder`, composed down the prim tree;
 `orientation` (`leftHanded` cancels the winding flip rather than doubling it); face-varying vs
 per-point normals and UVs, distinguished by array length.
 
@@ -485,6 +517,10 @@ with UVs and normals — rather than only against hand-written triangles.
 basis change in both directions, winding reversal, the V flip, hard-edge splitting, n-gon triangulation, negative indices,
 `usemtl` slot reuse, `o` splitting, `.mtl` option skipping and PBR extensions, Y-up vs Z-up stages,
 `metersPerUnit` folding, nested `xformOp` inheritance, and every refusal path.
+
+`tests/formats/src/UsdStageImportTest.cpp` — `importUsdStage` over hand-written `.usda` stages: reset stack,
+`xformOpOrder` in the text reader, overlapping subsets, coplanar report/`DropLater`, `tracePrims`, and the
+exact-matrix flag (through `usd_detail::placementForMatrix`; a crate cannot be authored in a test).
 
 `tools/MakeFoliage.cpp` — round-trips three real meshes through `.obj` on every run.
 

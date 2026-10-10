@@ -88,6 +88,17 @@ target_link_libraries(GltfTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(GltfTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# MaterialMapTest: token / wildcard / most-specific matching for AverAssetC --material-map.
+add_executable(MaterialMapTest src/MaterialMapTest.cpp)
+target_link_libraries(MaterialMapTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MaterialMapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UsdStageImportTest: resetXformStack, xformOpOrder in text layers, overlapping subsets, coplanar
+# duplicates, exact (sheared/mirrored) placements.
+add_executable(UsdStageImportTest src/UsdStageImportTest.cpp)
+target_link_libraries(UsdStageImportTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(UsdStageImportTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ImportTest — the OBJ and USDA importers. Alongside GltfTest rather than inside it because the
 # three formats share nothing but the destination struct: a glTF failure and an OBJ failure have no
 # common cause, and one binary that reported both would make the shared basis-change code look like

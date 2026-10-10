@@ -185,7 +185,11 @@ bool bakeOcStream(OcWorldData& w, const std::string& levelStem, const std::strin
             radius[g] = std::sqrt(ex * ex + ey * ey + ez * ez);
         }
         if (!cellOcInstances(in, opt.foliageCellCm, radius, &err)) { if (why) *why = rel + ": " + err; return false; }
-        const std::string cells = streamDir(levelStem) + "/" + std::filesystem::path(rel).filename().string();
+        // Keyed by the whole content-relative path, flattened: two tables sharing a file name in
+        // different folders would otherwise overwrite one another's cells.
+        std::string flat = slashes(rel);
+        std::replace(flat.begin(), flat.end(), '/', '_');
+        const std::string cells = streamDir(levelStem) + "/" + flat;
         const std::filesystem::path out = std::filesystem::path(projectDir) / cells;
         std::error_code ec;
         std::filesystem::create_directories(out.parent_path(), ec);

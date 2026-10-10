@@ -6,6 +6,8 @@ aver_add_module(Aver.Formats
     src/GiCache.cpp
     src/GltfImport.cpp
     src/Json.cpp
+    # --material-map: rules and matching for unbound submeshes (AverAssetC and tests share it).
+    src/MaterialMap.cpp
     # IES (LM-63) photometric profiles for lights: a text parser and a table bake, no device.
     src/IesProfile.cpp
     src/OcAnim.cpp

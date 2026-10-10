@@ -396,6 +396,74 @@ int main() {
     }
     std::filesystem::remove_all(outDir / "cap", ec);
 
+    // ---- --material-map: most specific rule wins, and the report says why ---------------------
+    //
+    // A hand-written .usda whose four GeomSubsets have no material, so the map is the only thing that
+    // can bind them. water_tank is listed AFTER water: under the old first-match rule water would
+    // have won it. (A PointInstancer fixture for --instances-dir would need a binary .usdc, so that
+    // flag is covered only for its refusal below.)
+    AVER_INFO("-- --material-map picks the most specific rule and writes a report --");
+    {
+        const std::filesystem::path mmDir = outDir / "mm";
+        std::filesystem::create_directories(mmDir, ec);
+        {
+            std::ofstream f(mmDir / "mm.usda");
+            f << "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+                 "def Mesh \"props\"\n{\n"
+                 "    point3f[] points = [(0,0,0), (1,0,0), (2,0,0), (3,0,0), (4,0,0),\n"
+                 "                        (0,1,0), (1,1,0), (2,1,0), (3,1,0), (4,1,0)]\n"
+                 "    int[] faceVertexCounts = [3, 3, 3, 3]\n"
+                 "    int[] faceVertexIndices = [0,1,5,  1,2,6,  2,3,7,  3,4,8]\n";
+            const char* subsets[4] = {"water_tank_01", "water_01", "glass_01", "clip_01"};
+            const char* faces[4] = {"0", "1", "2", "3"};
+            for (int i = 0; i < 4; ++i)
+                f << "    def GeomSubset \"" << subsets[i] << "\"\n    {\n"
+                     "        uniform token elementType = \"face\"\n"
+                     "        uniform token familyName = \"materialBind\"\n"
+                     "        int[] indices = [" << faces[i] << "]\n    }\n";
+            f << "}\n";
+        }
+        {
+            std::ofstream f(mmDir / "map.txt");
+            f << "water Water\nwater_tank Tank\nclip -\nnever_matches Nope\n";
+        }
+        const auto runMap = [&](const char* base, const char* extra, std::string& log) {
+            const std::string cmd = "\"" + exe.string() + "\" convert \"" + (mmDir / "mm.usda").string() +
+                                    "\" --out-dir \"" + mmDir.string() + "\" --base " + base +
+                                    " --material-map \"" + (mmDir / "map.txt").string() + "\" " + extra;
+            return runCapture(cmd, log);
+        };
+        const auto slurp = [](const std::filesystem::path& p) {
+            std::ifstream in(p, std::ios::binary);
+            return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        };
+
+        std::string mmOut;
+        const int mmCode = runMap("MM", ("--import-report \"" + (mmDir / "import.txt").string() + "\"").c_str(), mmOut);
+        check(mmCode == 0, "a map run exits 0 (got " + std::to_string(mmCode) + ")");
+        const std::string report = slurp(mmDir / "MM.materialmap.report.txt");
+        check(!report.empty(), "and writes <base>.materialmap.report.txt beside the meshes");
+        check(report.find("water_tank_01 -> line 2 \"water_tank Tank\" -> Tank") != std::string::npos,
+              "water_tank beat water although it is listed second");
+        check(report.find("water_01 -> line 1") != std::string::npos, "water still takes water_01");
+        check(report.find("clip_01 -> line 3") != std::string::npos, "the drop rule is reported");
+        check(report.find("glass_01") != std::string::npos, "an unmatched name is listed");
+        check(report.find("line 4 \"never_matches Nope\"") != std::string::npos, "and so is an unused rule");
+        check(std::filesystem::exists(mmDir / "import.txt", ec), "--import-report writes the importer's diagnostics");
+
+        std::string legacyOut;
+        const int legacyCode = runMap("MML", "--material-map-legacy", legacyOut);
+        check(legacyCode == 0, "the legacy run exits 0 (got " + std::to_string(legacyCode) + ")");
+        check(slurp(mmDir / "MML.materialmap.report.txt").find("water_tank_01 -> line 1") != std::string::npos,
+              "--material-map-legacy takes the first rule in file order, as before");
+
+        std::string badOut;
+        const std::string badCmd = "\"" + exe.string() + "\" convert \"" + (mmDir / "mm.usda").string() +
+                                   "\" --out-dir \"" + mmDir.string() + "\" --instances-dir ../escape";
+        check(runCapture(badCmd, badOut) == 2, "--instances-dir refuses a path that leaves the content folder");
+    }
+    std::filesystem::remove_all(outDir / "mm", ec);
+
     // ---- the failure path -------------------------------------------------------------------
     AVER_INFO("-- and a bad input FAILS detectably, rather than silently --");
     {
