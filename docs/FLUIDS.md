@@ -32,6 +32,7 @@ holds; where this page and that one disagree, this page is the newer one and say
 | `WATER ... simulate` (level authoring) | `sandbox/src/SandboxApp.cpp` — `applyLevelWater`; format in `modules/formats/{include,src}/aver/formats/OcWorld.*` | the FirstPerson template's own pool (`templates/FirstPerson/Content/Maps/Default.ocmap`) |
 | The graph editor's preview | `sandbox/src/GraphEditor.cpp` — `buildFluidPreviewMesh` | — |
 | The analytic Gerstner surface | `modules/fluids/{include,src}/aver/fluids/{GerstnerWave,WaterRenderer}.*` | `tests/fluids/src/GerstnerWaveTest.cpp` |
+| The displaced mesh surface (`WATER ... material`) | `modules/fluids/{include,src,shaders}/aver/fluids/WaterSurface.*`, `water_displace.hlsl`; drawn by `game::GameWater` | `tests/fluids/src/WaterSurfaceTest.cpp`, `WaterSurfaceCompileTest.cpp` |
 | The underwater fog override | `modules/fluids/include/aver/fluids/Underwater.hpp` | `tests/fluids/src/UnderwaterFogTest.cpp` |
 
 Two authoring paths (§4) converge on one spawn function, which is the one place a design rule about
@@ -198,6 +199,25 @@ buffers, so *either* kind of water — analytic ocean or simulated pool — neve
 cascades, the ray-tracing TLAS, or GI voxelisation, and casts no shadow of its own for the identical
 reason: nothing routes it through the one call every other opaque or transparent draw in this engine
 goes through.
+
+**A third surface: the displaced mesh.** A `WATER` record that names a `material` (an `.ocmat`) and
+does not say `simulate` is drawn by `fluids::WaterSurface` instead of the analytic ocean (never both:
+`GameWater` takes `WaterRenderer` off the device). It is a flat grid mesh that a compute pass
+(`water_displace.hlsl`, run in `prePass`) moves by the same Gerstner waves, writing position, analytic
+normal and world-XY uv into a compute-written vertex buffer; the host draws it through the ordinary
+material path (`setDrawBinding` + `setDrawBlended` + `drawMesh`), so it *does* enter the ray-tracing
+TLAS (Voxi refits a compute-written mesh's BLAS every frame) and rays see the same waves as the
+rasteriser. The record's `cell <cm>` (default 100) and `radius <cm>` (default 12800) size the
+camera-following grid (256×256 cells at the defaults; coarsened past 512 cells per axis); a `bounds`
+record fills its bounds and stays put. An unbounded grid also carries flat horizon rings out to ~10 km,
+each at most twice the previous one (a single ring that size made ~10 km triangles that the RX 7800 XT's
+ray tests dropped in radial strips); the waves fade out over the grid's outer 15% so the seam is flat.
+Open water over nothing (no seabed in range) reads as deep: a scattering material's thickness ray that
+misses counts 40 attenuation distances, and Stage B composites translucent crossings over sky pixels too
+(with their own depth, so the deferred sky does not paint over them). The wave maths is a third hand-port (with `water.hlsl` and
+`GerstnerWave.hpp`) and drifts the same way. A record with no `material` is unchanged, which is also
+why the "neither goes through `drawMesh`" gap below is now true only of the analytic ocean and the
+(already mesh-drawn) simulated pool is unaffected.
 
 Buoyancy reads a **flat, analytic plane** regardless of which surface is on screen —
 `aver_phys_set_water_plane` is given `waterRenderer_.waterLevelCm()`, a constant height, never a

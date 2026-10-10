@@ -928,15 +928,20 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
     return lerp(uv0, uvR, saturate(gGiParams.z) * edge);
 }
 
-// dstTerm: backdrop scene light. bgWeight: how much fogged scene the pixel holds.
+// dstTerm: backdrop scene light. bgWeight: how much fogged scene the pixel holds. inscatter: the volume's own
+// glow (averSurfaceInscatter), added to rgb whole; zero for a volume that scatters nothing. Not added in the TIR
+// branch below: the eye is inside the medium there, its fog and the backdrop already carry that light.
 float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular, float3 T,
-                                 float2 screenPos, float3 wpos, float thicknessCm,
+                                 float2 screenPos, float3 wpos, float thicknessCm, float3 inscatter,
                                  out float3 dstTerm, out float bgWeight) {
     dstTerm  = float3(0.0, 0.0, 0.0);
     bgWeight = -1.0;
     float2 invSize;
-    if (!averBlendBackdropValid(invSize))
-        return averBlendedOutputVolume(s, diffuse, specular, T);
+    if (!averBlendBackdropValid(invSize)) {
+        float4 o = averBlendedOutputVolume(s, diffuse, specular, T);
+        o.rgb += inscatter;
+        return o;
+    }
 
     // Two samples: refracted and straight, used in correction blend.
     bool tir = false;
@@ -955,7 +960,7 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
 
     dstTerm  = (bgR * T - bg0) * (1.0 - alpha);
     bgWeight = 1.0 - alpha;
-    return float4(specular + diffuse * alpha + dstTerm, alpha);
+    return float4(specular + diffuse * alpha + dstTerm + inscatter, alpha);
 }
 
 // averVolumeThickness lives in voxi_pt.hlsli (every translucent composite uses it).
@@ -970,9 +975,12 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
 // the background is known, which the replay's single blend alpha could not express. `background` is
 // the opaque surface Stage B already lit.
 #define AVER_RD_GLASS_LAYERS 4
-float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel, out float3 throughput) {
+// `firstT`: distance to the first crossing, hitT when there is none.
+float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel, out float3 throughput,
+                         out float firstT) {
     float3 acc = float3(0.0, 0.0, 0.0);
     float3 thr = float3(1.0, 1.0, 1.0);
+    firstT = hitT;
     const float3 L = normalize(gLightDir.xyz);
     const uint   sampleFrame = ptReferenceMode() ? (uint)gRtHistParams.z : 0u;
     // One pixel's angular footprint, for the crossings' mips.
@@ -990,6 +998,7 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) break;
 
         const RtHit h = rtHitCommitted(q, gCamPos.xyz, dir);
+        if (k == 0u) firstT = h.t;
         float2 gx, gy;
         rtHitConeGrad(h, pixelCone, gx, gy);
         const AverSurface s = rtHitSurface(h, -dir, L, gx, gy, AVER_RT_HIT_FULL);
@@ -1018,9 +1027,15 @@ float3 rdTranslucentPath(float3 dir, float hitT, float3 background, float2 pixel
         if (rdLocalLampsLive()) rdLocalLightsShadeSplit(s, h.pos, 1.0, diffuse, specular);
 #endif
         float3 T = float3(1.0, 1.0, 1.0);
-        if (s.attenuationDistance > 0.0)
-            T = averVolumeTransmittance(s.attenuationColor, s.attenuationDistance,
-                                        averVolumeThickness(h.pos, s.N, dir));
+        if (s.attenuationDistance > 0.0) {
+            // A scattering volume's open-water depth and glow (front faces; this hit's side is recomputed because
+            // rtHitFrom turns h.N to face the ray). Neither exists for a volume with no scatter colour.
+            const float th = averVolumeThicknessOrDeep(averVolumeThickness(h.pos, s.N, dir),
+                                                       s.attenuationDistance, s.scatterColor);
+            T = averVolumeTransmittance(s.attenuationColor, s.attenuationDistance, th);
+            if (any(s.scatterColor > 0.0) && !rtHitFromBehind(h, dir))
+                acc += thr * min(averSurfaceInscatter(s, th, dir, sun, ind), AVER_VOX_MAXRAD);
+        }
         const float a = saturate(s.alpha);
         acc += thr * min(specular + diffuse * a, AVER_VOX_MAXRAD);
         thr *= (1.0 - a) * T;
@@ -1701,9 +1716,13 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // Front faces only: averVolumeThickness traces along view direction to nearest hit.
         if (s.attenuationDistance > 0.0 && !s.backFace) {
             const float volThick = averVolumeThickness(i.wpos, N, -s.V);
+            // Open water (a scattering volume whose ray finds nothing) counts as deep for the absorption and the
+            // glow; the refraction offset keeps the measured thickness.
+            const float volDeep = averVolumeThicknessOrDeep(volThick, s.attenuationDistance, s.scatterColor);
             const float3 volT = averVolumeTransmittance(
-                s.attenuationColor, s.attenuationDistance, volThick);
-        outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy, i.wpos, volThick, dstTerm, bgWeight);
+                s.attenuationColor, s.attenuationDistance, volDeep);
+            const float3 volGlow = averSurfaceInscatter(s, volDeep, -s.V, sun, ind4);
+        outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy, i.wpos, volThick, volGlow, dstTerm, bgWeight);
         } else
 #endif
         outc = averBlendedOutput(s, dif, spc);
@@ -1880,15 +1899,31 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     const uint  rdPitch = rdRowPitch();
     const uint2 rdPixel = uint2(i.pos.xy);
     const uint4 rdRec   = gRdVisBuf[rdPixel.y * rdPitch + rdPixel.x];
+    const bool  rdMiss  = rdRec.x == 0xFFFFFFFFu;
+    RdSurface rdS = (RdSurface)0;
+    if (!rdMiss) rdS = rdSurfaceFromRecord(rdRec, dir);
+    // Glass and every other translucent material, inside the path, traced ONCE for hits and sky alike
+    // (a second inlined call hung the RX 7800 XT): what it adds and what it lets through, applied to
+    // the background below. Sky pixels need it too: in-path translucency replaces the blended replay.
+    float3 rdGlassAcc = 0.0, rdGlassThr = 1.0;
+    float  rdGlassT = 1.0e7;
+    if (gPtBounceParams.w > 0.5 && vmode == 0u)
+        rdGlassAcc = rdTranslucentPath(dir, rdMiss ? 1.0e7 : rdS.hitT, float3(0.0, 0.0, 0.0), i.pos.xy, rdGlassThr,
+                                       rdGlassT);
 
-    if (rdRec.x == 0xFFFFFFFFu) {
+    if (rdMiss) {
         // Miss: paint flat non-surface colour for debug views.
         if (vmode >= 2u) {
             o.col = float4(0.02, 0.02, 0.04, 1.0);
         } else {
-            o.col = float4(skyColorFull(dir), 1.0);
+            o.col = float4(rdGlassAcc + rdGlassThr * skyColorFull(dir), 1.0);
         }
         o.depth = 1.0;
+        // Glass over the sky takes its own depth, or the deferred sky (depth == far) paints over it.
+        if (rdGlassT < 1.0e7) {
+            const float4 gclip = mul(float4(gCamPos.xyz + dir * rdGlassT, 1.0), gViewProj);
+            if (gclip.w > 1e-6) o.depth = saturate(gclip.z / gclip.w);
+        }
 #if AVER_GBUFFER
         // Sky velocity is camera's rotation-only reprojection; viewZ is far sentinel.
         o.velocity        = averGBufferVelocitySky(dir);
@@ -1906,7 +1941,6 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         return o;
     }
 
-    RdSurface rdS  = rdSurfaceFromRecord(rdRec, dir);
     RtInstance inst = rdS.inst;
     uint i0 = rdS.i0, i1 = rdS.i1, i2 = rdS.i2;
     float3 w       = rdS.w;
@@ -2261,9 +2295,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     radiance = averApplyFogAirVis(radiance, wpos, true, voxiAirVisibility(wpos));
 #endif
 #if AVER_RD_SPLIT
-    // Glass and every other translucent material, inside the path (rdTranslucentPath).
-    float3 rdGlassThr = 1.0;
-    if (gPtBounceParams.w > 0.5 && vmode == 0u) radiance = rdTranslucentPath(dir, hitT, radiance, i.pos.xy, rdGlassThr);
+    radiance = rdGlassAcc + rdGlassThr * radiance;   // the glass traced at the top (rdTranslucentPath)
 #endif
 #if AVER_NRD2
     // 0 wherever the colour below is replaced (unlit, debug views, overrides): nothing is added there.

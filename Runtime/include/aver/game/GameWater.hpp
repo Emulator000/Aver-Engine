@@ -1,6 +1,6 @@
 // GameWater: level-authored water -- the analytic Gerstner surface (WaterRenderer) plus its
-// buoyancy plane, and the simulated soft-body fluid volume (FluidScene) a WATER record may ask
-// for instead. Shared by both hosts: GameApp drives it through GameLevel's LoadHooks like
+// buoyancy plane, the displaced mesh surface (WaterSurface) a WATER record with a material gets
+// instead, and the simulated soft-body fluid volume (FluidScene) a WATER record may ask for. Shared by both hosts: GameApp drives it through GameLevel's LoadHooks like
 // GameLandscape, and the editor's SandboxApp drives the same instance through applyLevel plus the
 // editor-only entry points below (attachSurface, respawnLevelVolume) -- see each method's own
 // comment for what it does.
@@ -26,6 +26,7 @@
 
 #if AVER_MODULE_FLUIDS
 #include "aver/fluids/WaterRenderer.hpp"
+#include "aver/fluids/WaterSurface.hpp"
 #include "aver/fluids/Underwater.hpp"
 #include "aver/fluids/GerstnerWave.hpp"
 
@@ -57,7 +58,9 @@ public:
     void init(rhi::IDevice& device);
 
     // Turns a level's WATER/WAVE records (`w.waters`/`w.waves`) into a rendered analytic surface +
-    // buoyancy plane, or into a latched simulated-volume spawn request. A no-op when `w.waters` is
+    // buoyancy plane, or into a latched simulated-volume spawn request. A record with a `material`
+    // and no `simulate` becomes the displaced mesh surface instead of the analytic ocean (never
+    // both); calling this again with an edited record reconfigures in place. A no-op when `w.waters` is
     // empty. Called as the level loads, before its placements.
     void applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w);
 
@@ -85,11 +88,13 @@ public:
     // weather).
     rhi::SkyAtmosphere applyUnderwaterFog(const rhi::SkyAtmosphere& sky, f32 cameraZCm) const;
 
-    // Draws every live simulated volume as an ordinary blended mesh. `materials` may be null, the
-    // same contract GameRender.hpp's drawWorld already uses for a game with no material system (or
-    // Voxi not yet attached): the volume then draws with its fallback look. The analytic surface
-    // needs no call here -- WaterRenderer draws itself through its own transparentPass once
-    // attachSurface (directly, or through applyLevel) has registered it.
+    // Draws every live simulated volume and the displaced surface as ordinary blended meshes.
+    // `materials` may be null, the same contract GameRender.hpp's drawWorld already uses for a game
+    // with no material system (or Voxi not yet attached): they then draw with the fallback look. The
+    // analytic surface needs no call here -- WaterRenderer draws itself through its own
+    // transparentPass once attachSurface (directly, or through applyLevel) has registered it.
+    // Const because the hosts hold it that way; the displaced surface re-centres under the camera
+    // here, hence its mutable member.
     void draw(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const;
 
     // Despawns what a level itself asked for: the latched analytic/simulated request and every
@@ -103,12 +108,23 @@ public:
     // down (a live simulated volume's teardown calls into the solver).
     void shutdown(rhi::IDevice* device);
 
-    // Whether the analytic surface is currently registered as a render feature.
-    bool attached() const { return waterAttached_; }
-    // The analytic surface's authored height, or 0 when nothing is attached.
-    f32 waterLevelCm() const { return waterAttached_ ? waterRenderer_.waterLevelCm() : 0.0f; }
+    // Whether a surface (analytic or displaced) is currently live.
+    bool attached() const { return waterAttached_ || surfaceActive_; }
+    // The live surface's authored height, or 0 when nothing is attached.
+    f32 waterLevelCm() const {
+        return surfaceActive_ ? surface_.levelCm() : (waterAttached_ ? waterRenderer_.waterLevelCm() : 0.0f);
+    }
 
 private:
+    // Brings up (or reconfigures) the displaced mesh surface for a WATER record and takes the
+    // analytic ocean off the device. False, logging a warning, when the device cannot run it -- the
+    // caller then falls back to the analytic surface.
+    bool attachDisplaced(rhi::IDevice& device, const fmt::OcWaterPlacement& wp,
+                         const fluids::GerstnerWave* waves, size_t n);
+    // Stops drawing the displaced surface and frees its mesh; the feature stays registered (idle).
+    void retireDisplaced();
+    void drawDisplaced(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const;
+
 #if AVER_FLUIDS_SIMULATED
     void drawOneFluid(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials,
                       fluids::FluidHandle h) const;
@@ -130,7 +146,16 @@ private:
     // ---- the analytic Gerstner surface, its buoyancy plane, and the underwater fog tuning it drives ----
     fluids::WaterRenderer waterRenderer_;
     fluids::UnderwaterFogTuning waterFog_{};
-    bool waterAttached_ = false;
+    bool waterInited_ = false;     // waterRenderer_.init succeeded
+    bool waterAttached_ = false;   // registered as a render feature (taken off while the mesh surface is live)
+
+    // ---- the displaced mesh surface: a WATER record with a material and no `simulate` ----
+    // mutable: draw() is const but re-centres the grid under the camera before the frame's compute.
+    mutable fluids::WaterSurface surface_;
+    bool surfaceInited_ = false;     // surface_.init succeeded
+    bool surfaceAttached_ = false;   // registered as a render feature
+    bool surfaceActive_ = false;     // configured for the current level; draw() draws it
+    std::string surfaceMaterial_;    // the record's .ocmat name, resolved at draw time
 
 #if AVER_FLUIDS_SIMULATED
     // ---- the simulated half: a soft-body volume, kept beside the analytic renderer rather than

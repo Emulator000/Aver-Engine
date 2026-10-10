@@ -29,3 +29,24 @@ set_target_properties(UnderwaterFogTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CM
 add_executable(FluidVolumeTest src/FluidVolumeTest.cpp)
 target_link_libraries(FluidVolumeTest PRIVATE Aver.Fluids Aver.RHI Aver.Core Aver.Platform)
 set_target_properties(FluidVolumeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# WaterSurfaceTest -- the displaced surface's CPU half: grid layout and builder, camera snapping, and
+# the WATER record's cell/radius tokens. No device; links Aver.Formats only for the record parse.
+add_executable(WaterSurfaceTest src/WaterSurfaceTest.cpp)
+target_link_libraries(WaterSurfaceTest PRIVATE Aver.Fluids Aver.Formats Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(WaterSurfaceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# WaterSurfaceCompileTest -- builds water_displace.hlsl's pipeline and a mesh on the adapter (no window,
+# no scene), so a shader error fails here instead of in the editor. Skips (77) without a D3D12 device
+# or DXC, like VoxiShaderCompileTest.
+if(AVER_RHI_D3D12)
+  add_executable(WaterSurfaceCompileTest src/WaterSurfaceCompileTest.cpp)
+  target_link_libraries(WaterSurfaceCompileTest PRIVATE Aver.Fluids Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  if(AVER_RHI_D3D11)
+    target_link_libraries(WaterSurfaceCompileTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(WaterSurfaceCompileTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  set_target_properties(WaterSurfaceCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

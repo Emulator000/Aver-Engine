@@ -21,6 +21,8 @@
 # simulated vertices BACK, which is why it sits on the unconditional side of this list.
 set(_fluids_sources
   src/WaterRenderer.cpp
+  # The displaced mesh surface (compute-waved grid drawn through the material path); no physics.
+  src/WaterSurface.cpp
   src/Underwater.cpp
   src/FluidVolume.cpp
 )

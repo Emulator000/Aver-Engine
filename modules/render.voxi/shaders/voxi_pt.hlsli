@@ -54,6 +54,29 @@ float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
     return q.CommittedRayT() + bias;
 }
+
+// A scattering volume (scatterColor > 0) whose thickness ray finds nothing is open water, as deep as it
+// gets, not empty: 40 attenuation distances leave nothing behind it and its in-scatter reaches its deep
+// value. Any other volume keeps the measured thickness. Callers feed this to the transmittance and the
+// in-scatter, not to the refraction offset.
+float averVolumeThicknessOrDeep(float t, float attD, float3 scatterColor) {
+    return (t <= 0.0 && any(scatterColor > 0.0)) ? 40.0 * attD : t;
+}
+
+// The light a scattering volume adds along the view path through it (averVolumeInscatter, material_prelude),
+// for a front-face crossing of the surface `s`. Sun: its radiance through the visibility, less the share the
+// surface reflects at the sun's angle (the caller's Fresnel, so the volume is lit by what enters it). Sky:
+// the ambient the surface is shaded with. Zero, and skipped, without a volume or a scatter colour.
+float3 averSurfaceInscatter(AverSurface s, float thicknessCm, float3 viewTravelDir, AverLight sun,
+                            AverIndirect ind) {
+    if (s.attenuationDistance <= 0.0 || !any(s.scatterColor > 0.0)) return float3(0.0, 0.0, 0.0);
+    const float3 sunIn = sun.radiance * sun.visibility *
+                         (1.0 - fresnelSchlick(saturate(dot(s.N, sun.direction)), s.F0, s.f90));
+    return averVolumeInscatter(s.attenuationColor, s.attenuationDistance, s.scatterColor, s.scatterAnisotropy,
+                               thicknessCm, viewTravelDir, s.N, sun.direction, sunIn,
+                               ind.ambient * ind.ambientScale * ind.occlusion);
+}
+
 // Re-aims a surface's half vector and Fresnel at one light (they are built for whichever light came first).
 void ptAim(inout AverSurface s, float3 L) {
     const float3 VL = s.V + L;
@@ -68,7 +91,14 @@ struct PtVertex {
     float3      pos;
     AverSurface s;
     float       cover;
+    bool        behind;   // the ray met a scattering material's back face; false for every other material
 };
+
+// rtHitFrom flips h.N to face the ray; this recovers which side the ray came from.
+bool rtHitFromBehind(RtHit h, float3 dir) {
+    const float3 nObj = gRtVerts[h.i0].nrm * h.w.x + gRtVerts[h.i1].nrm * h.w.y + gRtVerts[h.i2].nrm * h.w.z;
+    return dot(mul(float4(nObj, 0.0), h.inst.objectToWorld).xyz, dir) > 0.0;
+}
 
 // Traces origin->dir against opaque geometry and builds the hit's surface through rtHitSurface.
 // `cone` is the ray's footprint growth per cm (texture mip selection). False on a miss.
@@ -91,6 +121,7 @@ bool ptTrace(float3 origin, float3 dir, float tmin, float cone, out PtVertex v,
     v.pos   = h.pos;
     v.s     = rtHitSurface(h, -dir, normalize(gLightDir.xyz), gx, gy, AVER_RT_HIT_FULL);
     v.cover = (h.mat.flags & AVER_MAT_ALPHA_MASK) != 0u ? 1.0 : saturate(v.s.alpha);
+    v.behind = any(h.mat.scatterColor > 0.0) && rtHitFromBehind(h, dir);
 #if AVER_RD_LAMPS
     // A listed lamp is reached by next-event estimation (ptLamp); its glow would count twice.
     if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalEmitterCarried(h.pos)) v.s.emissive = float3(0.0, 0.0, 0.0);
@@ -241,6 +272,29 @@ float3 ptDirect(PtVertex v, float2 pixel, inout uint rng) {
     return averDirectLights(v.s, v.pos, pixel, rng, false);
 }
 
+// The light a scattering volume adds at a front-face path vertex, once per visit (not per branch the path takes
+// next: the composite adds it whatever passes through). The sun's visibility is one opaque shadow ray, drawn
+// only for such a volume, so no other material's random stream moves.
+float3 ptVolumeInscatter(PtVertex v, float2 pixel, inout uint rng) {
+    if (v.s.attenuationDistance <= 0.0 || !any(v.s.scatterColor > 0.0) || v.behind) return float3(0.0, 0.0, 0.0);
+    const float3 dir = -v.s.V;
+    const float  th  = averVolumeThicknessOrDeep(averVolumeThickness(v.pos, v.s.N, dir),
+                                                 v.s.attenuationDistance, v.s.scatterColor);
+    AverLight sun;
+    sun.direction  = normalize(gLightDir.xyz);
+    sun.radiance   = averSunRadiance();
+    sun.visibility = rdSunLit() ? rtShadowOpaque(v.pos, v.s.N, sun.direction, pixel, ptRand(rng) * 6.2831853)
+                                : float3(0.0, 0.0, 0.0);
+    AverIndirect ind;
+    ind.ambient        = averSkyIrradiance(v.s.N);
+    ind.ambientScale   = gAmbient.r;
+    ind.diffuse        = float3(0.0, 0.0, 0.0);
+    ind.occlusion      = 1.0;
+    ind.specular       = float3(0.0, 0.0, 0.0);
+    ind.specularTraced = 1.0;
+    return averSurfaceInscatter(v.s, th, dir, sun, ind);
+}
+
 // Smith G1 for GGX, alpha = rough^2.
 float ptSmithG1(float ndx, float a2) { return 2.0 * ndx / (ndx + sqrt(a2 + (1.0 - a2) * ndx * ndx)); }
 
@@ -325,7 +379,8 @@ float3 ptContinueEx(PtVertex v, float2 pixel, inout uint rng, uint depth, out Pt
             dir = -v.s.V;
             w = (v.s.attenuationDistance > 0.0)
               ? averVolumeTransmittance(v.s.attenuationColor, v.s.attenuationDistance,
-                                        averVolumeThickness(v.pos, v.s.N, dir))
+                                        averVolumeThicknessOrDeep(averVolumeThickness(v.pos, v.s.N, dir),
+                                                                  v.s.attenuationDistance, v.s.scatterColor))
               : float3(1.0, 1.0, 1.0);
             origin = v.pos + dir * bias;
         } else {
@@ -345,6 +400,8 @@ float3 ptContinueEx(PtVertex v, float2 pixel, inout uint rng, uint depth, out Pt
         }
         // A translucent vertex reflects its direct light by its coverage (the composite's diffuse share).
         float3 here = (nv.s.emissive + ptDirect(nv, pixel, rng)) * nv.cover;
+        // A scattering volume's glow is added whole, outside the coverage (it is not the surface's light).
+        here += ptVolumeInscatter(nv, pixel, rng);
         bool cached = false;
 #if AVER_NEURAC
         if (rcCacheOn() && ptCacheable(nv.s)) {

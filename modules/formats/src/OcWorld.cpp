@@ -509,6 +509,12 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 // is the physics one; see OcWaterPlacement::material's own comment for why the two
                 // are kept apart so deliberately.
                 else if (equalsCI(t[i], "material")   && i + 1 < t.size()) wp.material  = std::string(t[++i]);
+                // The displaced surface's grid; a non-positive size is not a grid, so it keeps the default.
+                else if (equalsCI(t[i], "cell")       && i + 1 < t.size()) {
+                    const f64 v = parseF64(t[++i]); if (v > 0.0) wp.cellCm = v;
+                } else if (equalsCI(t[i], "radius")   && i + 1 < t.size()) {
+                    const f64 v = parseF64(t[++i]); if (v > 0.0) wp.radiusCm = v;
+                }
             }
             out.waters.push_back(std::move(wp));
         } else if (equalsCI(key, "WAVE")) {
@@ -1043,6 +1049,9 @@ std::string writeOcworld(const OcWorldData& w) {
             // `preset` deliberately, so a human reading the line meets the solver material and the
             // render material in the same order the struct declares them.
             if (!wp.material.empty()) s += " material " + wp.material;
+            // Omitted at their defaults so a record that names neither round-trips unchanged.
+            if (wp.cellCm   != OcWaterPlacement{}.cellCm)   s += " cell "   + num(wp.cellCm);
+            if (wp.radiusCm != OcWaterPlacement{}.radiusCm) s += " radius " + num(wp.radiusCm);
             s += "\n";
         }
     }

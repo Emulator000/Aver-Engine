@@ -26,6 +26,64 @@
 
 namespace aver::game {
 
+namespace {
+
+// How a water surface draws: the .ocmat it names, bound for the draw, or the fallback look.
+struct SurfaceLook {
+    f32 col[4]   = {0.35f, 0.55f, 0.62f, 0.35f};   // alpha is load-bearing: 1.0 would be an opaque lid
+    f32 metallic = 0.0f, roughness = 0.10f;
+    bool blended = true;   // only an authored OPAQUE material turns this off
+};
+
+// Resolves `name` at DRAW time rather than latching a handle: a surface can exist before its
+// project's materials finish loading, so a handle captured early could be a permanent zero. Binds
+// the material for the draw (setDrawBinding is sticky, so it is stated before every draw) and sets
+// the blend state. `what` names the surface in the once-per-name warning.
+SurfaceLook bindSurfaceLook(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials,
+                            const std::string& name, const char* what) {
+    SurfaceLook look;
+    // u32, not pbr::MaterialHandle: that alias only exists with AVER_MODULE_PBR on.
+    u32 authored = 0;
+#if AVER_MODULE_PBR
+    if (!name.empty()) {
+        authored = content.materialForSurface(name);
+        if (!authored) {
+            // ONCE PER NAME: a WATER record naming a material nobody authored is otherwise silent.
+            static std::unordered_set<std::string> s_warned;
+            if (s_warned.insert(name).second)
+                AVER_WARN("[Water] {} names surface material '{}' but no .ocmat by that name was "
+                          "loaded; drawing the fallback look", what, name);
+        }
+    }
+    if (authored) {
+        look.col[0] = look.col[1] = look.col[2] = 1.0f;
+        look.metallic = look.roughness = 1.0f;
+        if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
+            look.blended = pbr::isTranslucent(*d);
+    }
+    // Bound even with no authored material: bindingSet(0)/constants(0) resolve to the system's own
+    // fallback rather than leaving the previous draw's binding stuck.
+    if (materials && materials->ready())
+        device.setDrawBinding(materials->bindingSet(authored), &materials->constants(authored),
+                              sizeof(pbr::MaterialConstants));
+#else
+    (void)content; (void)materials; (void)name; (void)what;
+#endif
+    device.setDrawBlended(look.blended);
+    return look;
+}
+
+// Whether two surface descriptions need the same grid (the level height is not part of it).
+bool sameGrid(const fluids::WaterSurfaceDesc& a, const fluids::WaterSurfaceDesc& b) {
+    if (a.bounded != b.bounded || a.cellCm != b.cellCm) return false;
+    if (a.bounded)
+        return a.boundsMinCm[0] == b.boundsMinCm[0] && a.boundsMinCm[1] == b.boundsMinCm[1] &&
+               a.boundsMaxCm[0] == b.boundsMaxCm[0] && a.boundsMaxCm[1] == b.boundsMaxCm[1];
+    return a.radiusCm == b.radiusCm;
+}
+
+}  // namespace
+
 void GameWater::init(rhi::IDevice& device) {
 #if AVER_FLUIDS_SIMULATED
     // Registered unconditionally, spawned only if a level or a script asks for one -- an idle
@@ -61,6 +119,7 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
     // the same hole. Returns rather than falling through: the soft body IS the water for this
     // record.
     if (wp.simulate) {
+        retireDisplaced();   // the soft body is the water now
         if (wp.infinite) {
             // A simulated volume is a closed shell needing a size; an endless ocean has none to
             // give it. Refused here, not in the parser -- the format's job is to carry what was
@@ -150,19 +209,32 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
         AVER_WARN("[Water] '{}' declares {} waves; the renderer takes {} and the rest are dropped",
                   wp.name.empty() ? "unnamed" : wp.name, n + skipped, fluids::kMaxGerstnerWaves);
 
-    // Zero waves is a legal answer, not a reason to fall back on a default swell -- a level that
-    // declared WATER and no WAVEs asked for still water. gerstnerHeightCm's own contract already
-    // returns the flat level for an empty set.
-    if (!attachSurface(device, static_cast<f32>(wp.levelCm), waves, n)) {
-        AVER_ERROR("[Water] the level authored water, but the renderer is unavailable on this device");
-        return;
+    // A record with a material and no `simulate` is the displaced mesh surface, which goes through
+    // the ordinary material path and so is seen by rays; a record without one keeps the analytic
+    // ocean. Never both: attachDisplaced takes the ocean off the device.
+    bool displaced = false;
+    if (!wp.material.empty() && !wp.simulate) {
+        displaced = attachDisplaced(device, wp, waves, n);
+        if (!displaced)
+            AVER_WARN("[Water] '{}' asks for a displaced surface but this device cannot run it; "
+                      "using the analytic ocean", wp.name.empty() ? "unnamed" : wp.name);
     }
+    if (!displaced) {
+        retireDisplaced();
+        // Zero waves is a legal answer, not a reason to fall back on a default swell -- a level that
+        // declared WATER and no WAVEs asked for still water. gerstnerHeightCm's own contract already
+        // returns the flat level for an empty set.
+        if (!attachSurface(device, static_cast<f32>(wp.levelCm), waves, n)) {
+            AVER_ERROR("[Water] the level authored water, but the renderer is unavailable on this device");
+            return;
+        }
 
-    if (wp.infinite) {
-        waterRenderer_.clearWaterBounds();
-    } else {
-        waterRenderer_.setWaterBoundsCm(static_cast<f32>(wp.boundsMin[0]), static_cast<f32>(wp.boundsMin[1]),
-                                        static_cast<f32>(wp.boundsMax[0]), static_cast<f32>(wp.boundsMax[1]));
+        if (wp.infinite) {
+            waterRenderer_.clearWaterBounds();
+        } else {
+            waterRenderer_.setWaterBoundsCm(static_cast<f32>(wp.boundsMin[0]), static_cast<f32>(wp.boundsMin[1]),
+                                            static_cast<f32>(wp.boundsMax[0]), static_cast<f32>(wp.boundsMax[1]));
+        }
     }
 
     // The surface ripple set, different from the Gerstner swell above: the swell displaces
@@ -202,25 +274,75 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
     {
         const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
         const f32 current[3] = {0.0f, 0.0f, 0.0f};
-        aver_phys_set_water_plane(waterRenderer_.waterLevelCm(), normal, 1.0f, 0.5f, 0.05f, current);
+        aver_phys_set_water_plane(waterLevelCm(), normal, 1.0f, 0.5f, 0.05f, current);
     }
 #endif
 
-    AVER_INFO("[Water] level surface '{}' at z = {} cm with {} wave(s){}",
+    AVER_INFO("[Water] level surface '{}' at z = {} cm with {} wave(s){}{}",
               wp.name.empty() ? "unnamed" : wp.name, wp.levelCm, n,
-              wp.infinite ? "" : " (bounded)");
+              wp.infinite ? "" : " (bounded)", displaced ? " (displaced mesh)" : "");
 }
 
 bool GameWater::attachSurface(rhi::IDevice& device, f32 levelCm, const fluids::GerstnerWave* waves,
                               size_t n) {
-    if (!waterAttached_) {
+    if (!waterInited_) {
         if (!waterRenderer_.init(device)) return false;
+        waterInited_ = true;
+    }
+    // Re-registered if the mesh surface took it off the device.
+    if (!waterAttached_) {
         device.addRenderFeature(&waterRenderer_);
         waterAttached_ = true;
     }
     waterRenderer_.setWaterLevelCm(levelCm);
     waterRenderer_.setWaves(waves, n);
     return true;
+}
+
+bool GameWater::attachDisplaced(rhi::IDevice& device, const fmt::OcWaterPlacement& wp,
+                                const fluids::GerstnerWave* waves, size_t n) {
+    if (!surfaceInited_) {
+        if (!surface_.init(device)) return false;
+        surfaceInited_ = true;
+    }
+
+    fluids::WaterSurfaceDesc d;
+    d.levelCm = static_cast<f32>(wp.levelCm);
+    d.cellCm = static_cast<f32>(wp.cellCm);
+    d.radiusCm = static_cast<f32>(wp.radiusCm);
+    d.bounded = !wp.infinite;
+    d.boundsMinCm[0] = static_cast<f32>(wp.boundsMin[0]);
+    d.boundsMinCm[1] = static_cast<f32>(wp.boundsMin[1]);
+    d.boundsMaxCm[0] = static_cast<f32>(wp.boundsMax[0]);
+    d.boundsMaxCm[1] = static_cast<f32>(wp.boundsMax[1]);
+
+    // The grid is rebuilt only when its shape changed: the editor re-applies the record on every
+    // Details edit, and a material or height tweak must not recreate a 66k-vertex mesh.
+    if (surfaceActive_ && surface_.drawHandle() && sameGrid(d, surface_.desc())) {
+        surface_.setLevelCm(d.levelCm);
+    } else if (!surface_.configure(d)) {
+        surfaceActive_ = false;
+        return false;
+    }
+
+    if (!surfaceAttached_) {
+        device.addRenderFeature(&surface_);
+        surfaceAttached_ = true;
+    }
+    // Instead of, not in addition to: the ocean would draw over the same hole.
+    if (waterAttached_) {
+        device.removeRenderFeature(&waterRenderer_);
+        waterAttached_ = false;
+    }
+    surface_.setWaves(waves, n);
+    surfaceMaterial_ = wp.material;
+    surfaceActive_ = true;
+    return true;
+}
+
+void GameWater::retireDisplaced() {
+    surfaceActive_ = false;
+    surface_.clear();
 }
 
 bool GameWater::respawnLevelVolume() {
@@ -245,6 +367,7 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
     // without this call its waves stay frozen at t = 0. Outside the simulated-fluid guard because
     // the analytic surface exists in every fluids build; both hosts reach it from their frame tick.
     if (waterAttached_) waterRenderer_.tick(dt);
+    if (surfaceActive_) surface_.tick(dt);
 
 #if AVER_FLUIDS_SIMULATED
     // The one place a fluid volume is ever spawned: applyLevel only latches what a level asked
@@ -336,8 +459,8 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
 }
 
 rhi::SkyAtmosphere GameWater::applyUnderwaterFog(const rhi::SkyAtmosphere& sky, f32 cameraZCm) const {
-    if (!waterAttached_) return sky;
-    return fluids::applyUnderwaterFog(sky, cameraZCm, waterRenderer_.waterLevelCm(), waterFog_);
+    if (!attached()) return sky;
+    return fluids::applyUnderwaterFog(sky, cameraZCm, waterLevelCm(), waterFog_);
 }
 
 #if AVER_FLUIDS_SIMULATED
@@ -346,47 +469,14 @@ void GameWater::drawOneFluid(rhi::IDevice& device, GameContent& content, pbr::Ma
     const rhi::MeshHandle fm = fluidScene_.drawHandle(h);
     if (!fm) return;
 
-    // The surface material, resolved at DRAW time rather than latched at spawn: a volume can be
-    // spawned before its project's materials finish loading, so a handle captured too early could
-    // be a permanent zero.
-    // u32, not pbr::MaterialHandle: that alias only exists with AVER_MODULE_PBR on.
-    u32 authored = 0;
-#if AVER_MODULE_PBR
-    if (const auto nm = fluidSurfaceMaterial_.find(h);
-        nm != fluidSurfaceMaterial_.end() && !nm->second.empty()) {
-        authored = content.materialForSurface(nm->second);
-        if (!authored) {
-            // ONCE PER NAME: a WATER record naming a material nobody authored is otherwise silent.
-            static std::unordered_set<std::string> s_warned;
-            if (s_warned.insert(nm->second).second)
-                AVER_WARN("[Water] volume {} names surface material '{}' but no .ocmat by "
-                          "that name was loaded; drawing the fallback look", h, nm->second);
-        }
-    }
-#endif
-
-    // The fallback look, for a WATER record naming no .ocmat. Alpha is load-bearing: at 1.0 this
-    // would put an opaque lid over the pool.
-    f32 col[4]   = {0.35f, 0.55f, 0.62f, 0.35f};
-    f32 metallic = 0.0f, roughness = 0.10f;
-    bool blended = true;
-#if AVER_MODULE_PBR
-    if (authored) {
-        col[0] = col[1] = col[2] = 1.0f;
-        metallic = roughness = 1.0f;
-        if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
-            blended = pbr::isTranslucent(*d);
-    }
-    // setDrawBinding is STICKY, so it is stated before every draw rather than set once -- bound
-    // even with no authored material, since bindingSet(0)/constants(0) resolve to the system's own
-    // fallback rather than leaving the previous draw's binding stuck.
-    if (materials && materials->ready())
-        device.setDrawBinding(materials->bindingSet(authored), &materials->constants(authored),
-                              sizeof(pbr::MaterialConstants));
-#endif
-    // Blended even with no authored material: only an authored OPAQUE material turns it off --
-    // water with no .ocmat must composite over the pool floor, not draw as a solid lid.
-    device.setDrawBlended(blended);
+    // The record's surface .ocmat by name (see fluidSurfaceMaterial_); a volume with none, or one
+    // spawned from a graph, draws the fallback look.
+    static const std::string kNoMaterial;
+    const auto nm = fluidSurfaceMaterial_.find(h);
+    const std::string vol = "volume " + std::to_string(h);
+    const SurfaceLook look = bindSurfaceLook(device, content, materials,
+                                             nm != fluidSurfaceMaterial_.end() ? nm->second : kNoMaterial,
+                                             vol.c_str());
 
     // A real translation, not identity: the buffer is mesh-LOCAL about the volume's centre, so
     // this matrix places it AND gives the blended flush something true to sort by.
@@ -396,11 +486,34 @@ void GameWater::drawOneFluid(rhi::IDevice& device, GameContent& content, pbr::Ma
     fw.m[3][0] = origin[0];
     fw.m[3][1] = origin[1];
     fw.m[3][2] = origin[2];
-    device.drawMesh(fm, &fw.m[0][0], col, metallic, roughness);
+    device.drawMesh(fm, &fw.m[0][0], look.col, look.metallic, look.roughness);
 }
 #endif
 
+void GameWater::drawDisplaced(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const {
+    const rhi::MeshHandle mesh = surface_.drawHandle();
+    if (!surfaceActive_ || !mesh) return;
+
+    // Re-centred before the draw: the matrix below and this frame's compute pass (prePass) both read
+    // the origin this sets, so the geometry and its transform cannot disagree.
+    f32 camPos[3];
+    if (device.camera(nullptr, nullptr, camPos)) surface_.place(camPos);
+
+    const SurfaceLook look = bindSurfaceLook(device, content, materials, surfaceMaterial_, "the level water");
+
+    // Translation only: the buffer is mesh-LOCAL about the grid origin, so this places it and gives
+    // the blended flush a true position to sort by.
+    f32 origin[3];
+    surface_.drawOriginCm(origin);
+    Mat4 w = Mat4::identity();
+    w.m[3][0] = origin[0];
+    w.m[3][1] = origin[1];
+    w.m[3][2] = origin[2];
+    device.drawMesh(mesh, &w.m[0][0], look.col, look.metallic, look.roughness);
+}
+
 void GameWater::draw(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const {
+    drawDisplaced(device, content, materials);
 #if AVER_FLUIDS_SIMULATED
     // Every live volume, drawn in handle order and not sorted here -- the device captures blended
     // draws and replays them sorted back-to-front itself.
@@ -412,6 +525,9 @@ void GameWater::draw(rhi::IDevice& device, GameContent& content, pbr::MaterialSy
 }
 
 void GameWater::unload() {
+    // The displaced surface is per-level (it names the level's material), so it goes with it; the
+    // feature stays registered and idle.
+    retireDisplaced();
 #if AVER_FLUIDS_SIMULATED
     // The only teardown site for what a level itself spawned. Not folded into a generic body
     // list: neither the WATER record's own volume nor a graph-spawned one is ever pushed to one,
@@ -450,11 +566,12 @@ void GameWater::shutdown(rhi::IDevice* device) {
     fluidScene_.shutdown();
 #endif
     // Unregistered here so no feature outlives its registration.
-    if (waterAttached_) {
-        if (device) device->removeRenderFeature(&waterRenderer_);
-        waterRenderer_.shutdown();
-        waterAttached_ = false;
-    }
+    if (surfaceAttached_ && device) device->removeRenderFeature(&surface_);
+    surface_.shutdown();
+    surfaceAttached_ = surfaceInited_ = surfaceActive_ = false;
+    if (waterAttached_ && device) device->removeRenderFeature(&waterRenderer_);
+    if (waterInited_) waterRenderer_.shutdown();
+    waterAttached_ = waterInited_ = false;
 }
 
 #if AVER_FLUIDS_SIMULATED

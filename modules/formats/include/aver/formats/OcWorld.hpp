@@ -380,6 +380,14 @@ struct OcWaterPlacement {
     // division of responsibility every other optional field here already has. A water surface with
     // no material draws with the engine's fallback look rather than refusing to draw.
     std::string material;
+
+    // THE DISPLACED SURFACE'S GRID. Only read when `material` is set and `simulate` is not: that
+    // combination draws a real vertex-displaced mesh (fluids::WaterSurface) through the ordinary
+    // material path, where a record with no material keeps the analytic ocean. `cell` is the grid
+    // cell size and `radius` the half-extent of the camera-following grid (a bounded record fills
+    // its bounds instead). Defaults are what a record naming neither gets.
+    f64 cellCm   = 100.0;
+    f64 radiusCm = 12800.0;
 };
 
 // A LEVEL'S WEATHER, split out of OcWorldData so it can be COPIED WHOLE.
