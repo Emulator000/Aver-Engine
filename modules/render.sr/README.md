@@ -83,7 +83,7 @@ TAAU (temporal anti-aliasing with upscale) followed by FSR 1's RCAS. The editor'
   in motion. The smear was history kept at ~97% wherever no sample landed close to the pixel and a
   loose clip box; the motion floor and the min/max clip replace the fallback. A cut reprojects out
   of the screen or is clipped within a few frames.
-- **Needs the G-buffer** (velocity + view Z, so MSAA 1): the editor enables it while TAA is on.
+- **Needs the G-buffer** (velocity + view Z, so MSAA 1): the editor and the packaged runtime enable it while TAA is on.
   Without it, or on a backend whose caller cannot let it retarget (Vulkan), it falls back to FSR 1.
 - **Measured** on NeonDistrict_Day at 0.5 scale: edges anti-aliased (no stair-steps on the sign
   rim, railings, road markings), road grain reduced under motion, no visible ghost trails three
@@ -91,6 +91,6 @@ TAAU (temporal anti-aliasing with upscale) followed by FSR 1's RCAS. The editor'
 
 ## What's NOT here yet
 
-- **TAA in the packaged runtime** (it still uses FSR 1), and **jitter on Vulkan**.
+- **Jitter on Vulkan**. (The packaged runtime uses TAAU like the editor since 2026-10-11: `--taa` / `--no-taa`, `RENDER.TAA`.)
 - Frame interpolation and the denoiser read the jitter-carrying velocity unmodified (up to half a
   scene pixel of extra apparent motion).
