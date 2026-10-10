@@ -1618,6 +1618,12 @@ int main(int argc, char** argv) {
         // moss does not): UsdImportOptions::focusBySize. Entities keep the per-prototype share.
         uopt.focusBySize = !instancesAsEntities;
         if (!fmt::importUsdStage(input, res, uopt, &why)) {
+            // What the composer saw is the diagnosis of a failed import, so it is reported too.
+            for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
+            if (!importReportPath.empty()) {
+                std::ofstream rf(importReportPath, std::ios::binary);
+                if (rf) rf << "IMPORT FAILED: " << why << '\n' << fmt::usdImportReportText(res);
+            }
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
             return exitCode(ExitCode::Failed);
