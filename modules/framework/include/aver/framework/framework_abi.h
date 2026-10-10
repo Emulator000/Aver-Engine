@@ -53,8 +53,10 @@ extern "C" {
  *    aver_fw_cursor_request/aver_fw_cursor_release/aver_fw_cursor_requested) -- a shipped game had
  *    no way to exit itself or release the mouse cursor (see that section below).
  * 9: aver_fw_class_count (enumerate declared classes) and aver_fw_begin_play_with_pawn (a level's
- *    pawn override) -- for World Settings' game mode / default pawn pickers. */
-#define AVER_FW_ABI_VERSION_MINOR 9
+ *    pawn override) -- for World Settings' game mode / default pawn pickers.
+ * 10: RAGDOLLS, RELAYED section (aver_fw_set_ragdoll_provider, aver_fw_ragdoll_start/stop/mode/
+ *    set_strength/add_impulse). */
+#define AVER_FW_ABI_VERSION_MINOR 10
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -253,6 +255,40 @@ AVER_FW_ABI int32_t aver_fw_set_anim_curve_provider(aver_fw_anim_curve_fn fn, vo
  * provider, no clip on the entity, or no curve of that name. THE CALLER MUST DISTINGUISH THOSE
  * FROM A VALUE OF ZERO: a curve that reads 0 and a curve that is not there mean opposite things. */
 AVER_FW_ABI int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* outValue);
+
+/* ---- RAGDOLLS, RELAYED -----------------------------------------------------------------------
+ *
+ * Same shape as the animation curve above and for the same reason: the framework links neither the
+ * animation module nor physics, so it holds function pointers the composition root installs and
+ * forwards. No provider -> start/stop/set_strength/add_impulse return 0 and mode returns -1 (no
+ * ragdoll), the answers an entity with nothing to ragdoll gives.
+ *
+ * Modes match AVER_PHYS_RAGDOLL_*: 0 kinematic (parts follow the animation), 1 limp (simulated),
+ * 2 powered (simulated, motors drive toward the animation). boneNameHash is fnv1a64 of the bone's
+ * name, the hash everything else here names a socket or curve by; 0 means the root part. */
+typedef int32_t (AVER_FW_CALL* aver_fw_ragdoll_start_fn)(int32_t entity, int32_t mode, float blendSeconds, void* user);
+typedef int32_t (AVER_FW_CALL* aver_fw_ragdoll_stop_fn)(int32_t entity, float blendSeconds, void* user);
+typedef int32_t (AVER_FW_CALL* aver_fw_ragdoll_mode_fn)(int32_t entity, void* user);
+typedef int32_t (AVER_FW_CALL* aver_fw_ragdoll_set_strength_fn)(int32_t entity, float strength, void* user);
+typedef int32_t (AVER_FW_CALL* aver_fw_ragdoll_add_impulse_fn)(int32_t entity, int64_t boneNameHash,
+                                                               float ix, float iy, float iz, void* user);
+/* Installs the provider (all five or none; null clears). Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_ragdoll_provider(aver_fw_ragdoll_start_fn start, aver_fw_ragdoll_stop_fn stop,
+                                                 aver_fw_ragdoll_mode_fn mode,
+                                                 aver_fw_ragdoll_set_strength_fn setStrength,
+                                                 aver_fw_ragdoll_add_impulse_fn addImpulse, void* user);
+/* Starts (or retargets) a ragdoll on the entity's skeleton, blending the simulated pose in over
+ * blendSeconds. 1 on success, 0 with no provider, no skeleton, or no usable bones. */
+AVER_FW_ABI int32_t aver_fw_ragdoll_start(int32_t entity, int32_t mode, float blendSeconds);
+/* Blends back to animation over blendSeconds, then removes the ragdoll. 0 if there is none. */
+AVER_FW_ABI int32_t aver_fw_ragdoll_stop(int32_t entity, float blendSeconds);
+/* The current mode, or -1 when the entity has no ragdoll (including after a stop has finished). */
+AVER_FW_ABI int32_t aver_fw_ragdoll_mode(int32_t entity);
+/* Powered-mode motor strength, 0..1. */
+AVER_FW_ABI int32_t aver_fw_ragdoll_set_strength(int32_t entity, float strength);
+/* A world-space impulse (kg*cm/s) on a bone's part (0 = the root part), at the part's centre. */
+AVER_FW_ABI int32_t aver_fw_ragdoll_add_impulse(int32_t entity, int64_t boneNameHash,
+                                                float ix, float iy, float iz);
 
 /* ---- GRAPH-LOCAL VARIABLES, RELAYED -----------------------------------------------------------
  *

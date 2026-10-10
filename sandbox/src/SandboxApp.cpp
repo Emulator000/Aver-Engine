@@ -4,6 +4,9 @@
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #include "SandboxApp.hpp"
+#if AVER_MODULE_RAGDOLL
+#  include "aver/ragdoll/RagdollSystem.hpp"
+#endif
 #include "aver/assets/LevelSky.hpp"
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "InstanceSetEditor.hpp"   // makeInstanceSetEditor (.ocinst); not pulled in by SandboxApp.hpp
@@ -540,6 +543,16 @@ void SandboxApp::onInit(Engine& e)  {
     // Control rig: register and install before project opens (needs no level).
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
+#endif
+#if AVER_MODULE_RAGDOLL
+    // Ragdolls: installed AFTER the control rig so it chains it (the rig runs first, the ragdoll sees its pose).
+    if (ragdoll::ragdollSystem().install(anim::animSystem(), scene::World::instance())) {
+#if AVER_MODULE_FRAMEWORK
+        aver_fw_set_ragdoll_provider(&ragdoll::providerStart, &ragdoll::providerStop, &ragdoll::providerMode,
+                                     &ragdoll::providerSetStrength, &ragdoll::providerAddImpulse,
+                                     &ragdoll::ragdollSystem());
+#endif
+    }
 #endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();
@@ -2119,6 +2132,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
     playProf_.begin(editor::PlayPhase::ObjectAnim);
     game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
+#if AVER_MODULE_RAGDOLL
+    ragdoll::ragdollSystem().tick(t.dt);   // after the physics step, before the pose it writes into
+#endif
     anim::animSystem().tick(scene::World::instance(), t.dt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
     hm.mark("objectAnim");
@@ -2554,6 +2570,9 @@ editor::shutdownAnimEditors();
 #if AVER_MODULE_SCENE
     // Stop Play before closing the window; vehicle bodies/constraints come down here.
     vehicles_.end();
+#endif
+#if AVER_MODULE_RAGDOLL
+    ragdoll::ragdollSystem().clear();
 #endif
     aver_phys_shutdown();
 #endif

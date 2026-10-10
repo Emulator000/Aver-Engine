@@ -195,6 +195,17 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int   aver_fw_input_scheme_binding(int index, out int outActionIndex, out int outSource, out float outScale, out int outComponent);
     [DllImport(Lib)] internal static extern IntPtr aver_fw_input_scheme_binding_key(int index);
 
+    // ---- RAGDOLLS, RELAYED ---------------------------------------------------------------------
+    // The framework does not know what a skeleton or a physics body is; a provider installed by the
+    // composition root answers these (framework_abi.h, same shape as aver_fw_anim_curve). Mode is
+    // 0 kinematic, 1 limp, 2 powered. boneNameHash is fnv1a64 of the bone name (Assets.ObjectIdOf);
+    // 0 is the root part.
+    [DllImport(Lib)] internal static extern int aver_fw_ragdoll_start(int entity, int mode, float blendSeconds);
+    [DllImport(Lib)] internal static extern int aver_fw_ragdoll_stop(int entity, float blendSeconds);
+    [DllImport(Lib)] internal static extern int aver_fw_ragdoll_mode(int entity);
+    [DllImport(Lib)] internal static extern int aver_fw_ragdoll_set_strength(int entity, float strength);
+    [DllImport(Lib)] internal static extern int aver_fw_ragdoll_add_impulse(int entity, long boneNameHash, float ix, float iy, float iz);
+
     /// <summary>Decodes a UTF-8 string returned as a pointer; "?" if null.</summary>
     internal static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }

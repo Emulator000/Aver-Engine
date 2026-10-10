@@ -269,6 +269,11 @@ if(TARGET Aver.Anim.Scene)
   # what decides when the animation clock advances.
   target_link_libraries(Sandbox PRIVATE Aver.Anim.Scene)
 endif()
+if(TARGET Aver.Ragdoll)
+  # Ragdolls on skinned entities (brings AVER_MODULE_RAGDOLL=1). The app installs it beside the
+  # control rig and ticks it where the animation clock ticks.
+  target_link_libraries(Sandbox PRIVATE Aver.Ragdoll)
+endif()
 if(TARGET Aver.Physics)
   # The simulation (brings AVER_MODULE_PHYSICS=1). Named on the executable for the same reason the
   # scene and material systems are: the app owns the frame loop, and the frame loop is what decides

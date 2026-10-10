@@ -8,6 +8,9 @@
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GamePawn.hpp"
+#if AVER_MODULE_RAGDOLL
+#  include "aver/ragdoll/RagdollSystem.hpp"
+#endif
 
 #include <cfloat>
 // For teleportPawnToCamera: finding and measuring a capsule this file did not create, and a ray
@@ -609,6 +612,10 @@ void SandboxApp::stopPlay() {
     preplayViewValid_ = false;
     // A session's state machines, boards, crowds and cover claims end with it.
     game::resetGameSystems();
+#if AVER_MODULE_RAGDOLL
+    // Before the physics teardown below: a ragdoll's parts are bodies that session owns.
+    ragdoll::ragdollSystem().clear();
+#endif
     // PHYSICS FIRST, because the handles live IN the components: an entity destroyed by the
     // session takes its CRigidBody (and the body handle inside it) with it, and a body whose
     // handle is gone can never be removed. Tearing down here first is what keeps Play/Stop from leaking a Jolt body per destroyed entity.

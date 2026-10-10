@@ -224,6 +224,10 @@ option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pas
 # (scene::CParticleEmitter drives it), unlike Occlusion/AverSR, which is why the force-off guard
 # beside AVER_MODULE_FRAMEWORK's exists just below -- see it for what happens with the scene off.
 option(AVER_MODULE_PARTICLES "Particle system: CPU-simulated billboard particles, depth-tested against the scene" ON)
+# Ragdolls: a skinned entity's skeleton as a physics ragdoll, blended over the animation through
+# AnimSystem's pose-modifier seam (docs/physics/RAGDOLL_ANIMATION.md). Needs the scene (the entity),
+# the animation join and physics, so it is only added when all three are (see the scene block below).
+option(AVER_MODULE_RAGDOLL "Ragdolls on skinned entities: go limp, hold the animation with motors, blend back" ON)
 option(AVER_MODULE_FLUIDS "Fluids: the analytic Gerstner surface, the underwater fog override, and soft-body fluid volumes" ON)
 option(AVER_MODULE_RENDER_SOFTBODY "Draw meshes whose vertices come from a simulated soft body" ON)
 # Media: H.264 MP4 output for the render queue (Windows Media Foundation; a stub elsewhere). Core-only
@@ -405,6 +409,11 @@ if(AVER_MODULE_SCENE)
   # The scene/animation join. Guarded on BOTH, because it is the edge between them and neither owns
   # it; a build with either switched off simply does not have the join.
   add_subdirectory(modules/anim.scene)
+  # Ragdolls on skinned entities: the join between the animation seam and the physics ABI, so it
+  # needs all of scene, anim.scene and physics; with any of them off it is simply not there.
+  if(AVER_MODULE_RAGDOLL AND AVER_MODULE_PHYSICS)
+    add_subdirectory(modules/ragdoll)
+  endif()
   # Save/load of a whole world. Guarded on SCENE for the same reason anim.scene is: it is the edge
   # between the world and the container format, and a build with no scene has no world to save.
   add_subdirectory(modules/save)
@@ -651,6 +660,9 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_SCENE)
     add_subdirectory(tests/scene)
     add_subdirectory(tests/anim.scene)
+    if(TARGET Aver.Ragdoll)
+      add_subdirectory(tests/ragdoll)
+    endif()
     add_subdirectory(tests/save)
     add_subdirectory(tests/prefab)
     if(TARGET Aver.Formats)

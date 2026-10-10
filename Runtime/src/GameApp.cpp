@@ -35,6 +35,9 @@
 #  include "aver/save/SaveWorld.hpp"
 #  include "aver/formats/OcSave.hpp"
 #endif
+#if AVER_MODULE_RAGDOLL
+#  include "aver/ragdoll/RagdollSystem.hpp"
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
 #  include "aver/synapse/SynapseAgent.hpp"
 #  include "aver/synapse/SynapsePerception.hpp"
@@ -1738,6 +1741,16 @@ void GameApp::onInit(Engine& e) {
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
 #endif
+#if AVER_MODULE_RAGDOLL
+    // Ragdolls: installed AFTER the control rig so it chains it (the rig runs first, the ragdoll sees its pose).
+    if (ragdoll::ragdollSystem().install(anim::animSystem(), scene::World::instance())) {
+#if AVER_MODULE_FRAMEWORK
+        aver_fw_set_ragdoll_provider(&ragdoll::providerStart, &ragdoll::providerStop, &ragdoll::providerMode,
+                                     &ragdoll::providerSetStrength, &ragdoll::providerAddImpulse,
+                                     &ragdoll::ragdollSystem());
+#endif
+    }
+#endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();
 #if AVER_MODULE_SCENE
@@ -1977,6 +1990,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // Animation clock ticks UNCONDITIONALLY: hanging off gameplay gates would freeze it when no session is running.
     anim::animSystem().setObjectAnimationPaused(objectsHeld);
     game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
+#if AVER_MODULE_RAGDOLL
+    ragdoll::ragdollSystem().tick(t.dt);   // after the physics step, before the pose it writes into
+#endif
     anim::animSystem().tick(scene::World::instance(), t.dt);
     // Level sequence: advances with the session (not while paused), writes transforms before the flush below.
     if (!sequencePlayer_.empty()) {
@@ -2238,6 +2254,9 @@ void GameApp::onShutdown(Engine& e) {
     water_.shutdown(dev);
 #endif
 #if AVER_MODULE_PHYSICS
+#if AVER_MODULE_RAGDOLL
+    ragdoll::ragdollSystem().clear();
+#endif
     aver_phys_shutdown();
 #endif
 #if AVER_WITH_AUDIO_ABI

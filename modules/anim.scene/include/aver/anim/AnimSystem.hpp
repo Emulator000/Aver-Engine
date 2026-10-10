@@ -85,6 +85,9 @@ public:
     void setPoseSource(PoseSourceFn fn, void* user) { poseSrc_ = fn; poseSrcUser_ = user; }
     bool hasPoseSource() const { return poseSrc_ != nullptr; }
     bool hasPoseModifier() const { return poseMod_ != nullptr; }
+    // The installed modifier, so a second one can chain it (RagdollSystem runs after the control rig).
+    PoseModifierFn poseModifier() const { return poseMod_; }
+    void* poseModifierUser() const { return poseModUser_; }
 
     // How many notifies this system has delivered since the last clear(). Exists so a test can
     // assert on the COUNT without installing a sink that records, and so a host can see at a glance

@@ -667,6 +667,47 @@ int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* outValue) {
     return g_animCurve(entity, nameHash, outValue, g_animCurveUser);
 }
 
+// ---- RAGDOLLS, RELAYED ------------------------------------------------------------------------
+// Same shape as g_animCurve above, for the same reason. NOT ATOMIC, like every provider here.
+aver_fw_ragdoll_start_fn        g_ragdollStart    = nullptr;
+aver_fw_ragdoll_stop_fn         g_ragdollStop     = nullptr;
+aver_fw_ragdoll_mode_fn         g_ragdollMode     = nullptr;
+aver_fw_ragdoll_set_strength_fn g_ragdollStrength = nullptr;
+aver_fw_ragdoll_add_impulse_fn  g_ragdollImpulse  = nullptr;
+void* g_ragdollUser = nullptr;
+
+int32_t aver_fw_set_ragdoll_provider(aver_fw_ragdoll_start_fn start, aver_fw_ragdoll_stop_fn stop,
+                                     aver_fw_ragdoll_mode_fn mode, aver_fw_ragdoll_set_strength_fn setStrength,
+                                     aver_fw_ragdoll_add_impulse_fn addImpulse, void* user) {
+    g_ragdollStart    = start;
+    g_ragdollStop     = stop;
+    g_ragdollMode     = mode;
+    g_ragdollStrength = setStrength;
+    g_ragdollImpulse  = addImpulse;
+    g_ragdollUser     = user;
+    return 1;
+}
+
+int32_t aver_fw_ragdoll_start(int32_t entity, int32_t mode, float blendSeconds) {
+    return g_ragdollStart ? g_ragdollStart(entity, mode, blendSeconds, g_ragdollUser) : 0;
+}
+
+int32_t aver_fw_ragdoll_stop(int32_t entity, float blendSeconds) {
+    return g_ragdollStop ? g_ragdollStop(entity, blendSeconds, g_ragdollUser) : 0;
+}
+
+int32_t aver_fw_ragdoll_mode(int32_t entity) {
+    return g_ragdollMode ? g_ragdollMode(entity, g_ragdollUser) : -1;
+}
+
+int32_t aver_fw_ragdoll_set_strength(int32_t entity, float strength) {
+    return g_ragdollStrength ? g_ragdollStrength(entity, strength, g_ragdollUser) : 0;
+}
+
+int32_t aver_fw_ragdoll_add_impulse(int32_t entity, int64_t boneNameHash, float ix, float iy, float iz) {
+    return g_ragdollImpulse ? g_ragdollImpulse(entity, boneNameHash, ix, iy, iz, g_ragdollUser) : 0;
+}
+
 // ---- GRAPH-LOCAL VARIABLES, RELAYED -----------------------------------------------------------
 // Same shape as g_animCurve just above, for the same reason: only a composition root links both
 // Aver.Framework and Aver.Graph, so this file holds a function pointer instead of an edge to it.
