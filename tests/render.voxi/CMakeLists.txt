@@ -149,3 +149,15 @@ if(TARGET Aver.Render.Voxi.Renderer AND AVER_RHI_D3D12)
   endif()
   set_target_properties(VoxiShaderCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# VoxiSpirvCompileTest -- the Vulkan twin of VoxiShaderCompileTest, with no device: compiles Voxi's
+# RayQuery scene/ray-driven variants, the water displacement kernel and the reference path tracer to
+# SPIR-V through the vendored third_party/dxc-spirv DXC, with the argument list VulkanShaderCompiler
+# uses. Links the generic RHI (shaderFile, the shared prelude) and the material prelude; no backend.
+# Skips (77) without the vendored dxcompiler.dll. AVER_REPO_ROOT: stages the module shader trees.
+if(TARGET Aver.Render.PBR.Materials)
+  add_executable(VoxiSpirvCompileTest src/VoxiSpirvCompileTest.cpp)
+  target_link_libraries(VoxiSpirvCompileTest PRIVATE Aver.Render.PBR.Materials Aver.RHI Aver.Platform Aver.Core)
+  target_compile_definitions(VoxiSpirvCompileTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+  set_target_properties(VoxiSpirvCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
