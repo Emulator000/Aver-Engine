@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Scripting.Host",
+  "dir": "scripting",
+  "displayName": "Scripting",
+  "description": "In-process .NET scripting host (hostfxr/CoreCLR) and the managed bridge.",
+  "category": "Gameplay",
+  "option": "AVER_MODULE_SCRIPTING",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": true, "full": true},
+  "dependsOn": ["Aver.Core", "Aver.Platform"],
+  "consequence": "No C# scripts or script graphs run; actors have no script logic."
+}

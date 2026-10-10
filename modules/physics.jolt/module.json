@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Physics.Jolt",
+  "dir": "physics.jolt",
+  "displayName": "Physics Backend (Jolt)",
+  "description": "The vendored Jolt library that Aver.Physics is built on.",
+  "category": "Physics",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": [],
+  "derivedFrom": ["Aver.Physics"],
+  "consequence": "No rigid-body backend; goes with Physics."
+}

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Fluids",
+  "dir": "fluids",
+  "displayName": "Fluids",
+  "description": "The analytic Gerstner water surface, the underwater fog override and soft-body fluid volumes.",
+  "category": "Rendering",
+  "option": "AVER_MODULE_FLUIDS",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI"],
+  "optionalDependsOn": ["Aver.Physics"],
+  "consequence": "No water surface, underwater fog or fluid volumes."
+}

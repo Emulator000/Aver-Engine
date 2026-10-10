@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.UI.Abi",
+  "dir": "ui.abi",
+  "displayName": "Game UI ABI",
+  "description": "Plain-C seam onto the game UI so a HUD is authored in the game's language.",
+  "category": "UI",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.UI"],
+  "consequence": ""
+}

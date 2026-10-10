@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.Skin",
+  "dir": "render.skin",
+  "displayName": "GPU Skinning",
+  "description": "GPU skinning for skinned meshes.",
+  "category": "Rendering",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Anim", "Aver.Core", "Aver.Formats", "Aver.RHI"],
+  "optionalDependsOn": ["Aver.Anim.Scene", "Aver.Scene"],
+  "consequence": ""
+}

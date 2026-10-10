@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.PBR",
+  "dir": "render.pbr",
+  "displayName": "PBR Materials",
+  "description": "Material library, its plain-C ABI and the surface BRDF.",
+  "category": "Rendering",
+  "option": "AVER_MODULE_PBR",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": true, "full": true},
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.RHI"],
+  "consequence": "No material system or surface BRDF; materials cannot be authored or rendered, and Voxi cannot be built."
+}

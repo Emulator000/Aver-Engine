@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.Neural",
+  "dir": "render.neural",
+  "displayName": "Neural Inference",
+  "description": "Small neural networks that run inside the frame (MLP inference and training).",
+  "category": "Rendering",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI"],
+  "consequence": ""
+}

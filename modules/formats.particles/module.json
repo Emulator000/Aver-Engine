@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Formats.Particles",
+  "dir": "formats.particles",
+  "displayName": "Particle Format",
+  "description": "The .ocparticle reader and writer.",
+  "category": "Content",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Formats", "Aver.Particles"],
+  "derivedFrom": ["Aver.Particles"],
+  "consequence": "Particle effects cannot be loaded from or saved to .ocparticle files."
+}

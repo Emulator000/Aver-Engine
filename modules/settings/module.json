@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Settings",
+  "dir": "settings",
+  "displayName": "Settings",
+  "description": "Durable key/value store for a shipped game.",
+  "category": "Platform",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Platform"],
+  "consequence": ""
+}

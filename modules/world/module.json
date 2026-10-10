@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.World",
+  "dir": "world",
+  "displayName": "World Runtime",
+  "description": "Turns .ocworld placements into entities and streams regions; shared by editor and game.",
+  "category": "Content",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Platform", "Aver.Render.Pcg"],
+  "optionalDependsOn": ["Aver.Physics", "Aver.Scene"],
+  "consequence": ""
+}

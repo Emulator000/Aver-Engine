@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.RHI.D3D11",
+  "dir": "rhi.d3d11",
+  "displayName": "DirectX 11 Backend",
+  "description": "DirectX 11 rendering backend.",
+  "category": "Rendering",
+  "option": "AVER_RHI_D3D11",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.RHI"],
+  "consequence": "No DirectX 11 renderer."
+}

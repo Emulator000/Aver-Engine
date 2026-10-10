@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Media",
+  "dir": "media",
+  "displayName": "Video Output",
+  "description": "H.264 MP4 output for the Movie Render Queue through Windows Media Foundation.",
+  "category": "Tools",
+  "option": "AVER_MODULE_MEDIA",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core"],
+  "consequence": "The render queue cannot write MP4 video."
+}

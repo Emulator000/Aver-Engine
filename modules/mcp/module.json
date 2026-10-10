@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Mcp",
+  "dir": "mcp",
+  "displayName": "Editor Control Channel",
+  "description": "Loopback control channel so a tool can drive the editor (a debugging aid).",
+  "category": "Tools",
+  "option": "AVER_MODULE_MCP",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": false, "full": true},
+  "dependsOn": ["Aver.Core"],
+  "consequence": "The editor cannot be driven over the loopback control channel and its status-bar widget is gone."
+}

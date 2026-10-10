@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.Denoise",
+  "dir": "render.denoise",
+  "displayName": "Denoiser",
+  "description": "The FidelityFX-based denoiser and its host code.",
+  "category": "Rendering",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI", "Aver.Render.Neural"],
+  "consequence": ""
+}

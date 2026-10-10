@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.Pcg",
+  "dir": "render.pcg",
+  "displayName": "PCG (GPU)",
+  "description": "The GPU half of procedural content generation.",
+  "category": "Rendering",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI"],
+  "consequence": ""
+}

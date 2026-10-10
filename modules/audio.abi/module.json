@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Audio.Abi",
+  "dir": "audio.abi",
+  "displayName": "Audio ABI",
+  "description": "Plain-C seam onto the audio stack so a game can trigger its own sounds.",
+  "category": "Audio",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Audio", "Aver.Audio.Wasapi", "Aver.Core", "Aver.Formats"],
+  "consequence": ""
+}

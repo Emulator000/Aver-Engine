@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.ActorPreview",
+  "dir": "render.actorpreview",
+  "displayName": "Actor Preview",
+  "description": "The actor editor's offscreen preview renderer.",
+  "category": "Rendering",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.RHI"],
+  "optionalDependsOn": ["Aver.Render.PBR"],
+  "consequence": ""
+}

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Scene",
+  "dir": "scene",
+  "displayName": "Scene",
+  "description": "Entity and component world: entities, transforms, hierarchy and the plain-C ABI.",
+  "category": "Gameplay",
+  "option": "AVER_MODULE_SCENE",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": true, "full": true},
+  "dependsOn": ["Aver.Assets", "Aver.Core"],
+  "consequence": "No entities, components or world; everything built on the scene goes with it."
+}

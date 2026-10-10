@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Prefab",
+  "dir": "prefab",
+  "displayName": "Prefabs",
+  "description": "Prefab instances in a live world: spawn, overrides, revert, apply, plus their C ABI.",
+  "category": "Gameplay",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Scene"],
+  "derivedFrom": ["Aver.Scene"],
+  "consequence": "No prefab instances."
+}

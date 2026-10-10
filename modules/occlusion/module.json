@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Occlusion",
+  "dir": "occlusion",
+  "displayName": "Occlusion Culling",
+  "description": "Hierarchical-Z pyramid and two-pass box occlusion culling.",
+  "category": "Rendering",
+  "option": "AVER_MODULE_OCCLUSION",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI"],
+  "consequence": "No occlusion culling; everything inside the frustum is drawn."
+}

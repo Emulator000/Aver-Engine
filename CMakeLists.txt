@@ -19,6 +19,7 @@ set(AVER_VERSION_SUFFIX "-1")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(AvModule)
+include(AvModuleManifest)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -53,9 +54,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # the Vulkan cascade shadow map is still known-broken (pushRenderScope discards the caller's render
 # targets, so the cascade atlas is never written; RT shadows mask it). ON here means SELECTABLE and
 # COMPILED, which is what RENDER.BACKEND in a .ocproject needs to mean anything -- not "at parity".
-option(AVER_RHI_D3D12  "DirectX 12 backend (primary)" ON)
-option(AVER_RHI_D3D11  "DirectX 11 backend"           ON)
-option(AVER_RHI_VULKAN "Vulkan backend (headers vendored; no SDK required)" ON)
+# The three backend switches (AVER_RHI_D3D12 / _D3D11 / _VULKAN) are declared with the other module
+# options by aver_declare_module_options() below, from modules/rhi.*/module.json.
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
 # The runtime in Runtime/: the Aver.Runtime.Game library, the standalone AverEngineRuntime.exe that
 # packaged games run ("Aver Engine Runtime"), and the tests that exercise the library. The option keeps
@@ -77,162 +77,31 @@ option(AVER_BUILD_TESTS "Build test executables" ON)
 enable_testing()
 option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
-# --- Editions: a named module set the launcher can offer and install ---
+# --- Modules: manifests, editions, options ---
 #
-# WHAT THIS IS FOR. The launcher already installs per-EDITION -- scripts/publish-release.ps1 takes
-# -Edition (default 'standard'), AverDist packs it, AverLauncherCli installs to
-# <root>\<edition>\<version>\bin -- and that path is exactly where a shipped engine reports itself
-# from. The plumbing has existed and has only ever cut one edition. This is the missing half: a
-# name on THIS side that says which modules an edition contains.
+# modules/<dir>/module.json says what each module is, its option, its per-edition default and what it
+# links; cmake/AvModuleManifest.cmake turns that into option() calls and the dependency rule, and
+# cmake/modules.catalog.json (scripts/module-catalog.py) is the same data for the launcher. See
+# docs/MODULES.md. To add or change an optional module, edit its manifest, not this file.
 #
-# WHY NOT RUNTIME MODULE SWAPPING. AVER_MODULE_* is compile-time. Five modules are already SHARED
-# (Voxi, PBR, Scene, Framework, Physics), but a Sandbox.exe built with one calls into it through
-# an import table, so deleting the DLL does not disable a feature -- it stops the process starting.
-# Toggling modules inside ONE install needs runtime dispatch through every cross-module call, which
-# is a different engine from the one the 18-row matrix in scripts/module-matrix.ps1 verifies. An
-# edition is a build, and every edition is just another row that matrix can check.
-#
-# STANDARD IS TODAY'S DEFAULTS, EXACTLY. Not approximately: the value beside every module below is
-# the value that was already there, so a tree that never names an edition configures identically to
-# one from before this block existed. That is what makes this safe to land ahead of anyone using it.
+# AN EDITION is a named module set the launcher can offer and install (scripts/publish-release.ps1
+# -Edition; AverLauncherCli installs to <root>/<edition>/<version>/bin). It is a build, not a runtime
+# toggle: AVER_MODULE_* is compile-time, and a Sandbox.exe built with a module calls into it through an
+# import table. STANDARD IS TODAY'S DEFAULTS, EXACTLY; an explicit -DAVER_MODULE_X=OFF beats the edition.
+# Which modules an edition changes is each manifest's "editions" entry.
 set(AVER_EDITION "standard" CACHE STRING "Module preset an edition ships: standard | slim | full")
 set_property(CACHE AVER_EDITION PROPERTY STRINGS standard slim full)
-
-# ON for every module the edition includes; the option() calls below take these as their DEFAULT,
-# so an explicit -DAVER_MODULE_X=OFF on the command line still wins over the edition.
-# One command per line: CMake has no statement separator, so two set()s on one line is a parse
-# error, not a style question.
-macro(_aver_edition_defaults voxi pbr scripting scene framework physics landscape deform trifactor sr mcp upgrade)
-  set(_ed_VOXI      ${voxi})
-  set(_ed_PBR       ${pbr})
-  set(_ed_SCRIPTING ${scripting})
-  set(_ed_SCENE     ${scene})
-  set(_ed_FRAMEWORK ${framework})
-  set(_ed_PHYSICS   ${physics})
-  set(_ed_LANDSCAPE ${landscape})
-  set(_ed_DEFORM    ${deform})
-  set(_ed_TRIFACTOR ${trifactor})
-  set(_ed_SR        ${sr})
-  set(_ed_MCP       ${mcp})
-  set(_ed_UPGRADE   ${upgrade})
-endmacro()
-
-if(AVER_EDITION STREQUAL "slim")
-  # The smallest thing that still runs a game: scene, gameplay, materials, physics, terrain.
-  # No voxel GI, no geometry cooking, no sub-bone deformation, no upscaler.
-  _aver_edition_defaults(OFF ON ON ON ON ON ON OFF OFF OFF OFF ON)
-elseif(AVER_EDITION STREQUAL "full")
-  # Everything. Identical to standard today; it stays a separate edition because the two differ
-  # whenever a module is added that standard should not carry, and collapsing them would mean
-  # re-deriving that distinction the next time one appears.
-  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON ON ON)
-elseif(AVER_EDITION STREQUAL "standard")
-  _aver_edition_defaults(ON ON ON ON ON ON ON ON ON ON ON ON)
-else()
+if(NOT AVER_EDITION MATCHES "^(standard|slim|full)$")
   message(FATAL_ERROR "AVER_EDITION '${AVER_EDITION}' is not a known edition (standard, slim, full)")
 endif()
 
-# AN EDITION CHANGE HAS TO RE-DERIVE, and this is the trap that makes it worth the code. option()
-# never overwrites a cache entry that already exists, so reconfiguring an existing tree with a
-# different -DAVER_EDITION would leave every module exactly as the previous edition set it and the
-# build would silently be the old edition under the new name.
-#
-# AND SO DOES A CHANGE TO WHAT AN EDITION CONTAINS, which is the same trap wearing a different hat
-# and was NOT covered until 2026-09-20. Turning AVER_MODULE_MCP on for `standard` changed only the
-# DEFAULT, and a default cannot reach a tree that already has the entry cached -- so every existing
-# build-release would have reconfigured, rebuilt, reported success, and still had no MCP module in
-# it, with nothing anywhere saying why. The revision below is what closes that: bump it in the same
-# commit that edits the table above, and trees configured before the edit re-derive exactly as they
-# would for an edition rename.
-#
-# THE COST, STATED BECAUSE IT IS REAL: a re-derive overwrites a deliberate -DAVER_MODULE_X=OFF on
-# that one configure, for the same reason an edition change always has. It is announced, it happens
-# once per bump, and a later -D on the SAME edition and revision is still respected.
-set(AVER_EDITION_REVISION "2" CACHE INTERNAL "bump when the edition table above changes")
-set(_aver_edition_stamp "${AVER_EDITION}@${AVER_EDITION_REVISION}")
-if(DEFINED AVER_EDITION_APPLIED AND NOT AVER_EDITION_APPLIED STREQUAL _aver_edition_stamp)
-  message(STATUS "Aver: edition ${AVER_EDITION_APPLIED} -> ${_aver_edition_stamp}, re-deriving module set")
-  foreach(m VOXI PBR SCRIPTING SCENE FRAMEWORK PHYSICS LANDSCAPE DEFORM TRIFACTOR SR MCP UPGRADE)
-    set(AVER_MODULE_${m} ${_ed_${m}} CACHE BOOL "" FORCE)
-  endforeach()
-endif()
-set(AVER_EDITION_APPLIED "${_aver_edition_stamp}" CACHE INTERNAL "the edition+revision the cached module set came from")
-
-# --- Optional feature modules (the engine builds and runs with these OFF) ---
-option(AVER_MODULE_VOXI "Voxi render module: AA / GI / ray tracing / path tracing settings" ${_ed_VOXI})
-option(AVER_MODULE_PBR  "PBR material system: material library, C ABI and the surface BRDF" ${_ed_PBR})
-option(AVER_MODULE_SCRIPTING "In-process .NET scripting host (hostfxr/CoreCLR)" ${_ed_SCRIPTING})
-option(AVER_MODULE_SCENE "Entity/component world: entities, transforms, hierarchy and the C ABI" ${_ed_SCENE})
-option(AVER_MODULE_FRAMEWORK "Gameplay framework: game instance, game mode, actors, pawns" ${_ed_FRAMEWORK})
-# Physics is declared HERE, beside its peers, rather than down in the third-party section where it
-# used to sit. Jolt is the engine's rigid-body backend, not a dependency the build happens to pull
-# in, and the switch that turns physics off is the same kind of switch as the five above it. Still
-# optional for the same two reasons as before: the engine configures and runs without it, and 153
-# translation units are worth being able to opt out of.
-option(AVER_MODULE_PHYSICS "Physics module: rigid bodies, characters and raycasts (Jolt backend)" ${_ed_PHYSICS})
-# Landscape: the chunked heightfield terrain. CPU-only at this stage -- the quadtree, the LOD metric,
-# culling and chunk geometry -- so it depends on nothing optional and costs nothing to leave on.
-option(AVER_MODULE_LANDSCAPE "Landscape module: chunked heightfield terrain, LOD and chunk geometry" ${_ed_LANDSCAPE})
-option(AVER_MODULE_DEFORM "Sub-bone vertex deformation: a cage finer than the skeleton" ${_ed_DEFORM})
-# Trifactor: the virtualized-geometry cluster builder + LOD DAG (docs/VIRTUALIZED_GEOMETRY.md).
-# ON, like its siblings above. It was briefly OFF because meshoptimizer was not vendored and every
-# default build would have failed at configure; third_party/meshoptimizer (v1.2, MIT) is now here,
-# so that reason is gone. Left ON deliberately rather than merely permitted: it is CPU-only, so it
-# costs nothing at runtime for a game that never cooks, and being in the default build is what makes
-# TrifactorTest part of the default suite instead of something that silently rots.
-option(AVER_MODULE_TRIFACTOR "Virtualized-geometry cluster builder and LOD DAG (meshlets, LOD DAG)" ${_ed_TRIFACTOR})
-# AverSR: the upscaler seam's implementations (docs/AVERSR.md). ON like its render-module siblings
-# above -- it links only Aver.Core and Aver.RHI, so it costs nothing to leave in a build that never
-# registers an IUpscaler, and -DAVER_MODULE_SR=OFF must still build, link and render at native
-# resolution, pixel-identical to a tree where this module was never written (see the doc for why
-# that is the actual test, not the option existing).
-option(AVER_MODULE_SR "AverSR upscaler implementations: the built-in spatial resample, and the seam FSR vendors into" ${_ed_SR})
-# The editor control channel, so a tool can press the editor's own buttons and then look at the result.
-#
-# ON BY DEFAULT SINCE 2026-09-20, and the argument that kept it off is the same one that makes
-# turning it on safe. That argument was: nobody should ship an editor that can be driven over a
-# socket unless they asked for it. They still have to ask -- COMPILED IN IS NOT LISTENING.
-# mcpPort_ is zero unless `--mcp` sets it, SandboxApp::onInit starts nothing when it is zero, and
-# mcp.conf can only supply the NUMBER a later `--mcp` would use; it cannot turn the channel on by
-# itself (SandboxMain.cpp says so outright). The socket opens on `--mcp` or on a deliberate click
-# of the status bar's MCP widget, and nowhere else.
-#
-# What being OFF actually cost was the widget. drawMcpStatusWidget is behind `#if AVER_MODULE_MCP`,
-# correctly -- a button offering to start a channel that was never compiled in is a button that
-# lies -- so the default edition shipped a status bar with no way to see whether the channel was up
-# or to bring it up, and the only route to either was rebuilding the engine. A debugging aid nobody
-# can reach without a rebuild is not much of an aid.
-#
-# STILL AN option(), and the matrix still builds it OFF, because "the editor must work without it"
-# has not stopped being true -- it just stopped being the default.
-option(AVER_MODULE_MCP "Editor control channel over loopback (debugging aid, not needed to run)" ${_ed_MCP})
-# Upgrade: the project migration chain. ON in every edition, including slim -- an engine that
-# cannot open a project made by an older build of itself is not a smaller engine, it is a broken
-# one. Optional only so the matrix can prove the editor still builds and runs without it.
-option(AVER_MODULE_UPGRADE "Project migration chain: upgrade a project from the version it was made in" ${_ed_UPGRADE})
-# Occlusion: hierarchical-Z occlusion culling (modules/occlusion). NOT threaded through the edition
-# macro above like its siblings: it is a generic RHI utility with no gameplay, content or C# ABI
-# dependency of its own -- closer to AverSR (links only Core and RHI) than to a curated feature like
-# Voxi or Physics -- so there is no per-edition judgement call to make about it, and ON is simply the
-# right default for every edition at once. The runtime behaviour stays opt-in regardless of this
-# switch: the module builds by default, but --occlusion-cull (sandbox) defaults OFF, exactly like
-# --depth-prepass and --edge-aa (see modules/occlusion/README.md).
-option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pass box culling" ON)
-# Particles: CPU-simulated billboard particles, depth-tested against the scene through
-# IRenderFeature::transparentPass (see modules/particles/README.md). Optional for the same reason
-# Occlusion is: the engine builds, links and renders with it off. It DOES depend on the scene
-# (scene::CParticleEmitter drives it), unlike Occlusion/AverSR, which is why the force-off guard
-# beside AVER_MODULE_FRAMEWORK's exists just below -- see it for what happens with the scene off.
-option(AVER_MODULE_PARTICLES "Particle system: CPU-simulated billboard particles, depth-tested against the scene" ON)
-# Ragdolls: a skinned entity's skeleton as a physics ragdoll, blended over the animation through
-# AnimSystem's pose-modifier seam (docs/physics/RAGDOLL_ANIMATION.md). Needs the scene (the entity),
-# the animation join and physics, so it is only added when all three are (see the scene block below).
-option(AVER_MODULE_RAGDOLL "Ragdolls on skinned entities: go limp, hold the animation with motors, blend back" ON)
-option(AVER_MODULE_FLUIDS "Fluids: the analytic Gerstner surface, the underwater fog override, and soft-body fluid volumes" ON)
-option(AVER_MODULE_RENDER_SOFTBODY "Draw meshes whose vertices come from a simulated soft body" ON)
-# Media: H.264 MP4 output for the render queue (Windows Media Foundation; a stub elsewhere). Core-only
-# and independent of every feature switch, so ON everywhere; OFF only to prove the editor builds without it.
-option(AVER_MODULE_MEDIA "Video encoding (Media Foundation H.264 MP4) for the Movie Render Queue" ON)
+# Declares every optional module's option() (default = the edition's value) and, when the edition or
+# AVER_EDITION_REVISION changed since this tree was configured, re-derives the edition-controlled ones.
+aver_declare_module_options()
+# An enabled module whose dependency is off is an error naming both (or, with
+# -DAVER_MODULE_AUTO_DEPS=ON, the dependency is switched on). This replaces the old per-pair
+# "forcing X=OFF" guards: silently dropping a module the caller asked for hid the real cause.
+aver_enforce_module_deps()
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -360,15 +229,6 @@ endif()
 if(AVER_MODULE_PBR)
   add_subdirectory(modules/render.pbr)    # optional: material system + C ABI for C#
 endif()
-# "PBR is a material system; Voxi is the thing that renders it" is a dependency, not a slogan:
-# Aver.Render.Voxi.Renderer links Aver.Render.PBR.Materials and its header includes MaterialSystem.
-# Said here rather than left to happen, because the failure without it is a C1083 on a header four
-# includes deep in an unrelated translation unit, which reads as a broken include path rather than
-# as a module combination that was never valid.
-if(AVER_MODULE_VOXI AND NOT AVER_MODULE_PBR)
-  message(STATUS "Aver: Voxi renders materials and cannot be built without them - forcing AVER_MODULE_VOXI=OFF")
-  set(AVER_MODULE_VOXI OFF)
-endif()
 if(AVER_MODULE_VOXI)
   add_subdirectory(modules/render.voxi)   # optional: render feature settings + C ABI for C#
 endif()
@@ -389,20 +249,6 @@ add_subdirectory(modules/render.pcg)
 # nothing else, and in particular not the RHI. Added after them only because that is reading order.
 if(AVER_MODULE_SCRIPTING)
   add_subdirectory(modules/scripting)     # optional: in-process CLR host + the managed bridge
-endif()
-# The framework stands on the scene the way Voxi stands on PBR above, and is forced off for the same
-# reason: without this line the failure is an unresolved external for every scene entry point, which
-# reads as a broken build rather than as a module combination that was never valid.
-if(AVER_MODULE_FRAMEWORK AND NOT AVER_MODULE_SCENE)
-  message(STATUS "Aver: the framework stands on the scene and cannot be built without it - forcing AVER_MODULE_FRAMEWORK=OFF")
-  set(AVER_MODULE_FRAMEWORK OFF)
-endif()
-# scene::CParticleEmitter is declared IN modules/scene (Builtins.cpp), but the module that TICKS and
-# DRAWS it links Aver.Scene, not the other way round -- with the scene off there is no component for
-# it to read, exactly the shape AVER_MODULE_FRAMEWORK's guard above already has.
-if(AVER_MODULE_PARTICLES AND NOT AVER_MODULE_SCENE)
-  message(STATUS "Aver: particles are driven by a scene component and cannot be built without the scene - forcing AVER_MODULE_PARTICLES=OFF")
-  set(AVER_MODULE_PARTICLES OFF)
 endif()
 if(AVER_MODULE_SCENE)
   add_subdirectory(modules/scene)         # optional: the entity/component world + C ABI for C#
@@ -429,13 +275,7 @@ endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
 endif()
-# Soft-body drawing. Needs BOTH the scene (for CSoftBody) and physics (for the simulation), so it
-# is force-disabled without either rather than failing to configure -- the same cascade particles
-# gets from AVER_MODULE_SCENE just below.
-if(AVER_MODULE_RENDER_SOFTBODY AND (NOT AVER_MODULE_SCENE OR NOT AVER_MODULE_PHYSICS))
-  message(STATUS "Aver: soft-body drawing needs the scene and physics - forcing AVER_MODULE_RENDER_SOFTBODY=OFF")
-  set(AVER_MODULE_RENDER_SOFTBODY OFF)
-endif()
+# Soft-body drawing (needs the scene and physics -- enforced from its manifest).
 if(AVER_MODULE_RENDER_SOFTBODY)
   add_subdirectory(modules/render.softbody)
 endif()
@@ -542,6 +382,8 @@ endif()
 # modularity is a C++ preprocessor property of one configuration, and only scripts/module-matrix.ps1,
 # which actually builds them, can decide it.
 aver_check_module_dag()
+# ...and the same moment answers whether the module manifests describe what was just configured.
+aver_check_module_manifests()
 
 # AverCrashReporter -- the separate process that displays a crash report.
 #
@@ -814,4 +656,17 @@ endfunction()
 
 if(AVER_BUILD_TESTS)
   aver_register_ctest_in("${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
+# The module catalog the launcher reads (cmake/modules.catalog.json) must match the manifests it is
+# generated from. Fix a failure with: python scripts/module-catalog.py --write
+if(AVER_BUILD_TESTS)
+  find_package(Python3 QUIET COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME ModuleCatalogCheck
+             COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/module-catalog.py" --check)
+    set_tests_properties(ModuleCatalogCheck PROPERTIES TIMEOUT 60)
+  else()
+    message(STATUS "Aver: no Python 3 found - ModuleCatalogCheck is not registered")
+  endif()
 endif()

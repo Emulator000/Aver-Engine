@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Synapse.Abi",
+  "dir": "synapse.abi",
+  "displayName": "Navigation ABI",
+  "description": "Plain-C seam onto steering, crowds, hearing, cover and squads.",
+  "category": "Gameplay",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Scene", "Aver.Synapse", "Aver.Synapse.Scene"],
+  "derivedFrom": ["Aver.Scene"],
+  "consequence": "Scripts cannot reach steering, crowds, hearing, cover or squads."
+}

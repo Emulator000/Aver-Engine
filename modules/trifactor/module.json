@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Trifactor",
+  "dir": "trifactor",
+  "displayName": "Virtualized Geometry",
+  "description": "Virtualized-geometry cluster builder and LOD DAG (meshlets).",
+  "category": "Rendering",
+  "option": "AVER_MODULE_TRIFACTOR",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": false, "full": true},
+  "dependsOn": ["Aver.Core", "Aver.Formats"],
+  "consequence": "No virtualized-geometry cooking (meshlets, LOD DAG)."
+}

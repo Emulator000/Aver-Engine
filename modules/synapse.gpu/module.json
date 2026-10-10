@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Synapse.Gpu",
+  "dir": "synapse.gpu",
+  "displayName": "Crowd Avoidance (GPU)",
+  "description": "GPU crowd-avoidance backend.",
+  "category": "Gameplay",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI", "Aver.Synapse"],
+  "consequence": ""
+}

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.RHI",
+  "dir": "rhi",
+  "displayName": "Render Hardware Interface",
+  "description": "The device-neutral rendering interface and its null device.",
+  "category": "Rendering",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Platform"],
+  "consequence": ""
+}

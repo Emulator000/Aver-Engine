@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Audio.Wasapi",
+  "dir": "audio.wasapi",
+  "displayName": "Audio Device (WASAPI)",
+  "description": "Windows audio output device that feeds the mixer.",
+  "category": "Audio",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Audio", "Aver.Core"],
+  "consequence": ""
+}

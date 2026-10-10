@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Landscape",
+  "dir": "landscape",
+  "displayName": "Landscape",
+  "description": "Chunked heightfield terrain: quadtree, LOD, culling, chunk geometry and its renderer.",
+  "category": "Content",
+  "option": "AVER_MODULE_LANDSCAPE",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": true, "full": true},
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.RHI"],
+  "consequence": "No chunked heightfield terrain."
+}

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Net",
+  "dir": "net",
+  "displayName": "Networking",
+  "description": "Planned: modular replication over UDP.",
+  "category": "Networking",
+  "option": null,
+  "required": false,
+  "default": false,
+  "dependsOn": ["Aver.Core", "Aver.Platform"],
+  "skeleton": true,
+  "consequence": ""
+}

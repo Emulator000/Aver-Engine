@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.Voxi",
+  "dir": "render.voxi",
+  "displayName": "Voxi",
+  "description": "Voxel GI, ray tracing and path tracing render features with their settings and C ABI.",
+  "category": "Rendering",
+  "option": "AVER_MODULE_VOXI",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": false, "full": true},
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.RHI", "Aver.Render.Denoise", "Aver.Render.PBR"],
+  "consequence": "No voxel GI, ray-traced lighting or path tracing; the frame uses the plain raster path."
+}

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Match",
+  "dir": "match",
+  "displayName": "Matchmaking",
+  "description": "Planned: matchmaking protocol codec and match forming.",
+  "category": "Networking",
+  "option": null,
+  "required": false,
+  "default": false,
+  "dependsOn": ["Aver.Core"],
+  "skeleton": true,
+  "consequence": ""
+}

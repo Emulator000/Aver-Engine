@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.GpuDeform",
+  "dir": "gpudeform",
+  "displayName": "GPU Deformation",
+  "description": "Planned: compute cage skinning.",
+  "category": "Animation",
+  "option": null,
+  "required": false,
+  "default": false,
+  "dependsOn": ["Aver.RHI", "Aver.Deform", "Aver.SoftBody"],
+  "skeleton": true,
+  "consequence": ""
+}

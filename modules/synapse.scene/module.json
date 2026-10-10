@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "Aver.Synapse.Scene",
+  "dir": "synapse.scene",
+  "displayName": "Navigation (Scene)",
+  "description": "The join between the pathfinder and a live scene: agents, perception, behaviour trees.",
+  "category": "Gameplay",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Scene", "Aver.Synapse"],
+  "optionalDependsOn": ["Aver.Physics"],
+  "derivedFrom": ["Aver.Scene"],
+  "consequence": "No AI agents, perception or behaviour trees in a scene."
+}

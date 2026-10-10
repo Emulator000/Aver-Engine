@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Upgrade",
+  "dir": "upgrade",
+  "displayName": "Project Upgrade",
+  "description": "Project migration chain: upgrade a project from the version it was made in.",
+  "category": "Tools",
+  "option": "AVER_MODULE_UPGRADE",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": true, "full": true},
+  "dependsOn": ["Aver.Core"],
+  "consequence": "Projects made by an older engine version cannot be migrated when opened."
+}

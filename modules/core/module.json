@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Core",
+  "dir": "core",
+  "displayName": "Core",
+  "description": "Foundation library every other module stands on.",
+  "category": "Core",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": [],
+  "consequence": ""
+}

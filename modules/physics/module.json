@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Physics",
+  "dir": "physics",
+  "displayName": "Physics",
+  "description": "Jolt rigid bodies, characters, joints, queries and its plain-C ABI.",
+  "category": "Physics",
+  "option": "AVER_MODULE_PHYSICS",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": true, "full": true},
+  "dependsOn": ["Aver.Core"],
+  "consequence": "Nothing collides or falls; characters cannot move."
+}

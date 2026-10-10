@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Save",
+  "dir": "save",
+  "displayName": "Save and Load",
+  "description": "Turns a live world into a .ocsave and back.",
+  "category": "Gameplay",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Scene"],
+  "derivedFrom": ["Aver.Scene"],
+  "consequence": "Worlds cannot be saved or loaded as .ocsave files."
+}

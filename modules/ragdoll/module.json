@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Ragdoll",
+  "dir": "ragdoll",
+  "displayName": "Ragdolls",
+  "description": "A skinned entity's skeleton as a physics ragdoll, blended over the animation.",
+  "category": "Physics",
+  "option": "AVER_MODULE_RAGDOLL",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Anim", "Aver.Anim.Scene", "Aver.Core", "Aver.Formats", "Aver.Physics", "Aver.Scene"],
+  "consequence": "Skinned entities cannot go limp or be driven as ragdolls."
+}

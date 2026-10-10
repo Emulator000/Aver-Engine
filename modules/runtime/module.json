@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Runtime",
+  "dir": "runtime",
+  "displayName": "Engine Runtime",
+  "description": "The engine object that creates the device and owns the frame loop.",
+  "category": "Core",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Platform", "Aver.RHI"],
+  "optionalDependsOn": ["Aver.RHI.D3D11", "Aver.RHI.D3D12", "Aver.RHI.Vulkan"],
+  "consequence": ""
+}

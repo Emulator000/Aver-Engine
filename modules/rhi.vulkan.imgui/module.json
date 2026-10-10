@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.RHI.Vulkan.ImGui",
+  "dir": "rhi.vulkan.imgui",
+  "displayName": "Vulkan Editor UI",
+  "description": "The Dear ImGui implementation of the editor UI seam on Vulkan; also needs AVER_ENABLE_UI.",
+  "category": "Tools",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.RHI.Vulkan"],
+  "derivedFrom": ["Aver.RHI.Vulkan"],
+  "consequence": "The editor UI cannot draw on Vulkan."
+}

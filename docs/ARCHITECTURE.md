@@ -230,6 +230,8 @@ Aver.Formats.Audio`. The device is optional; the mixer is not.
 
 Core-tier = compiled by default in a game client; only **Core** and **Platform** are strictly mandatory to instantiate an engine. `[opt]` modules default OFF unless noted.
 
+**Machine-readable form.** Each built module's option, defaults, per-edition defaults and link-line dependencies are in its `modules/<dir>/module.json`, aggregated into `cmake/modules.catalog.json` for the launcher; the root build declares the `AVER_MODULE_*` options from those files and refuses an enabled module whose dependency is off. Format, rule and how to add a module: [MODULES.md](MODULES.md). Where this table and a manifest disagree, the manifest is the one CMake checks against the real link lines.
+
 **‹skeleton› means the module is NOT BUILT** — no header, no source, no `CMakeLists.txt`, and no
 `add_subdirectory` in the top-level build. Most such rows still have a directory holding a single
 `README.md` describing the eventual responsibility, which is the convention the root

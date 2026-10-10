@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.NeuraFI",
+  "dir": "render.neurafi",
+  "displayName": "Frame Interpolation",
+  "description": "Neural frame interpolation.",
+  "category": "Rendering",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI", "Aver.Render.Neural"],
+  "consequence": ""
+}

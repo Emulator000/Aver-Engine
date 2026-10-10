@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Vehicle",
+  "dir": "vehicle",
+  "displayName": "Vehicles",
+  "description": "Planned: authoritative vehicle simulation.",
+  "category": "Physics",
+  "option": null,
+  "required": false,
+  "default": false,
+  "dependsOn": ["Aver.Core", "Aver.Physics"],
+  "skeleton": true,
+  "consequence": ""
+}

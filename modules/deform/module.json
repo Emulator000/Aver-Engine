@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Deform",
+  "dir": "deform",
+  "displayName": "Deformation",
+  "description": "Sub-bone vertex deformation: a cage finer than the skeleton.",
+  "category": "Animation",
+  "option": "AVER_MODULE_DEFORM",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": false, "full": true},
+  "dependsOn": ["Aver.Anim", "Aver.Core", "Aver.Formats"],
+  "consequence": "Meshes can only be posed by bones; no sub-bone cage deformation."
+}

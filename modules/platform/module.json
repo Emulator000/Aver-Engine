@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Platform",
+  "dir": "platform",
+  "displayName": "Platform",
+  "description": "Windowing, files, directory watching and other OS services.",
+  "category": "Platform",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core"],
+  "consequence": ""
+}

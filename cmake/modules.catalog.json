@@ -1,0 +1,1166 @@
+{
+  "schema": 1,
+  "engineVersion": "0.6.0",
+  "modules": [
+    {
+      "schema": 1,
+      "name": "Aver.Anim",
+      "dir": "anim",
+      "displayName": "Animation",
+      "description": "Samples .ocanim clips into poses and poses a skeleton; needs no RHI.",
+      "category": "Animation",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Anim.Scene",
+      "dir": "anim.scene",
+      "displayName": "Animation (Scene)",
+      "description": "The join between the scene and the animation sampler: animation components, control rig, notifies.",
+      "category": "Animation",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Anim",
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Scene"
+      ],
+      "derivedFrom": [
+        "Aver.Scene"
+      ],
+      "consequence": "Entities in a scene are not animated: no skeletal animation, control rig or animation notifies."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Assets",
+      "dir": "assets",
+      "displayName": "Assets",
+      "description": "Asset registry plus Aver.Assets.Gpu, the decode-to-GPU join.",
+      "category": "Content",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform",
+        "Aver.RHI"
+      ],
+      "optionalDependsOn": [
+        "Aver.Formats"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Audio",
+      "dir": "audio",
+      "displayName": "Audio Mixer",
+      "description": "Device-free audio mixer that renders into a buffer the caller supplies.",
+      "category": "Audio",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Audio.Abi",
+      "dir": "audio.abi",
+      "displayName": "Audio ABI",
+      "description": "Plain-C seam onto the audio stack so a game can trigger its own sounds.",
+      "category": "Audio",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Audio",
+        "Aver.Audio.Wasapi",
+        "Aver.Core",
+        "Aver.Formats"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Audio.Scene",
+      "dir": "audio.scene",
+      "displayName": "Audio (Scene)",
+      "description": "The join between the mixer and a live scene: reverb zones and occlusion probes.",
+      "category": "Audio",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Audio",
+        "Aver.Core",
+        "Aver.Scene"
+      ],
+      "optionalDependsOn": [
+        "Aver.Audio.Abi",
+        "Aver.Physics"
+      ],
+      "derivedFrom": [
+        "Aver.Scene"
+      ],
+      "consequence": "No reverb zones or audio occlusion in a scene."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Audio.Wasapi",
+      "dir": "audio.wasapi",
+      "displayName": "Audio Device (WASAPI)",
+      "description": "Windows audio output device that feeds the mixer.",
+      "category": "Audio",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Audio",
+        "Aver.Core"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Core",
+      "dir": "core",
+      "displayName": "Core",
+      "description": "Foundation library every other module stands on.",
+      "category": "Core",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Deform",
+      "dir": "deform",
+      "displayName": "Deformation",
+      "description": "Sub-bone vertex deformation: a cage finer than the skeleton.",
+      "category": "Animation",
+      "option": "AVER_MODULE_DEFORM",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": false,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Anim",
+        "Aver.Core",
+        "Aver.Formats"
+      ],
+      "consequence": "Meshes can only be posed by bones; no sub-bone cage deformation."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Fluids",
+      "dir": "fluids",
+      "displayName": "Fluids",
+      "description": "The analytic Gerstner water surface, the underwater fog override and soft-body fluid volumes.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_FLUIDS",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI"
+      ],
+      "optionalDependsOn": [
+        "Aver.Physics"
+      ],
+      "consequence": "No water surface, underwater fog or fluid volumes."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Formats",
+      "dir": "formats",
+      "displayName": "File Formats",
+      "description": "Readers and writers for the engine's asset formats; also hosts the audio and material format targets.",
+      "category": "Content",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Assets",
+        "Aver.Audio",
+        "Aver.Core",
+        "Aver.Platform"
+      ],
+      "optionalDependsOn": [
+        "Aver.Render.PBR"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Formats.Particles",
+      "dir": "formats.particles",
+      "displayName": "Particle Format",
+      "description": "The .ocparticle reader and writer.",
+      "category": "Content",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Formats",
+        "Aver.Particles"
+      ],
+      "derivedFrom": [
+        "Aver.Particles"
+      ],
+      "consequence": "Particle effects cannot be loaded from or saved to .ocparticle files."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Formats.Roslyn",
+      "dir": "formats.roslyn",
+      "displayName": "Roslyn Scripts",
+      "description": "The Roslyn backend for actor scripts.",
+      "category": "Tools",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Render.PBR"
+      ],
+      "derivedFrom": [
+        "Aver.Render.PBR"
+      ],
+      "consequence": "Actor scripts fall back to the built-in scanner."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Framework",
+      "dir": "framework",
+      "displayName": "Gameplay Framework",
+      "description": "Gameplay vocabulary over the scene: game instance, game mode, actors, pawns.",
+      "category": "Gameplay",
+      "option": "AVER_MODULE_FRAMEWORK",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": true,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Assets",
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Scene"
+      ],
+      "consequence": "No game instance, game mode, actors or pawns; gameplay has no framework to stand on."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Landscape",
+      "dir": "landscape",
+      "displayName": "Landscape",
+      "description": "Chunked heightfield terrain: quadtree, LOD, culling, chunk geometry and its renderer.",
+      "category": "Content",
+      "option": "AVER_MODULE_LANDSCAPE",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": true,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.RHI"
+      ],
+      "consequence": "No chunked heightfield terrain."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Mcp",
+      "dir": "mcp",
+      "displayName": "Editor Control Channel",
+      "description": "Loopback control channel so a tool can drive the editor (a debugging aid).",
+      "category": "Tools",
+      "option": "AVER_MODULE_MCP",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": false,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": "The editor cannot be driven over the loopback control channel and its status-bar widget is gone."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Media",
+      "dir": "media",
+      "displayName": "Video Output",
+      "description": "H.264 MP4 output for the Movie Render Queue through Windows Media Foundation.",
+      "category": "Tools",
+      "option": "AVER_MODULE_MEDIA",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": "The render queue cannot write MP4 video."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Occlusion",
+      "dir": "occlusion",
+      "displayName": "Occlusion Culling",
+      "description": "Hierarchical-Z pyramid and two-pass box occlusion culling.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_OCCLUSION",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI"
+      ],
+      "consequence": "No occlusion culling; everything inside the frustum is drawn."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Particles",
+      "dir": "particles",
+      "displayName": "Particles",
+      "description": "CPU-simulated billboard particles, depth-tested against the scene.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_PARTICLES",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI",
+        "Aver.Scene"
+      ],
+      "consequence": "No particle emitters or particle rendering."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Physics",
+      "dir": "physics",
+      "displayName": "Physics",
+      "description": "Jolt rigid bodies, characters, joints, queries and its plain-C ABI.",
+      "category": "Physics",
+      "option": "AVER_MODULE_PHYSICS",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": true,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": "Nothing collides or falls; characters cannot move."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Physics.Jolt",
+      "dir": "physics.jolt",
+      "displayName": "Physics Backend (Jolt)",
+      "description": "The vendored Jolt library that Aver.Physics is built on.",
+      "category": "Physics",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [],
+      "derivedFrom": [
+        "Aver.Physics"
+      ],
+      "consequence": "No rigid-body backend; goes with Physics."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Platform",
+      "dir": "platform",
+      "displayName": "Platform",
+      "description": "Windowing, files, directory watching and other OS services.",
+      "category": "Platform",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Prefab",
+      "dir": "prefab",
+      "displayName": "Prefabs",
+      "description": "Prefab instances in a live world: spawn, overrides, revert, apply, plus their C ABI.",
+      "category": "Gameplay",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Scene"
+      ],
+      "derivedFrom": [
+        "Aver.Scene"
+      ],
+      "consequence": "No prefab instances."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.RHI",
+      "dir": "rhi",
+      "displayName": "Render Hardware Interface",
+      "description": "The device-neutral rendering interface and its null device.",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.RHI.D3D11",
+      "dir": "rhi.d3d11",
+      "displayName": "DirectX 11 Backend",
+      "description": "DirectX 11 rendering backend.",
+      "category": "Rendering",
+      "option": "AVER_RHI_D3D11",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.RHI"
+      ],
+      "consequence": "No DirectX 11 renderer."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.RHI.D3D12",
+      "dir": "rhi.d3d12",
+      "displayName": "DirectX 12 Backend",
+      "description": "DirectX 12 rendering backend (primary).",
+      "category": "Rendering",
+      "option": "AVER_RHI_D3D12",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.RHI"
+      ],
+      "consequence": "No DirectX 12 renderer; the engine falls back to another backend or the null device."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.RHI.D3D12.ImGui",
+      "dir": "rhi.d3d12.imgui",
+      "displayName": "DirectX 12 Editor UI",
+      "description": "The Dear ImGui implementation of the editor UI seam on DirectX 12; also needs AVER_ENABLE_UI.",
+      "category": "Tools",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.RHI.D3D12"
+      ],
+      "derivedFrom": [
+        "Aver.RHI.D3D12"
+      ],
+      "consequence": "The editor UI cannot draw on DirectX 12."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.RHI.Vulkan",
+      "dir": "rhi.vulkan",
+      "displayName": "Vulkan Backend",
+      "description": "Vulkan rendering backend (headers vendored; no SDK needed).",
+      "category": "Rendering",
+      "option": "AVER_RHI_VULKAN",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.RHI"
+      ],
+      "consequence": "No Vulkan renderer."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.RHI.Vulkan.ImGui",
+      "dir": "rhi.vulkan.imgui",
+      "displayName": "Vulkan Editor UI",
+      "description": "The Dear ImGui implementation of the editor UI seam on Vulkan; also needs AVER_ENABLE_UI.",
+      "category": "Tools",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.RHI.Vulkan"
+      ],
+      "derivedFrom": [
+        "Aver.RHI.Vulkan"
+      ],
+      "consequence": "The editor UI cannot draw on Vulkan."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Ragdoll",
+      "dir": "ragdoll",
+      "displayName": "Ragdolls",
+      "description": "A skinned entity's skeleton as a physics ragdoll, blended over the animation.",
+      "category": "Physics",
+      "option": "AVER_MODULE_RAGDOLL",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Anim",
+        "Aver.Anim.Scene",
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Physics",
+        "Aver.Scene"
+      ],
+      "consequence": "Skinned entities cannot go limp or be driven as ragdolls."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.ActorPreview",
+      "dir": "render.actorpreview",
+      "displayName": "Actor Preview",
+      "description": "The actor editor's offscreen preview renderer.",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.RHI"
+      ],
+      "optionalDependsOn": [
+        "Aver.Render.PBR"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.Denoise",
+      "dir": "render.denoise",
+      "displayName": "Denoiser",
+      "description": "The FidelityFX-based denoiser and its host code.",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI",
+        "Aver.Render.Neural"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.NeuraFI",
+      "dir": "render.neurafi",
+      "displayName": "Frame Interpolation",
+      "description": "Neural frame interpolation.",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI",
+        "Aver.Render.Neural"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.Neural",
+      "dir": "render.neural",
+      "displayName": "Neural Inference",
+      "description": "Small neural networks that run inside the frame (MLP inference and training).",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.PBR",
+      "dir": "render.pbr",
+      "displayName": "PBR Materials",
+      "description": "Material library, its plain-C ABI and the surface BRDF.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_PBR",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": true,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.RHI"
+      ],
+      "consequence": "No material system or surface BRDF; materials cannot be authored or rendered, and Voxi cannot be built."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.PathTracer",
+      "dir": "render.pt",
+      "displayName": "Path Tracer",
+      "description": "The reference path tracer and its scene view.",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.Pcg",
+      "dir": "render.pcg",
+      "displayName": "PCG (GPU)",
+      "description": "The GPU half of procedural content generation.",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.Skin",
+      "dir": "render.skin",
+      "displayName": "GPU Skinning",
+      "description": "GPU skinning for skinned meshes.",
+      "category": "Rendering",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Anim",
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.RHI"
+      ],
+      "optionalDependsOn": [
+        "Aver.Anim.Scene",
+        "Aver.Scene"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.SoftBody",
+      "dir": "render.softbody",
+      "displayName": "Soft-Body Drawing",
+      "description": "Draws meshes whose vertices come from a simulated soft body.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_RENDER_SOFTBODY",
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Physics",
+        "Aver.RHI",
+        "Aver.Scene"
+      ],
+      "consequence": "Simulated soft bodies are not drawn."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.Sr",
+      "dir": "render.sr",
+      "displayName": "AverSR Upscaler",
+      "description": "The upscaler implementations behind the IUpscaler seam.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_SR",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": false,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI"
+      ],
+      "consequence": "No upscaler; rendering is at native resolution only."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.UI",
+      "dir": "render.ui",
+      "displayName": "Game UI Renderer",
+      "description": "The GPU half of the retained game UI.",
+      "category": "UI",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI",
+        "Aver.UI"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Render.Voxi",
+      "dir": "render.voxi",
+      "displayName": "Voxi",
+      "description": "Voxel GI, ray tracing and path tracing render features with their settings and C ABI.",
+      "category": "Rendering",
+      "option": "AVER_MODULE_VOXI",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": false,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.RHI",
+        "Aver.Render.Denoise",
+        "Aver.Render.PBR"
+      ],
+      "consequence": "No voxel GI, ray-traced lighting or path tracing; the frame uses the plain raster path."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Runtime",
+      "dir": "runtime",
+      "displayName": "Engine Runtime",
+      "description": "The engine object that creates the device and owns the frame loop.",
+      "category": "Core",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform",
+        "Aver.RHI"
+      ],
+      "optionalDependsOn": [
+        "Aver.RHI.D3D11",
+        "Aver.RHI.D3D12",
+        "Aver.RHI.Vulkan"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Save",
+      "dir": "save",
+      "displayName": "Save and Load",
+      "description": "Turns a live world into a .ocsave and back.",
+      "category": "Gameplay",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Scene"
+      ],
+      "derivedFrom": [
+        "Aver.Scene"
+      ],
+      "consequence": "Worlds cannot be saved or loaded as .ocsave files."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Scene",
+      "dir": "scene",
+      "displayName": "Scene",
+      "description": "Entity and component world: entities, transforms, hierarchy and the plain-C ABI.",
+      "category": "Gameplay",
+      "option": "AVER_MODULE_SCENE",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": true,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Assets",
+        "Aver.Core"
+      ],
+      "consequence": "No entities, components or world; everything built on the scene goes with it."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Scripting.Host",
+      "dir": "scripting",
+      "displayName": "Scripting",
+      "description": "In-process .NET scripting host (hostfxr/CoreCLR) and the managed bridge.",
+      "category": "Gameplay",
+      "option": "AVER_MODULE_SCRIPTING",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": true,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform"
+      ],
+      "consequence": "No C# scripts or script graphs run; actors have no script logic."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Settings",
+      "dir": "settings",
+      "displayName": "Settings",
+      "description": "Durable key/value store for a shipped game.",
+      "category": "Platform",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.SoftBody",
+      "dir": "softbody",
+      "displayName": "Soft Bodies",
+      "description": "Plastic soft bodies: dents that stay, and tearing.",
+      "category": "Physics",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Sound",
+      "dir": "sound",
+      "displayName": "Sound Design",
+      "description": "A .ocsnd node graph rendered to PCM.",
+      "category": "Audio",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Synapse",
+      "dir": "synapse",
+      "displayName": "Navigation",
+      "description": "Navigation and pathfinding on a grid; no scene needed.",
+      "category": "Gameplay",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Synapse.Abi",
+      "dir": "synapse.abi",
+      "displayName": "Navigation ABI",
+      "description": "Plain-C seam onto steering, crowds, hearing, cover and squads.",
+      "category": "Gameplay",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Scene",
+        "Aver.Synapse",
+        "Aver.Synapse.Scene"
+      ],
+      "derivedFrom": [
+        "Aver.Scene"
+      ],
+      "consequence": "Scripts cannot reach steering, crowds, hearing, cover or squads."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Synapse.Gpu",
+      "dir": "synapse.gpu",
+      "displayName": "Crowd Avoidance (GPU)",
+      "description": "GPU crowd-avoidance backend.",
+      "category": "Gameplay",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.RHI",
+        "Aver.Synapse"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Synapse.Scene",
+      "dir": "synapse.scene",
+      "displayName": "Navigation (Scene)",
+      "description": "The join between the pathfinder and a live scene: agents, perception, behaviour trees.",
+      "category": "Gameplay",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Scene",
+        "Aver.Synapse"
+      ],
+      "optionalDependsOn": [
+        "Aver.Physics"
+      ],
+      "derivedFrom": [
+        "Aver.Scene"
+      ],
+      "consequence": "No AI agents, perception or behaviour trees in a scene."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Trifactor",
+      "dir": "trifactor",
+      "displayName": "Virtualized Geometry",
+      "description": "Virtualized-geometry cluster builder and LOD DAG (meshlets).",
+      "category": "Rendering",
+      "option": "AVER_MODULE_TRIFACTOR",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": false,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats"
+      ],
+      "consequence": "No virtualized-geometry cooking (meshlets, LOD DAG)."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.UI",
+      "dir": "ui",
+      "displayName": "Game UI",
+      "description": "Retained game UI: widget tree and draw list; not the editor's ImGui.",
+      "category": "UI",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.UI.Abi",
+      "dir": "ui.abi",
+      "displayName": "Game UI ABI",
+      "description": "Plain-C seam onto the game UI so a HUD is authored in the game's language.",
+      "category": "UI",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.UI"
+      ],
+      "consequence": ""
+    },
+    {
+      "schema": 1,
+      "name": "Aver.Upgrade",
+      "dir": "upgrade",
+      "displayName": "Project Upgrade",
+      "description": "Project migration chain: upgrade a project from the version it was made in.",
+      "category": "Tools",
+      "option": "AVER_MODULE_UPGRADE",
+      "required": false,
+      "default": true,
+      "editions": {
+        "standard": true,
+        "slim": true,
+        "full": true
+      },
+      "dependsOn": [
+        "Aver.Core"
+      ],
+      "consequence": "Projects made by an older engine version cannot be migrated when opened."
+    },
+    {
+      "schema": 1,
+      "name": "Aver.World",
+      "dir": "world",
+      "displayName": "World Runtime",
+      "description": "Turns .ocworld placements into entities and streams regions; shared by editor and game.",
+      "category": "Content",
+      "option": null,
+      "required": true,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Formats",
+        "Aver.Platform",
+        "Aver.Render.Pcg"
+      ],
+      "optionalDependsOn": [
+        "Aver.Physics",
+        "Aver.Scene"
+      ],
+      "consequence": ""
+    }
+  ],
+  "planned": [
+    {
+      "name": "Aver.ABI",
+      "dir": "abi",
+      "displayName": "Unified ABI (dropped)",
+      "description": "Dropped: a single flat C seam was rejected; each module keeps its own plain-C ABI.",
+      "category": "Core",
+      "dependsOn": []
+    },
+    {
+      "name": "Aver.Aero",
+      "dir": "aero",
+      "displayName": "Aerodynamics",
+      "description": "Planned: baked aerodynamic sampling and force application.",
+      "category": "Physics",
+      "dependsOn": [
+        "Aver.Core"
+      ]
+    },
+    {
+      "name": "Aver.Fracture",
+      "dir": "fracture",
+      "displayName": "Fracture",
+      "description": "Planned: runtime debris splitting and launch.",
+      "category": "Physics",
+      "dependsOn": [
+        "Aver.Core"
+      ]
+    },
+    {
+      "name": "Aver.GpuDeform",
+      "dir": "gpudeform",
+      "displayName": "GPU Deformation",
+      "description": "Planned: compute cage skinning.",
+      "category": "Animation",
+      "dependsOn": [
+        "Aver.RHI",
+        "Aver.Deform",
+        "Aver.SoftBody"
+      ]
+    },
+    {
+      "name": "Aver.Match",
+      "dir": "match",
+      "displayName": "Matchmaking",
+      "description": "Planned: matchmaking protocol codec and match forming.",
+      "category": "Networking",
+      "dependsOn": [
+        "Aver.Core"
+      ]
+    },
+    {
+      "name": "Aver.Net",
+      "dir": "net",
+      "displayName": "Networking",
+      "description": "Planned: modular replication over UDP.",
+      "category": "Networking",
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Platform"
+      ]
+    },
+    {
+      "name": "Aver.NetVehicle",
+      "dir": "netvehicle",
+      "displayName": "Vehicle Networking",
+      "description": "Planned: vehicle replication, damage and crash replay.",
+      "category": "Networking",
+      "dependsOn": [
+        "Aver.Net",
+        "Aver.Vehicle",
+        "Aver.SoftBody"
+      ]
+    },
+    {
+      "name": "Aver.Vehicle",
+      "dir": "vehicle",
+      "displayName": "Vehicles",
+      "description": "Planned: authoritative vehicle simulation.",
+      "category": "Physics",
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Physics"
+      ]
+    }
+  ]
+}

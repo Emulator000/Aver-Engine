@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Audio",
+  "dir": "audio",
+  "displayName": "Audio Mixer",
+  "description": "Device-free audio mixer that renders into a buffer the caller supplies.",
+  "category": "Audio",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core"],
+  "consequence": ""
+}

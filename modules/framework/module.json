@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Framework",
+  "dir": "framework",
+  "displayName": "Gameplay Framework",
+  "description": "Gameplay vocabulary over the scene: game instance, game mode, actors, pawns.",
+  "category": "Gameplay",
+  "option": "AVER_MODULE_FRAMEWORK",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": true, "full": true},
+  "dependsOn": ["Aver.Assets", "Aver.Core", "Aver.Formats", "Aver.Scene"],
+  "consequence": "No game instance, game mode, actors or pawns; gameplay has no framework to stand on."
+}

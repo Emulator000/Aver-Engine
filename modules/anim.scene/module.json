@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Anim.Scene",
+  "dir": "anim.scene",
+  "displayName": "Animation (Scene)",
+  "description": "The join between the scene and the animation sampler: animation components, control rig, notifies.",
+  "category": "Animation",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Anim", "Aver.Core", "Aver.Formats", "Aver.Scene"],
+  "derivedFrom": ["Aver.Scene"],
+  "consequence": "Entities in a scene are not animated: no skeletal animation, control rig or animation notifies."
+}

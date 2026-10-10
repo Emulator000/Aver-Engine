@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Anim",
+  "dir": "anim",
+  "displayName": "Animation",
+  "description": "Samples .ocanim clips into poses and poses a skeleton; needs no RHI.",
+  "category": "Animation",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats"],
+  "consequence": ""
+}

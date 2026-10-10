@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.Sr",
+  "dir": "render.sr",
+  "displayName": "AverSR Upscaler",
+  "description": "The upscaler implementations behind the IUpscaler seam.",
+  "category": "Rendering",
+  "option": "AVER_MODULE_SR",
+  "required": false,
+  "default": true,
+  "editions": {"standard": true, "slim": false, "full": true},
+  "dependsOn": ["Aver.Core", "Aver.RHI"],
+  "consequence": "No upscaler; rendering is at native resolution only."
+}

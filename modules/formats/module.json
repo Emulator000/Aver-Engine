@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Formats",
+  "dir": "formats",
+  "displayName": "File Formats",
+  "description": "Readers and writers for the engine's asset formats; also hosts the audio and material format targets.",
+  "category": "Content",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Assets", "Aver.Audio", "Aver.Core", "Aver.Platform"],
+  "optionalDependsOn": ["Aver.Render.PBR"],
+  "consequence": ""
+}

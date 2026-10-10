@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.UI",
+  "dir": "ui",
+  "displayName": "Game UI",
+  "description": "Retained game UI: widget tree and draw list; not the editor's ImGui.",
+  "category": "UI",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core"],
+  "consequence": ""
+}

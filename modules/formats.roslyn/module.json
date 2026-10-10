@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Formats.Roslyn",
+  "dir": "formats.roslyn",
+  "displayName": "Roslyn Scripts",
+  "description": "The Roslyn backend for actor scripts.",
+  "category": "Tools",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats", "Aver.Render.PBR"],
+  "derivedFrom": ["Aver.Render.PBR"],
+  "consequence": "Actor scripts fall back to the built-in scanner."
+}

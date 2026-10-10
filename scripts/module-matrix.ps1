@@ -15,6 +15,7 @@
 #   ./scripts/module-matrix.ps1                 # every configuration
 #   ./scripts/module-matrix.ps1 -Only pbr-off   # just one
 #   ./scripts/module-matrix.ps1 -KeepDirs       # leave the build trees for inspection
+#   ./scripts/module-matrix.ps1 -List           # show the rows (after the catalog expands them)
 #
 # RUN scripts/module-guard-audit.py FIRST. It reads the guard stack instead of building, so it finds
 # the three shapes above in about two seconds rather than in hours, and every defect it reports was
@@ -25,6 +26,7 @@
 param(
     [string] $Only = "",
     [switch] $KeepDirs,
+    [switch] $List,                 # print every row's CMake arguments and exit (no configure, no build)
     [string] $BuildRoot = "build-matrix"
 )
 
@@ -51,8 +53,8 @@ $configs = [ordered]@{
     "occlusion-off" = @("-DAVER_MODULE_OCCLUSION=OFF")
     # Particles (modules/particles). Depends on the scene (scene::CParticleEmitter), so this row
     # alone does not exercise the AVER_MODULE_SCENE=OFF interaction -- that is already covered by
-    # scene-off below, which forces this module off too via its own AVER_MODULE_SCENE guard in the
-    # root CMakeLists.txt. This row is what proves the engine builds, links and renders with
+    # scene-off below, which turns this module off with the rest of the scene's dependents (its
+    # manifest says it needs the scene). This row is what proves the engine builds, links and renders with
     # particles off ON ITS OWN, same shape as occlusion-off just above.
     "particles-off" = @("-DAVER_MODULE_PARTICLES=OFF")
     # AverSR (docs/AVERSR.md). The IUpscaler seam lives in Aver.RHI itself, not this module, so no
@@ -102,10 +104,71 @@ $configs = [ordered]@{
                         "-DAVER_MODULE_TRIFACTOR=OFF", "-DAVER_MODULE_SR=OFF")
 }
 
+# ---- the module catalog (cmake/modules.catalog.json, from the module.json manifests) ----
+#
+# Two things this table no longer has to carry by hand:
+#   * A row that switches a module off also switches off every module that depends on it. The configure
+#     refuses an enabled module whose dependency is off (the old per-pair "forcing X=OFF" guards are
+#     gone), so `physics-off` alone would be a configure error, not a build.
+#   * An optional module with no row above gets an "<dir>-off" row, so a newly declared option is built
+#     without anyone editing this file.
+# Regenerate the catalog with scripts/module-catalog.py --write after editing a manifest.
+$catalogPath = Join-Path $repo "cmake\modules.catalog.json"
+if (Test-Path $catalogPath) {
+    $catalog = Get-Content $catalogPath -Raw | ConvertFrom-Json
+    $byOpt = @{}
+    foreach ($m in $catalog.modules) { if ($m.option) { $byOpt[$m.option] = $m } }
+
+    # The options that must be OFF when `$options` are: those, plus every optional module that depends
+    # (transitively) on a module that is off. A derived module (no option, derivedFrom) is off with them.
+    function Get-OffClosure([string[]] $options) {
+        $offOpts  = New-Object 'System.Collections.Generic.HashSet[string]'
+        $offNames = New-Object 'System.Collections.Generic.HashSet[string]'
+        foreach ($o in $options) { if ($byOpt.ContainsKey($o)) { [void]$offOpts.Add($o) } }
+        do {
+            $changed = $false
+            $offNames.Clear()
+            foreach ($m in $catalog.modules) { if ($m.option -and $offOpts.Contains($m.option)) { [void]$offNames.Add($m.name) } }
+            do {
+                $grew = $false
+                foreach ($m in $catalog.modules) {
+                    if ($m.option -or $m.required -or -not $m.derivedFrom -or $offNames.Contains($m.name)) { continue }
+                    foreach ($f in $m.derivedFrom) { if ($offNames.Contains($f)) { [void]$offNames.Add($m.name); $grew = $true; break } }
+                }
+            } while ($grew)
+            foreach ($m in $catalog.modules) {
+                if (-not $m.option -or $offOpts.Contains($m.option)) { continue }
+                foreach ($d in $m.dependsOn) { if ($offNames.Contains($d)) { [void]$offOpts.Add($m.option); $changed = $true; break } }
+            }
+        } while ($changed)
+        return @($offOpts)
+    }
+
+    $covered = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($name in @($configs.Keys)) {
+        $offs = @($configs[$name] | ForEach-Object { if ($_ -match '^-D(AVER_[A-Z0-9_]+)=OFF$') { $Matches[1] } })
+        if ($offs.Count -eq 0) { continue }
+        foreach ($o in $offs) { [void]$covered.Add($o) }
+        $extra = @(Get-OffClosure $offs | Where-Object { $offs -notcontains $_ } | ForEach-Object { "-D$_=OFF" })
+        $configs[$name] = @($configs[$name]) + $extra
+    }
+    foreach ($m in ($catalog.modules | Where-Object { $_.option -and $_.default } | Sort-Object dir)) {
+        if ($covered.Contains($m.option)) { continue }
+        $configs["$($m.dir)-off"] = @("-D$($m.option)=OFF") + @(Get-OffClosure @($m.option) | Where-Object { $_ -ne $m.option } | ForEach-Object { "-D$_=OFF" })
+    }
+} else {
+    Write-Host "[matrix] No cmake/modules.catalog.json: rows are run exactly as written, and a row that leaves a dependent module on will fail to configure." -ForegroundColor Yellow
+}
+
+if ($List) {
+    foreach ($k in $configs.Keys) { "{0,-22} {1}" -f $k, ($configs[$k] -join " ") }
+    exit 0
+}
+
 # A module absent from this list is a module nobody checks. TRIFACTOR was, for its whole life --
 # added as an option, defaulted ON, and never given a row here, so "the matrix passes" said nothing
-# about the one module the virtualized-geometry work lives in. If you add an option() to the root
-# CMakeLists, add it here in the same commit.
+# about the one module the virtualized-geometry work lives in. The catalog block above now adds a row
+# for every optional module that has none; a row written here only adds a combination worth naming.
 
 # The toolchain the normal build already found, rather than whatever is on PATH -- this script is
 # routinely run from a plain shell with no MSVC environment.

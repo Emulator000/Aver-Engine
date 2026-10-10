@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.RHI.D3D12",
+  "dir": "rhi.d3d12",
+  "displayName": "DirectX 12 Backend",
+  "description": "DirectX 12 rendering backend (primary).",
+  "category": "Rendering",
+  "option": "AVER_RHI_D3D12",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.RHI"],
+  "consequence": "No DirectX 12 renderer; the engine falls back to another backend or the null device."
+}

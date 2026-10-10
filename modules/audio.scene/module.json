@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "name": "Aver.Audio.Scene",
+  "dir": "audio.scene",
+  "displayName": "Audio (Scene)",
+  "description": "The join between the mixer and a live scene: reverb zones and occlusion probes.",
+  "category": "Audio",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Audio", "Aver.Core", "Aver.Scene"],
+  "optionalDependsOn": ["Aver.Audio.Abi", "Aver.Physics"],
+  "derivedFrom": ["Aver.Scene"],
+  "consequence": "No reverb zones or audio occlusion in a scene."
+}

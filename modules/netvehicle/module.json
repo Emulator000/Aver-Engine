@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.NetVehicle",
+  "dir": "netvehicle",
+  "displayName": "Vehicle Networking",
+  "description": "Planned: vehicle replication, damage and crash replay.",
+  "category": "Networking",
+  "option": null,
+  "required": false,
+  "default": false,
+  "dependsOn": ["Aver.Net", "Aver.Vehicle", "Aver.SoftBody"],
+  "skeleton": true,
+  "consequence": ""
+}

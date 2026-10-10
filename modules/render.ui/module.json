@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Render.UI",
+  "dir": "render.ui",
+  "displayName": "Game UI Renderer",
+  "description": "The GPU half of the retained game UI.",
+  "category": "UI",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.RHI", "Aver.UI"],
+  "consequence": ""
+}

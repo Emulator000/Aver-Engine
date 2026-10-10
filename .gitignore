@@ -115,3 +115,7 @@ RC[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*
 /*.log
 /*.png
 /*.dmp
+
+# The Aver Launcher's custom module selection (docs/MODULES.md): per machine, never shared.
+CMakeUserPresets.json
+build-custom/

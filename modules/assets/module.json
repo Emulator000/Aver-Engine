@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Assets",
+  "dir": "assets",
+  "displayName": "Assets",
+  "description": "Asset registry plus Aver.Assets.Gpu, the decode-to-GPU join.",
+  "category": "Content",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Platform", "Aver.RHI"],
+  "optionalDependsOn": ["Aver.Formats"],
+  "consequence": ""
+}

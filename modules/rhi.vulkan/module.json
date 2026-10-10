@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.RHI.Vulkan",
+  "dir": "rhi.vulkan",
+  "displayName": "Vulkan Backend",
+  "description": "Vulkan rendering backend (headers vendored; no SDK needed).",
+  "category": "Rendering",
+  "option": "AVER_RHI_VULKAN",
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.RHI"],
+  "consequence": "No Vulkan renderer."
+}

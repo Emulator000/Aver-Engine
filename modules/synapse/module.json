@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Aver.Synapse",
+  "dir": "synapse",
+  "displayName": "Navigation",
+  "description": "Navigation and pathfinding on a grid; no scene needed.",
+  "category": "Gameplay",
+  "option": null,
+  "required": true,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Formats"],
+  "consequence": ""
+}

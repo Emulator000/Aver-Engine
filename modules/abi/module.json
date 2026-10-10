@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.ABI",
+  "dir": "abi",
+  "displayName": "Unified ABI (dropped)",
+  "description": "Dropped: a single flat C seam was rejected; each module keeps its own plain-C ABI.",
+  "category": "Core",
+  "option": null,
+  "required": false,
+  "default": false,
+  "dependsOn": [],
+  "skeleton": true,
+  "consequence": ""
+}

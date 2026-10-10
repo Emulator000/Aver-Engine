@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.RHI.D3D12.ImGui",
+  "dir": "rhi.d3d12.imgui",
+  "displayName": "DirectX 12 Editor UI",
+  "description": "The Dear ImGui implementation of the editor UI seam on DirectX 12; also needs AVER_ENABLE_UI.",
+  "category": "Tools",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.RHI.D3D12"],
+  "derivedFrom": ["Aver.RHI.D3D12"],
+  "consequence": "The editor UI cannot draw on DirectX 12."
+}

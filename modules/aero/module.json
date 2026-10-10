@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.Aero",
+  "dir": "aero",
+  "displayName": "Aerodynamics",
+  "description": "Planned: baked aerodynamic sampling and force application.",
+  "category": "Physics",
+  "option": null,
+  "required": false,
+  "default": false,
+  "dependsOn": ["Aver.Core"],
+  "skeleton": true,
+  "consequence": ""
+}
