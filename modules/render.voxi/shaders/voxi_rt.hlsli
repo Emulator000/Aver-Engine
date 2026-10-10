@@ -1562,8 +1562,18 @@ float3 rtReflection(float3 wpos, float3 N, float3 Ng, float3 R, float3 L, float2
     if ((h.mat.flags & AVER_MAT_LIGHT) != 0u && rdLocalEmitterCarried(h.pos)) s.emissive = float3(0.0, 0.0, 0.0);
 #endif
 
+#if defined(AVER_RT_BINDLESS) || AVER_RD_SINGLE_PASS
     // Every emitter, the sun included, through the one evaluator (voxi_pt.hlsli averDirectLights).
     uint lrng = ptSeed(pixel, 0x5e11u);
     const float3 radiance = s.emissive + averDirectLights(s, h.pos, pixel, lrng, false);
+#else
+    // Ray-traced raster and glass variants: the sun alone, one shadow ray. averDirectLights here hung the
+    // RX 7800 XT on the first raster frame (2026-10-11); these variants sit at their register limit.
+    AverLight sun;
+    sun.direction  = L;
+    sun.radiance   = averSunRadiance();
+    sun.visibility = rdSunLit() ? rtShadowOpaque(h.pos, s.N, L, pixel, frameJitter) : float3(0.0, 0.0, 0.0);
+    const float3 radiance = s.emissive + averShadeDirect(float3(0.0, 0.0, 0.0), s, sun);
+#endif
     return radiance + s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
 }
