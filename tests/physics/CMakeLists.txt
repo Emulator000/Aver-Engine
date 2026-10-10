@@ -96,3 +96,23 @@ add_executable(FluidDampingCalibrationTest src/FluidDampingCalibrationTest.cpp)
 target_link_libraries(FluidDampingCalibrationTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(FluidDampingCalibrationTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# RagdollTest -- ragdolls from a skeleton (physics_ragdoll_abi.h).
+add_executable(RagdollTest src/RagdollTest.cpp)
+target_link_libraries(RagdollTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(RagdollTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# QueryTest -- shape casts, overlaps, multi-hit rays, point queries (physics_queries_abi.h).
+add_executable(QueryTest src/QueryTest.cpp)
+target_link_libraries(QueryTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(QueryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# JointBreakTest -- breakable joints, soft limits, locked axes, CCD (physics_body_ext_abi.h).
+add_executable(JointBreakTest src/JointBreakTest.cpp)
+target_link_libraries(JointBreakTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(JointBreakTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# CharacterExtTest -- character vs character, inner body, can-stand, contacts.
+add_executable(CharacterExtTest src/CharacterExtTest.cpp)
+target_link_libraries(CharacterExtTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(CharacterExtTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

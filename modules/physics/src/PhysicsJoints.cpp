@@ -52,10 +52,22 @@ struct Joint {
     JPH::Ref<JPH::Constraint> constraint;
     int32_t bodyA = 0;
     int32_t bodyB = 0;
+    // aver_phys_joint_set_break; 0 means that component is never checked.
+    float breakForceN = 0.0f;
+    float breakTorqueNm = 0.0f;
+    bool breakable() const { return breakForceN > 0.0f || breakTorqueNm > 0.0f; }
 };
 
 std::unordered_map<int32_t, Joint> g_joints;
 int32_t g_nextJointHandle = 1;
+
+// Breakable joints: how many are armed (so afterStepJoints costs nothing when none are), and the events
+// they produced. Events persist until aver_phys_joint_break_clear, because one aver_phys_step can run
+// several fixed steps and a break in the first must still be there when the caller drains.
+struct BreakEvent { int32_t joint = 0; float forceN = 0.0f, torqueNm = 0.0f; };
+std::vector<BreakEvent> g_breaks;
+int32_t g_breakableCount = 0;
+constexpr size_t kMaxBreakEvents = 1024;   // an undrained queue drops its oldest rather than growing forever
 
 // A joint's Constraint points into the PhysicsSystem and at the bodies inside it, so the joint table
 // must be emptied BEFORE the world is destroyed. aver_phys_shutdown calls detail::destroyAllJoints()
@@ -151,6 +163,82 @@ float sixDofTranslationLimit(float valueCm) {
     return cmToM(valueCm);
 }
 
+// ---- Breakable joints ---------------------------------------------------------------------------------
+
+// The impulse the solver applied to hold a constraint during the last step: `linear` in N*s, `angular` in
+// N*m*s (Jolt's SI). Each part's components are orthogonal constraint axes, so they combine as a vector
+// length; motor and limit lambdas act along the free axis and add to it. False for a type with no usable
+// accessor (rack-and-pinion mixes both kinds in one scalar).
+bool appliedImpulse(const JPH::Constraint& c, float& linear, float& angular) {
+    linear = angular = 0.0f;
+    auto root2 = [](float a, float b, float along = 0.0f) { return std::sqrt(a * a + b * b + along * along); };
+    switch (c.GetSubType()) {
+        case JPH::EConstraintSubType::Fixed: {
+            const auto& k = static_cast<const JPH::FixedConstraint&>(c);
+            linear = k.GetTotalLambdaPosition().Length();
+            angular = k.GetTotalLambdaRotation().Length();
+            return true;
+        }
+        case JPH::EConstraintSubType::Point:
+            linear = static_cast<const JPH::PointConstraint&>(c).GetTotalLambdaPosition().Length();
+            return true;
+        case JPH::EConstraintSubType::Distance:
+            linear = std::abs(static_cast<const JPH::DistanceConstraint&>(c).GetTotalLambdaPosition());
+            return true;
+        case JPH::EConstraintSubType::Hinge: {
+            const auto& k = static_cast<const JPH::HingeConstraint&>(c);
+            linear = k.GetTotalLambdaPosition().Length();
+            const auto rot = k.GetTotalLambdaRotation();
+            angular = root2(rot[0], rot[1], k.GetTotalLambdaRotationLimits() + k.GetTotalLambdaMotor());
+            return true;
+        }
+        case JPH::EConstraintSubType::Slider: {
+            const auto& k = static_cast<const JPH::SliderConstraint&>(c);
+            const auto pos = k.GetTotalLambdaPosition();
+            linear = root2(pos[0], pos[1], k.GetTotalLambdaPositionLimits() + k.GetTotalLambdaMotor());
+            angular = k.GetTotalLambdaRotation().Length();
+            return true;
+        }
+        case JPH::EConstraintSubType::Cone: {
+            const auto& k = static_cast<const JPH::ConeConstraint&>(c);
+            linear = k.GetTotalLambdaPosition().Length();
+            angular = std::abs(k.GetTotalLambdaRotation());
+            return true;
+        }
+        case JPH::EConstraintSubType::SwingTwist: {
+            const auto& k = static_cast<const JPH::SwingTwistConstraint&>(c);
+            linear = k.GetTotalLambdaPosition().Length();
+            const float t = k.GetTotalLambdaTwist(), y = k.GetTotalLambdaSwingY(), z = k.GetTotalLambdaSwingZ();
+            angular = std::sqrt(t * t + y * y + z * z + k.GetTotalLambdaMotor().LengthSq());
+            return true;
+        }
+        case JPH::EConstraintSubType::SixDOF: {
+            const auto& k = static_cast<const JPH::SixDOFConstraint&>(c);
+            linear = (k.GetTotalLambdaPosition() + k.GetTotalLambdaMotorTranslation()).Length();
+            angular = (k.GetTotalLambdaRotation() + k.GetTotalLambdaMotorRotation()).Length();
+            return true;
+        }
+        case JPH::EConstraintSubType::Pulley:
+            linear = std::abs(static_cast<const JPH::PulleyConstraint&>(c).GetTotalLambdaPosition());
+            return true;
+        case JPH::EConstraintSubType::Gear:
+            angular = std::abs(static_cast<const JPH::GearConstraint&>(c).GetTotalLambda());
+            return true;
+        case JPH::EConstraintSubType::Path: {
+            const auto& k = static_cast<const JPH::PathConstraint&>(c);
+            const auto pos = k.GetTotalLambdaPosition();
+            linear = root2(pos[0], pos[1], k.GetTotalLambdaPositionLimits() + k.GetTotalLambdaMotor());
+            const auto hinge = k.GetTotalLambdaRotationHinge();
+            angular = std::sqrt(hinge[0] * hinge[0] + hinge[1] * hinge[1] + k.GetTotalLambdaRotation().LengthSq());
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+bool validSpring(float frequencyHz, float damping) { return frequencyHz >= 0.0f && damping >= 0.0f; }
+
 } // namespace
 
 extern "C" {
@@ -160,6 +248,7 @@ extern "C" {
 int32_t aver_phys_joint_remove(int32_t joint) {
     Joint* j = findJoint(joint);
     if (!j) return 0;
+    if (j->breakable()) --g_breakableCount;
     g_world->system.RemoveConstraint(j->constraint);   // findJoint proved g_world is alive
     g_joints.erase(joint);
     return 1;
@@ -742,6 +831,102 @@ int32_t aver_phys_joint_value(int32_t joint, float* outValue) {
     }
 }
 
+int32_t aver_phys_joint_set_motor_spring(int32_t joint, int32_t axis, float frequencyHz, float damping) {
+    Joint* j = findJoint(joint);
+    if (!j) return 0;
+    if (!validSpring(frequencyHz, damping)) {
+        AVER_WARN("[Physics] a motor spring needs frequency >= 0 and damping >= 0, got {} Hz, {}", frequencyHz, damping);
+        return 0;
+    }
+    const JPH::SpringSettings spring(JPH::ESpringMode::FrequencyAndDamping, frequencyHz, damping);
+    switch (j->constraint->GetSubType()) {
+        case JPH::EConstraintSubType::Hinge:
+            static_cast<JPH::HingeConstraint*>(j->constraint.GetPtr())->GetMotorSettings().mSpringSettings = spring;
+            return 1;
+        case JPH::EConstraintSubType::Slider:
+            static_cast<JPH::SliderConstraint*>(j->constraint.GetPtr())->GetMotorSettings().mSpringSettings = spring;
+            return 1;
+        case JPH::EConstraintSubType::SixDOF:
+            if (axis < 0 || axis >= AVER_PHYS_DOF_COUNT) {
+                AVER_WARN("[Physics] six-DOF axis {} is out of range 0-5", axis);
+                return 0;
+            }
+            static_cast<JPH::SixDOFConstraint*>(j->constraint.GetPtr())
+                ->GetMotorSettings(static_cast<JPH::SixDOFConstraint::EAxis>(axis)).mSpringSettings = spring;
+            return 1;
+        default:
+            AVER_WARN("[Physics] joint {} has no motor (only hinge, slider and six-DOF do)", joint);
+            return 0;
+    }
+}
+
+// ---- Soft limits -------------------------------------------------------------------------------------
+
+int32_t aver_phys_joint_set_limit_spring(int32_t joint, float frequencyHz, float damping) {
+    Joint* j = findJoint(joint);
+    if (!j) return 0;
+    if (!validSpring(frequencyHz, damping)) {
+        AVER_WARN("[Physics] a limit spring needs frequency >= 0 and damping >= 0, got {} Hz, {}", frequencyHz, damping);
+        return 0;
+    }
+    const JPH::SpringSettings spring(JPH::ESpringMode::FrequencyAndDamping, frequencyHz, damping);
+    switch (j->constraint->GetSubType()) {
+        case JPH::EConstraintSubType::Hinge:
+            static_cast<JPH::HingeConstraint*>(j->constraint.GetPtr())->SetLimitsSpringSettings(spring);
+            return 1;
+        case JPH::EConstraintSubType::Slider:
+            static_cast<JPH::SliderConstraint*>(j->constraint.GetPtr())->SetLimitsSpringSettings(spring);
+            return 1;
+        case JPH::EConstraintSubType::Distance:
+            static_cast<JPH::DistanceConstraint*>(j->constraint.GetPtr())->SetLimitsSpringSettings(spring);
+            return 1;
+        case JPH::EConstraintSubType::SixDOF: {
+            // Jolt gives only the three translation limits a spring; rotation limits stay hard.
+            auto* sixDof = static_cast<JPH::SixDOFConstraint*>(j->constraint.GetPtr());
+            for (int i = AVER_PHYS_DOF_TRANSLATION_X; i <= AVER_PHYS_DOF_TRANSLATION_Z; ++i)
+                sixDof->SetLimitsSpringSettings(static_cast<JPH::SixDOFConstraint::EAxis>(i), spring);
+            return 1;
+        }
+        default:
+            AVER_WARN("[Physics] joint {} has no springable limits (hinge, slider, distance and six-DOF do)", joint);
+            return 0;
+    }
+}
+
+// ---- Breakable joints --------------------------------------------------------------------------------
+
+int32_t aver_phys_joint_set_break(int32_t joint, float maxForceN, float maxTorqueNm) {
+    Joint* j = findJoint(joint);
+    if (!j) return 0;
+    if (!(maxForceN >= 0.0f) || !(maxTorqueNm >= 0.0f) || !std::isfinite(maxForceN) || !std::isfinite(maxTorqueNm)) {
+        AVER_WARN("[Physics] break thresholds must be finite and >= 0, got {} N, {} N*m", maxForceN, maxTorqueNm);
+        return 0;
+    }
+    float lin, ang;
+    if (!appliedImpulse(*j->constraint, lin, ang)) {
+        AVER_WARN("[Physics] joint {} cannot report its load, so it cannot break (rack-and-pinion)", joint);
+        return 0;
+    }
+    const bool was = j->breakable();
+    j->breakForceN = maxForceN;
+    j->breakTorqueNm = maxTorqueNm;
+    g_breakableCount += static_cast<int32_t>(j->breakable()) - static_cast<int32_t>(was);
+    return 1;
+}
+
+int32_t aver_phys_joint_break_count(void) { return static_cast<int32_t>(g_breaks.size()); }
+
+int32_t aver_phys_joint_break_get(int32_t index, int32_t* outJoint, float* outForceN, float* outTorqueNm) {
+    if (index < 0 || index >= static_cast<int32_t>(g_breaks.size())) return 0;
+    const BreakEvent& e = g_breaks[static_cast<size_t>(index)];
+    if (outJoint) *outJoint = e.joint;
+    if (outForceN) *outForceN = e.forceN;
+    if (outTorqueNm) *outTorqueNm = e.torqueNm;
+    return 1;
+}
+
+void aver_phys_joint_break_clear(void) { g_breaks.clear(); }
+
 } // extern "C"
 
 // Called by aver_phys_shutdown before it destroys the world -- see PhysicsInternal.hpp for why this is
@@ -749,5 +934,37 @@ int32_t aver_phys_joint_value(int32_t joint, float* outValue) {
 // the PhysicsSystem is about to be destroyed and takes its own ConstraintManager with it, so the only
 // thing that has to happen here is that this file stops holding references into it.
 namespace aver::physics::detail {
-void destroyAllJoints() { g_joints.clear(); }
+void clearBodyExtState();   // PhysicsBodyExt.cpp: per-body state keyed by handle dies with the world
+
+void destroyAllJoints() {
+    g_joints.clear();
+    g_breaks.clear();
+    g_breakableCount = 0;
+    clearBodyExtState();
+}
+
+// After each fixed step: a breakable joint whose applied impulse over that step (divided by the step, so
+// a force) passed a threshold is disabled and reported. A disabled joint is skipped, so one break is one
+// event; re-enabling re-arms it.
+void afterStepJoints() {
+    if (g_breakableCount == 0 || !g_world) return;
+    const float dt = g_world->fixedStep;
+    std::vector<BreakEvent> fresh;
+    for (auto& [handle, j] : g_joints) {
+        if (!j.breakable() || !j.constraint->GetEnabled()) continue;
+        float linear, angular;
+        if (!appliedImpulse(*j.constraint, linear, angular)) continue;
+        const float force = linear / dt, torque = angular / dt;
+        if ((j.breakForceN > 0.0f && force > j.breakForceN) || (j.breakTorqueNm > 0.0f && torque > j.breakTorqueNm)) {
+            j.constraint->SetEnabled(false);
+            fresh.push_back(BreakEvent{handle, force, torque});
+        }
+    }
+    // Hash order is arbitrary; handle order keeps the queue reproducible.
+    std::sort(fresh.begin(), fresh.end(), [](const BreakEvent& a, const BreakEvent& b) { return a.joint < b.joint; });
+    for (const BreakEvent& e : fresh) {
+        if (g_breaks.size() >= kMaxBreakEvents) g_breaks.erase(g_breaks.begin());
+        g_breaks.push_back(e);
+    }
+}
 }

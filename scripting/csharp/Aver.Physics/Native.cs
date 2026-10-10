@@ -15,7 +15,7 @@ using System.Runtime.InteropServices;
 
 namespace Aver.Physics;
 
-internal static class Native
+internal static partial class Native
 {
     private const string Lib = "Aver.Physics";
 

@@ -13,17 +13,23 @@
 #include "aver/physics/physics_character_abi.h"
 #include "Convert.hpp"
 #include "PhysicsInternal.hpp"
+#include "PhysicsCharacterInternal.hpp"
 
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <Jolt/Jolt.h>
+#include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Physics/Collision/CollideShape.h>
+#include <Jolt/Physics/Collision/CollisionCollector.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
 #include <cmath>
+#include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace aver;
 using namespace aver::physics;
@@ -51,6 +57,52 @@ struct StairSettings {
 // without that a new world's first character would silently inherit whatever the previous world's
 // handle 1 last set here.
 std::unordered_map<int32_t, StairSettings> g_stairSettings;
+
+// ---- Character extras: state ----------------------------------------------------------------------
+//
+// File-local because World (PhysicsInternal.hpp) is not this feature's to grow; reset by
+// clearCharacterStairSettings, which aver_phys_shutdown already calls.
+bool g_charVsChar = true;          // aver_phys_set_character_vs_character
+bool g_innerBodyDefault = true;    // aver_phys_set_character_inner_body_default
+bool g_edgeRemovalDefault = true;  // aver_phys_set_character_edge_removal_default
+// Every live character, for CharacterVirtual::SetCharacterVsCharacterCollision. A brute-force list: each
+// character query tests the others in turn, which is right for a handful of characters.
+std::unique_ptr<JPH::CharacterVsCharacterCollisionSimple> g_cvc;
+// The characters' inner bodies, for the filter below.
+std::unordered_set<JPH::BodyID> g_innerIds;
+
+// Character movement never collides with a character's INNER body: the inner body is there for rays,
+// sensors and rigid bodies. Characters meet each other through g_cvc (when it is on), and meeting through
+// both would be two contacts for one touch, with the second one a step stale.
+class CharacterFilter final : public JPH::BodyFilter {
+public:
+    bool rejectSensors = false;   // the can-stand query asks about solid geometry only
+    bool ShouldCollide(const JPH::BodyID& id) const override { return g_innerIds.find(id) == g_innerIds.end(); }
+    bool ShouldCollideLocked(const JPH::Body& body) const override { return !(rejectSensors && body.IsSensor()); }
+};
+CharacterFilter g_filter;
+
+// Keeps the deepest overlap of a shape query.
+class DeepestOverlap final : public JPH::CollideShapeCollector {
+public:
+    void AddHit(const JPH::CollideShapeResult& r) override { if (r.mPenetrationDepth > depth) depth = r.mPenetrationDepth; }
+    float depth = -1.0e9f;
+};
+
+// The handle of the character with this Jolt id, or 0.
+int32_t handleOfCharacterId(const JPH::CharacterID& id) {
+    if (id.IsInvalid()) return 0;
+    for (const auto& [h, other] : g_world->characters)
+        if (other->GetID() == id) return h;
+    return 0;
+}
+
+// A contact worth reporting: touching, not merely predicted, and not a sensor volume.
+// Within Jolt's default character padding (2 cm): a character being pushed along moves off by about that
+// much each step before the pusher catches up, so a tighter bound drops a contact that is really there.
+bool touching(const JPH::CharacterContact& c) {
+    return !c.mIsSensorB && !c.mWasDiscarded && (c.mHadCollision || c.mDistance <= 0.025f);
+}
 
 // The handle behind a Jolt body id, checking both bodies AND characters' inner bodies -- the same
 // two-table lookup aver_phys_raycast already needs in PhysicsWorld.cpp, and for the same reason: the
@@ -173,7 +225,16 @@ int32_t aver_phys_character_ground_position(int32_t ch, float* outXyz) {
 int32_t aver_phys_character_ground_body(int32_t ch) {
     JPH::CharacterVirtual* c = character(ch);
     if (!c) return 0;
-    return handleOfBody(c->GetGroundBodyID());
+    if (const int32_t h = handleOfBody(c->GetGroundBodyID())) return h;
+    // Standing on another CHARACTER leaves no body id: Jolt copies that contact's position into the
+    // ground position, so the contact at the same spot names it.
+    const auto gs = c->GetGroundState();
+    if (gs == JPH::CharacterBase::EGroundState::OnGround || gs == JPH::CharacterBase::EGroundState::OnSteepGround)
+        for (const JPH::CharacterContact& k : c->GetActiveContacts())
+            if (k.mHadCollision && !k.mCharacterIDB.IsInvalid() &&
+                (k.mPosition - c->GetGroundPosition()).LengthSq() < 1.0e-8f)
+                return handleOfCharacterId(k.mCharacterIDB);
+    return 0;
 }
 
 int32_t aver_phys_character_ground_velocity(int32_t ch, float* outXyz) {
@@ -230,7 +291,7 @@ int32_t aver_phys_character_set_shape(int32_t ch, float radius, float height, fl
     const bool ok = c->SetShape(res.Get(), cmToM(maxPenetrationCm),
                                 g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
                                 g_world->system.GetDefaultLayerFilter(Layers::MOVING),
-                                {}, {}, *g_world->temp);
+                                g_filter, {}, *g_world->temp);
     if (!ok) return refuse(AbiError::Unsupported);
 
     // The inner body is a separate shape reference Jolt does not update on its own (its own doc
@@ -301,6 +362,139 @@ int32_t aver_phys_character_max_strength(int32_t ch, float* outMaxStrengthKgCmS2
     return 1;
 }
 
+// ---- Character vs character ---------------------------------------------------------------------------
+
+int32_t aver_phys_set_character_vs_character(int32_t on) {
+    g_charVsChar = on != 0;
+    if (g_world)
+        for (const auto& [h, c] : g_world->characters)
+            c->SetCharacterVsCharacterCollision(g_charVsChar ? g_cvc.get() : nullptr);
+    return 1;
+}
+
+int32_t aver_phys_character_vs_character(void) { return g_charVsChar ? 1 : 0; }
+
+// ---- Inner body ----------------------------------------------------------------------------------------
+
+int32_t aver_phys_set_character_inner_body_default(int32_t on) {
+    g_innerBodyDefault = on != 0;
+    return 1;
+}
+
+int32_t aver_phys_character_has_inner_body(int32_t ch) {
+    JPH::CharacterVirtual* c = character(ch);
+    return c && !c->GetInnerBodyID().IsInvalid() ? 1 : 0;
+}
+
+// Jolt fixes the inner body at construction, so the character is rebuilt from its own settings under the
+// same handle and what the settings do not carry (velocity, user data, position) is copied across.
+int32_t aver_phys_character_set_inner_body(int32_t ch, int32_t on) {
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if ((on != 0) == !c->GetInnerBodyID().IsInvalid()) return 1;
+
+    JPH::Ref<JPH::CharacterVirtualSettings> s = new JPH::CharacterVirtualSettings(c->GetCharacterVirtualSettings());
+    s->mInnerBodyShape = on != 0 ? c->GetShape() : nullptr;
+    s->mInnerBodyIDOverride = JPH::BodyID();   // the old one is still alive while the new is built
+    s->mInnerBodyLayer = Layers::MOVING;
+    JPH::Ref<JPH::CharacterVirtual> n =
+        new JPH::CharacterVirtual(s, c->GetPosition(), c->GetRotation(), c->GetUserData(), &g_world->system);
+    n->SetLinearVelocity(c->GetLinearVelocity());
+
+    characterDestroyed(c);
+    g_world->characters[ch] = n;   // drops the old character, and its inner body with it
+    characterCreated(n.GetPtr());
+    // The ground state is not in the settings; find it the way a teleport does.
+    n->RefreshContacts(g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
+                       g_world->system.GetDefaultLayerFilter(Layers::MOVING),
+                       g_filter, {}, *g_world->temp);
+    return 1;
+}
+
+// ---- Can it stand? -------------------------------------------------------------------------------------
+
+int32_t aver_phys_character_can_set_shape(int32_t ch, float radius, float halfHeight) {
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    const JPH::Shape* cur = c->GetShape();
+    if (!cur || cur->GetSubType() != JPH::EShapeSubType::Capsule) return refuse(AbiError::Unsupported);
+
+    const float rM = cmToM(radius);
+    const float newHalf = cmToM(halfHeight);
+    const float halfCyl = newHalf - rM;
+    if (!(rM > 0.0f) || !(halfCyl > 0.0f)) return refuse(AbiError::InvalidArgument);
+    JPH::CapsuleShapeSettings capsule(halfCyl, rM);
+    capsule.SetEmbedded();
+    auto res = capsule.Create();
+    if (res.HasError()) return refuse(AbiError::InvalidArgument);
+
+    // Feet stay where they are, so growing the capsule moves its centre up by the change in half height
+    // (the centre of mass sits one padding above the position, as in CharacterVirtual).
+    const JPH::CapsuleShape* now = static_cast<const JPH::CapsuleShape*>(cur);
+    const float oldHalf = now->GetHalfHeightOfCylinder() + now->GetRadius();
+    const JPH::RVec3 centre = c->GetPosition() + c->GetUp() * (newHalf - oldHalf + c->GetCharacterPadding());
+
+    JPH::CollideShapeSettings settings;
+    settings.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;   // the character's own default
+    CharacterFilter solidOnly;
+    solidOnly.rejectSensors = true;
+    DeepestOverlap deepest;
+    g_world->system.GetNarrowPhaseQuery().CollideShape(
+        res.Get(), JPH::Vec3::sOne(), JPH::RMat44::sRotationTranslation(c->GetRotation(), centre), settings,
+        JPH::RVec3::sZero(), deepest,
+        g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
+        g_world->system.GetDefaultLayerFilter(Layers::MOVING), solidOnly, {});
+    // A centimetre of overlap is the seating tolerance between a resting capsule and the floor.
+    if (deepest.depth > cmToM(1.0f)) return refuse(AbiError::Unsupported);
+    return 1;
+}
+
+// ---- Contacts ----------------------------------------------------------------------------------------------
+
+int32_t aver_phys_character_contact_count(int32_t ch) {
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    int32_t n = 0;
+    for (const JPH::CharacterContact& k : c->GetActiveContacts()) n += touching(k) ? 1 : 0;
+    return n;
+}
+
+int32_t aver_phys_character_contact_get(int32_t ch, int32_t index, int32_t* outBody, float* outPoint3,
+                                         float* outNormal3) {
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    if (index < 0) return refuse(AbiError::InvalidArgument);
+    int32_t i = 0;
+    for (const JPH::CharacterContact& k : c->GetActiveContacts()) {
+        if (!touching(k) || i++ != index) continue;
+        if (outBody) *outBody = k.mCharacterIDB.IsInvalid() ? handleOfBody(k.mBodyB) : handleOfCharacterId(k.mCharacterIDB);
+        if (outPoint3) writeVec(outPoint3, fromJolt(k.mPosition));
+        // Jolt's contact normal already points toward the character.
+        if (outNormal3) writeVec(outNormal3, fromJoltUnit(k.mContactNormal));
+        return 1;
+    }
+    return refuse(AbiError::InvalidArgument);
+}
+
+// ---- Internal edge removal ------------------------------------------------------------------------------
+
+int32_t aver_phys_set_character_edge_removal_default(int32_t on) {
+    g_edgeRemovalDefault = on != 0;
+    return 1;
+}
+
+int32_t aver_phys_character_set_edge_removal(int32_t ch, int32_t on) {
+    JPH::CharacterVirtual* c = character(ch);
+    if (!c) return 0;
+    c->SetEnhancedInternalEdgeRemoval(on != 0);
+    return 1;
+}
+
+int32_t aver_phys_character_edge_removal(int32_t ch) {
+    JPH::CharacterVirtual* c = character(ch);
+    return c && c->GetEnhancedInternalEdgeRemoval() ? 1 : 0;
+}
+
 // ---- Entity to character ------------------------------------------------------------------------------
 
 int32_t aver_phys_character_of_entity(int32_t entity) {
@@ -336,6 +530,31 @@ void applyCharacterStairSettings(int32_t handle, JPH::CharacterVirtual::Extended
     out.mStickToFloorStepDown = -up * cmToM(s.stepDownCm);
 }
 
-void clearCharacterStairSettings() { g_stairSettings.clear(); }
+void clearCharacterStairSettings() {
+    g_stairSettings.clear();
+    // The extras go too. The characters are about to be released and must not be left pointing at the
+    // collision list; the switches return to their defaults so one world's choice does not leak.
+    if (g_world)
+        for (const auto& [h, c] : g_world->characters) c->SetCharacterVsCharacterCollision(nullptr);
+    g_cvc.reset();
+    g_innerIds.clear();
+    g_charVsChar = g_innerBodyDefault = g_edgeRemovalDefault = true;
+}
+
+void characterCreated(JPH::CharacterVirtual* c) {
+    if (!g_cvc) g_cvc = std::make_unique<JPH::CharacterVsCharacterCollisionSimple>();
+    g_cvc->Add(c);
+    c->SetCharacterVsCharacterCollision(g_charVsChar ? g_cvc.get() : nullptr);
+    if (!c->GetInnerBodyID().IsInvalid()) g_innerIds.insert(c->GetInnerBodyID());
+}
+
+void characterDestroyed(JPH::CharacterVirtual* c) {
+    if (g_cvc) g_cvc->Remove(c);
+    g_innerIds.erase(c->GetInnerBodyID());
+}
+
+bool characterInnerBodyDefault() { return g_innerBodyDefault; }
+bool characterEdgeRemovalDefault() { return g_edgeRemovalDefault; }
+const JPH::BodyFilter& characterBodyFilter() { return g_filter; }
 
 } // namespace aver::physics::detail

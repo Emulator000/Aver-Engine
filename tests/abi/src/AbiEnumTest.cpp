@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -550,7 +551,7 @@ static std::map<std::string, Signature> csSignatures(const std::string& text, co
 // names every header that together makes up the C side of one C# file.
 struct Abi {
     const char* label;
-    const char* headers[7];   // NULL-terminated; most rows name exactly one
+    const char* headers[12];  // NULL-terminated; most rows name exactly one
     const char* apiMacro;
     const char* csFile;
     const char* prefix;
@@ -564,6 +565,9 @@ static const Abi kAbis[] = {
       "modules/physics/include/aver/physics/physics_layers_abi.h",
       "modules/physics/include/aver/physics/physics_character_abi.h",
       "modules/physics/include/aver/physics/physics_vehicle_abi.h",
+      "modules/physics/include/aver/physics/physics_ragdoll_abi.h",
+      "modules/physics/include/aver/physics/physics_queries_abi.h",
+      "modules/physics/include/aver/physics/physics_body_ext_abi.h",
       nullptr},
      "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
     {"audio ABI",
@@ -720,6 +724,8 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Physics/Enums.cs",   "SixDofAxis",  "count"},
     {"physics ground state",  "modules/physics/include/aver/physics/physics_character_abi.h", "AVER_PHYS_GROUND_",
      "scripting/csharp/Aver.Physics/Enums.cs",   "GroundState", ""},
+    {"physics ragdoll modes", "modules/physics/include/aver/physics/physics_ragdoll_abi.h", "AVER_PHYS_RAGDOLL_",
+     "scripting/csharp/Aver.Physics/Ragdoll.cs", "RagdollMode", ""},
     {"PBR texture slots",     "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_TEX_",
      "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrTextureSlot", "count"},
     {"PBR alpha modes",       "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_ALPHA_",
@@ -808,6 +814,23 @@ int main() {
     for (const Abi& a : kAbis) {
         std::string cs;
         if (!readText(root + a.csFile, cs))  { check(false, std::string(a.label) + ": cannot read " + a.csFile); continue; }
+        // `partial class Native` split by feature: Native.cs plus every Native.<feature>.cs beside it.
+        {
+            namespace fs = std::filesystem;
+            const fs::path main(root + a.csFile);
+            const std::string stem = main.stem().string() + ".";
+            std::vector<fs::path> parts;
+            std::error_code ec;
+            for (const fs::directory_entry& de : fs::directory_iterator(main.parent_path(), ec)) {
+                const std::string n = de.path().filename().string();
+                if (n.size() > stem.size() + 3 && n.rfind(stem, 0) == 0 && de.path().extension() == ".cs") parts.push_back(de.path());
+            }
+            std::sort(parts.begin(), parts.end());
+            for (const fs::path& part : parts) {
+                std::string more;
+                if (readText(part.string(), more)) cs += '\n' + more;
+            }
+        }
 
         // Every header in the row, merged: together they are the C side of this one C# file.
         std::map<std::string, Signature> c;

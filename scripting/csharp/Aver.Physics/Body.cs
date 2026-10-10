@@ -18,7 +18,7 @@ namespace Aver.Physics;
 /// families share one counter (physics_abi.h's "Entity association" section), so a handle that came
 /// from <see cref="CharacterBody"/> is also a valid <see cref="Body"/> for anything that does not care
 /// which it is -- <see cref="SetEntity"/>, a raycast hit, a joint's world-body constant.</summary>
-public readonly struct Body : System.IEquatable<Body>
+public readonly partial struct Body : System.IEquatable<Body>
 {
     /// <summary>The raw ABI handle. 0 is invalid.</summary>
     public int Handle { get; }

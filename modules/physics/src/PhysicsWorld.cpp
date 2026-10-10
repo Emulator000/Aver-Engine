@@ -4,6 +4,7 @@
 #include "Convert.hpp"   // src-local: it speaks Jolt, and Jolt is PRIVATE to this module
 #include "Buoyancy.hpp"  // src-local for the same reason: WaterVolume holds JPH:: types
 #include "PhysicsInternal.hpp"  // the world and its handle tables, shared with the sibling ABI files
+#include "PhysicsCharacterInternal.hpp"  // character-vs-character, the character body filter, defaults
 
 #include "aver/core/Log.hpp"
 // The shared error vocabulary. findBody records the reason a handle lookup failed; aver_phys_last_error
@@ -286,6 +287,8 @@ void aver_phys_shutdown(void) {
     // points into the PhysicsSystem below and at the bodies in it. Destroying the world first would
     // leave PhysicsJoints.cpp's table holding references into wreckage.
     destroyAllJoints();
+    // Ragdolls own constraints and part bodies, so they go with the joints.
+    destroyAllRagdolls();
     // AND VEHICLES, for the same reason and in the same place: a VehicleConstraint is registered with the
     // system as a step listener and holds a raw pointer to its chassis, which the loop below is about to
     // destroy. The chassis bodies themselves are ordinary entries in `bodies` and go with the rest.
@@ -402,7 +405,7 @@ int32_t aver_phys_step(float dt) {
                                us,
                                g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
                                g_world->system.GetDefaultLayerFilter(Layers::MOVING),
-                               {}, {}, *g_world->temp);
+                               characterBodyFilter(), {}, *g_world->temp);
             // Back into the driver's frame. ExtendedUpdate may have trimmed the velocity against a
             // steep slope; whatever it left, minus what the ground lent it, is the character's own.
             ch->SetLinearVelocity(ch->GetLinearVelocity() - carry);
@@ -429,6 +432,7 @@ int32_t aver_phys_step(float dt) {
                                                  g_world->system.GetGravity(), g_world->fixedStep);
         }
         g_world->system.Update(g_world->fixedStep, 1, g_world->temp.get(), g_world->jobs.get());
+        afterStepJoints();
         ++steps;
     }
     return steps;
@@ -477,6 +481,7 @@ int32_t aver_phys_remove_body(int32_t body) {
     // a raw pointer to this body, so they come out first. The vehicle handle is dead afterwards -- see
     // physics_vehicle_abi.h. A no-op for any body that is not a chassis.
     releaseVehicleOfBody(body);
+    releaseRagdollOfBody(body);
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
     bi().RemoveBody(*id);
@@ -630,18 +635,23 @@ int32_t aver_phys_character_create(float radius, float height, float x, float y,
     // through a live character comes back a clean miss. Jolt creates and re-syncs this body itself
     // (every Update/ExtendedUpdate, already called once per fixed step below) from the SAME shape, so
     // there is nothing else to keep in sync here.
-    s->mInnerBodyShape = res.Get();
+    // (aver_phys_set_character_inner_body_default can turn it off for characters made from now on;
+    // aver_phys_character_set_inner_body does it for one that exists.)
+    if (characterInnerBodyDefault()) s->mInnerBodyShape = res.Get();
     s->mInnerBodyLayer = Layers::MOVING;
+    s->mEnhancedInternalEdgeRemoval = characterEdgeRemovalDefault();
     JPH::Ref<JPH::CharacterVirtual> ch =
         new JPH::CharacterVirtual(s, toJolt(Vec3(x, y, z)), JPH::Quat::sIdentity(), 0, &g_world->system);
     const int32_t h = g_world->nextHandle++;
     g_world->characters.emplace(h, ch);
+    characterCreated(ch.GetPtr());
     return h;
 }
 
 // Destroys a character.
 int32_t aver_phys_character_destroy(int32_t ch) {
     if (!g_world || !g_world->characters.count(ch)) return 0;
+    characterDestroyed(g_world->characters.find(ch)->second.GetPtr());
     g_world->characters.erase(ch);
     g_world->characterCarry.erase(ch);
     g_world->characterGravity.erase(ch);
@@ -685,7 +695,7 @@ int32_t aver_phys_character_set_position(int32_t ch, float x, float y, float z) 
     c->SetPosition(toJolt(Vec3(x, y, z)));
     c->RefreshContacts(g_world->system.GetDefaultBroadPhaseLayerFilter(Layers::MOVING),
                        g_world->system.GetDefaultLayerFilter(Layers::MOVING),
-                       {}, {}, *g_world->temp);
+                       characterBodyFilter(), {}, *g_world->temp);
     g_world->characterCarry.erase(ch);
     return 1;
 }

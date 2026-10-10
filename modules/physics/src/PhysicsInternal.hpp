@@ -260,6 +260,14 @@ void writeVec(float* out, const Vec3& v);
 // being a property nobody wrote down.
 void destroyAllJoints();
 
+// Breakable joints: checked after every fixed step (PhysicsJoints.cpp).
+void afterStepJoints();
+
+// Ragdolls (PhysicsRagdoll.cpp): torn down before the bodies, and a ragdoll part removed on its own takes
+// its ragdoll with it.
+void destroyAllRagdolls();
+void releaseRagdollOfBody(int32_t body);
+
 // Destroys every vehicle's constraint and step listener and empties both vehicle tables, called by
 // aver_phys_shutdown beside destroyAllJoints and for the same reason: a VehicleConstraint points at a
 // chassis body and into the PhysicsSystem, and is registered with it as a step listener. The chassis

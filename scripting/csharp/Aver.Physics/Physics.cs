@@ -62,7 +62,7 @@ public readonly struct RaycastHit
 /// <summary>The simulation itself: starting it, gravity, stepping, creation, queries and the event
 /// queues.</summary>
 /// <remarks>Engine units and axes throughout: centimetres, +X forward, +Y right, +Z up, left-handed.</remarks>
-public static class Physics
+public static partial class Physics
 {
     // ---- World --------------------------------------------------------------------------------------
 

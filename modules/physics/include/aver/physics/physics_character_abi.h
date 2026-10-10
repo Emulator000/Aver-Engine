@@ -162,6 +162,76 @@ AVER_PHYS_API int32_t aver_phys_character_max_strength(int32_t ch, float* outMax
 // same stamp, which of them is returned is unspecified.
 AVER_PHYS_API int32_t aver_phys_character_of_entity(int32_t entity);
 
+// ---- Character vs character --------------------------------------------------------------------------
+// A CharacterVirtual is not in the broad phase, so two of them only meet if the module tests them
+// against each other (Jolt's CharacterVsCharacterCollisionSimple). Every character takes part. With it
+// ON a character walking into another stops at it, treats the other's velocity as a moving obstacle, and
+// can stand on it; with it OFF they walk through one another. A single character is not affected either
+// way. Neither setting touches what rays, sensors and rigid bodies see: that is the inner body, below.
+
+// 1 = characters collide with each other (the default), 0 = they pass through. Applies to every existing
+// character and to those created later; reset to the default by aver_phys_shutdown.
+AVER_PHYS_API int32_t aver_phys_set_character_vs_character(int32_t on);
+// The current setting, 1 or 0.
+AVER_PHYS_API int32_t aver_phys_character_vs_character(void);
+
+// ---- Inner body --------------------------------------------------------------------------------------
+// The character's presence in the physics world: a kinematic rigid body with the character's capsule,
+// moved with it, on the default moving layer. It is why a raycast, a sensor or a falling crate sees a
+// character at all. A character made without one is invisible to all three but still walks, collides
+// with the world and (see above) with other characters.
+
+// Whether characters made FROM NOW ON get an inner body (1, the default) or not (0). Existing characters
+// are not touched. Reset to the default by aver_phys_shutdown.
+AVER_PHYS_API int32_t aver_phys_set_character_inner_body_default(int32_t on);
+// Gives one character an inner body or takes it away. Jolt cannot add or remove it in place, so the
+// character is REBUILT with everything it has (position, rotation, velocity, shape, slope, mass, strength,
+// entity stamp, edge removal) and the same handle; ground state is re-found. It keeps its stair, gravity
+// and carried-velocity settings, which live beside the handle. Returns 1 (also when nothing needed
+// changing), 0 for a dead handle.
+AVER_PHYS_API int32_t aver_phys_character_set_inner_body(int32_t ch, int32_t on);
+// 1 if the character has an inner body, 0 if not or for a dead handle.
+AVER_PHYS_API int32_t aver_phys_character_has_inner_body(int32_t ch);
+
+// ---- Can it stand? -------------------------------------------------------------------------------------
+// Crouching is a smaller capsule and standing is the larger one back; the question a game needs answered
+// BEFORE it stands is whether the larger one fits, without changing anything.
+
+// 1 if a capsule of `radius` and TOTAL height `halfHeight * 2` (centimetres; the half height is the
+// distance from the capsule's centre to its top, caps included) fits in the world with its FEET where the
+// character's feet are now, 0 if it would overlap geometry (a ceiling above a stand request) or the handle
+// is dead or the numbers cannot form a capsule (aver_phys_last_error tells which). Nothing is changed. To
+// then apply it, move the character's position up by the change in half height and call
+// aver_phys_character_set_shape with height `halfHeight * 2`. Static and dynamic bodies count; sensors and
+// other characters do not.
+AVER_PHYS_API int32_t aver_phys_character_can_set_shape(int32_t ch, float radius, float halfHeight);
+
+// ---- Contacts ----------------------------------------------------------------------------------------------
+// What the character touched on its last update, from Jolt's active contact list: the floor it stands
+// on, the wall it is pushing into, another character. Predictive contacts (close but not yet touching)
+// are left out. The list is rebuilt every fixed step, so read it after aver_phys_step.
+
+// How many contacts the character has right now, 0 for none or a dead handle.
+AVER_PHYS_API int32_t aver_phys_character_contact_count(int32_t ch);
+// Contact `index` (0 .. count-1). `outBody` receives the handle of the body (or other character) touched,
+// 0 for geometry this module gave no handle to (a heightfield). `outPoint3` is the contact position,
+// centimetres, and `outNormal3` the unit normal pointing from the thing touched TOWARD the character (up
+// for a floor). Any out-pointer may be null. Returns 0 for a dead handle or an index out of range.
+AVER_PHYS_API int32_t aver_phys_character_contact_get(int32_t ch, int32_t index, int32_t* outBody,
+                                                       float* outPoint3, float* outNormal3);
+
+// ---- Internal edge removal ------------------------------------------------------------------------------
+// Triangle meshes have internal edges where two flat faces meet; a capsule sliding over them can catch on
+// a "ghost" contact there. Enhanced removal spends extra work per query to discard those, so a character
+// crosses mesh seams smoothly. It does nothing on boxes, spheres and other primitives.
+
+// Whether characters made FROM NOW ON use it (1, the default). Reset to the default by aver_phys_shutdown.
+AVER_PHYS_API int32_t aver_phys_set_character_edge_removal_default(int32_t on);
+// Sets it for one character. Returns 0 for a dead handle.
+AVER_PHYS_API int32_t aver_phys_character_set_edge_removal(int32_t ch, int32_t on);
+// 1 if the character uses it, 0 if not or for a dead handle.
+AVER_PHYS_API int32_t aver_phys_character_edge_removal(int32_t ch);
+
 #ifdef __cplusplus
 }
 #endif

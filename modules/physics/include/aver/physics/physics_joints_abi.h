@@ -244,6 +244,57 @@ AVER_PHYS_API int32_t aver_phys_joint_set_limits(int32_t joint, int32_t axis,
 // dial's readout, a lift's floor indicator, a script waiting for a drawer to be fully open.
 AVER_PHYS_API int32_t aver_phys_joint_value(int32_t joint, float* outValue);
 
+// ---- Motor and limit springs -----------------------------------------------------------------------------
+
+// How a POSITION motor closes on its target: frequency in Hz (mass-independent: higher is stiffer and
+// faster) and a damping ratio (0 undamped, 1 critical). Jolt's default is 2 Hz / 1.0, which is slow for a
+// door that should snap shut and the only value aver_phys_joint_set_motor could reach before. Velocity
+// motors ignore it. `axis` picks the DOF on a six-DOF joint and is ignored otherwise. Hinge, slider and
+// six-DOF only; 0 otherwise or for a negative argument.
+AVER_PHYS_API int32_t aver_phys_joint_set_motor_spring(int32_t joint, int32_t axis,
+                                                       float frequencyHz, float damping);
+
+// SOFT LIMITS. With a spring, reaching a limit pushes back like a spring instead of a wall: the joint may
+// overshoot the limit briefly and is pulled back to it, which is a bump-stop on a suspension strut, a door
+// that gives at its end stop, a rope with some stretch. `frequencyHz` 0 is a hard limit again (damping is
+// then ignored); `damping` is a ratio, 1 critical.
+//
+// Hinge, slider and distance joints, and the three TRANSLATION limits of a six-DOF joint (all three are
+// set; Jolt has no spring for its rotation limits). Returns 0 for any other type, a dead handle or a
+// negative argument.
+AVER_PHYS_API int32_t aver_phys_joint_set_limit_spring(int32_t joint, float frequencyHz, float damping);
+
+// ---- Breakable joints ----------------------------------------------------------------------------------
+//
+// A joint that gives way when it is loaded too hard: a rope that snaps, a hinge torn off a door, a weld
+// that fails. After every fixed step the load the solver applied to hold the joint (impulse over that step,
+// divided by the step) is compared with the thresholds; past either, the joint is DISABLED -- as if
+// aver_phys_joint_set_enabled(joint, 0) -- and one break event is queued. Enable it again to repair it; it
+// stays armed.
+//
+// SI UNITS HERE, NOT THE REST OF THE ABI'S kg*cm: newtons and newton-metres, because breaking points are
+// quoted that way (a 10 kg weight hangs at ~98 N). `maxForceN` limits the linear part of the load (what
+// pulls the two anchor points apart), `maxTorqueNm` the angular part (what twists the bodies out of the
+// joint's rotational constraint). A threshold of 0 means that part is never checked; both 0 (the default
+// for every new joint) is unbreakable. Peak load in a single step counts, so a hard impact can break a
+// joint that holds fine at rest -- set the threshold above the impacts the joint should survive.
+//
+// Every joint type except rack-and-pinion (whose one lambda mixes force and torque) can break. Returns 0
+// for a dead handle, an unsupported type, or a negative or non-finite threshold.
+AVER_PHYS_API int32_t aver_phys_joint_set_break(int32_t joint, float maxForceN, float maxTorqueNm);
+
+// THE BREAK QUEUE PERSISTS UNTIL DRAINED, unlike contacts, which clear at the start of every aver_phys_step.
+// One step call can run several fixed steps, and the caller may poll less often than it steps; a break
+// must not be lost to either. Read with count/get, then call aver_phys_joint_break_clear. Events are in
+// the order they happened (joint handle order within one fixed step); the queue holds the newest 1024.
+// The joint named by an event may have been removed since.
+AVER_PHYS_API int32_t aver_phys_joint_break_count(void);
+// `outForceN`/`outTorqueNm` are the loads that broke it (either may be null, as may `outJoint`). Returns
+// 0 for an out-of-range index.
+AVER_PHYS_API int32_t aver_phys_joint_break_get(int32_t index, int32_t* outJoint,
+                                                float* outForceN, float* outTorqueNm);
+AVER_PHYS_API void aver_phys_joint_break_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

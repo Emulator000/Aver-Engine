@@ -177,6 +177,83 @@ public readonly struct CharacterBody : IEquatable<CharacterBody>
     }
     public bool SetGravityFactor(float factor) => Native.aver_phys_character_set_gravity_factor(Handle, factor) != 0;
 
+    // ---- Character vs character -------------------------------------------------------------------------
+
+    /// <summary>Whether characters collide with each other (the default) or walk through one another.
+    /// Applies to every character, existing and new; it does not change what rays and sensors see. A
+    /// lone character is unaffected. Set it after Physics.Init: shutting the world down resets it.</summary>
+    public static bool CharacterVsCharacter
+    {
+        get => Native.aver_phys_character_vs_character() != 0;
+        set => Native.aver_phys_set_character_vs_character(value ? 1 : 0);
+    }
+
+    // ---- Inner body -------------------------------------------------------------------------------------
+
+    /// <summary>Whether characters created from now on get an inner body (the default). Existing
+    /// characters are not touched; see <see cref="HasInnerBody"/>.</summary>
+    public static bool InnerBodyByDefault
+    {
+        set => Native.aver_phys_set_character_inner_body_default(value ? 1 : 0);
+    }
+
+    /// <summary>True if the character has an inner body: the kinematic rigid body that lets a raycast,
+    /// a sensor or a falling crate see it. Setting it rebuilds the character with everything it has and
+    /// the same handle.</summary>
+    public bool HasInnerBody
+    {
+        get => Native.aver_phys_character_has_inner_body(Handle) != 0;
+        set => Native.aver_phys_character_set_inner_body(Handle, value ? 1 : 0);
+    }
+
+    // ---- Can it stand? ---------------------------------------------------------------------------------
+
+    /// <summary>Whether a capsule of this radius and TOTAL height fits with the character's feet where
+    /// they are now -- the question to ask before standing up, since <see cref="SetShape"/> would
+    /// otherwise refuse. Changes nothing. To then apply it, move <see cref="Position"/> up by half the
+    /// change in height and call <see cref="SetShape"/>. Other characters and sensors do not count.</summary>
+    public bool CanSetShape(float radius, float height) =>
+        Native.aver_phys_character_can_set_shape(Handle, radius, height * 0.5f) != 0;
+
+    // ---- Contacts ---------------------------------------------------------------------------------------
+
+    /// <summary>One thing the character touched on its last update.</summary>
+    /// <param name="Body">The body (or other character) touched, <see cref="Body.None"/> for geometry
+    /// without a handle.</param>
+    /// <param name="Point">Where, engine centimetres.</param>
+    /// <param name="Normal">Unit normal pointing from the thing touched toward the character.</param>
+    public readonly record struct Contact(Body Body, Float3 Point, Float3 Normal);
+
+    /// <summary>How many things the character is touching: the floor, a wall, another character.
+    /// Predictive contacts are not counted. Rebuilt every fixed step.</summary>
+    public int ContactCount => Native.aver_phys_character_contact_count(Handle);
+
+    /// <summary>Contact <paramref name="index"/> (0 .. ContactCount-1), or null out of range.</summary>
+    public Contact? GetContact(int index)
+    {
+        var body = new int[1]; var p = new float[3]; var n = new float[3];
+        return Native.aver_phys_character_contact_get(Handle, index, body, p, n) != 0
+            ? new Contact(new Body(body[0]), new Float3(p[0], p[1], p[2]), new Float3(n[0], n[1], n[2]))
+            : null;
+    }
+
+    // ---- Internal edge removal ----------------------------------------------------------------------------
+
+    /// <summary>Whether characters created from now on discard ghost contacts on triangle-mesh seams
+    /// (the default). Costs a little per query; does nothing on primitives.</summary>
+    public static bool EdgeRemovalByDefault
+    {
+        set => Native.aver_phys_set_character_edge_removal_default(value ? 1 : 0);
+    }
+
+    /// <summary>Whether this character discards ghost contacts on mesh seams, so it crosses them
+    /// without catching.</summary>
+    public bool EdgeRemoval
+    {
+        get => Native.aver_phys_character_edge_removal(Handle) != 0;
+        set => Native.aver_phys_character_set_edge_removal(Handle, value ? 1 : 0);
+    }
+
     public bool Equals(CharacterBody other) => Handle == other.Handle;
     public override bool Equals(object? obj) => obj is CharacterBody c && Equals(c);
     public override int GetHashCode() => Handle;

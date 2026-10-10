@@ -166,6 +166,28 @@ public readonly struct Joint : IEquatable<Joint>
     public bool SetLimits(SixDofAxis axis, float minimum, float maximum) => SetLimits((int)axis, minimum, maximum);
     private bool SetLimits(int axis, float minimum, float maximum) => Native.aver_phys_joint_set_limits(Handle, axis, minimum, maximum) != 0;
 
+    /// <summary>How a POSITION motor closes on its target: <paramref name="frequencyHz"/> (higher is stiffer
+    /// and faster; Jolt's default is 2) and a damping ratio (1 is critical). Velocity motors ignore it.</summary>
+    public bool SetMotorSpring(float frequencyHz, float damping) => SetMotorSpring(0, frequencyHz, damping);
+    /// <summary>As <see cref="SetMotorSpring(float, float)"/>, for the named axis of a six-DOF joint.</summary>
+    public bool SetMotorSpring(SixDofAxis axis, float frequencyHz, float damping) => SetMotorSpring((int)axis, frequencyHz, damping);
+    private bool SetMotorSpring(int axis, float frequencyHz, float damping) => Native.aver_phys_joint_set_motor_spring(Handle, axis, frequencyHz, damping) != 0;
+
+    // ---- Soft limits and breaking -----------------------------------------------------------------------
+
+    /// <summary>Makes the joint's limits give like a spring instead of stopping dead: it may overshoot a
+    /// limit briefly and is pulled back. 0 Hz is a hard limit again. Hinge, slider, distance, and the
+    /// three translation limits of a six-DOF joint; false on any other type.</summary>
+    public bool SetLimitSpring(float frequencyHz, float damping) =>
+        Native.aver_phys_joint_set_limit_spring(Handle, frequencyHz, damping) != 0;
+
+    /// <summary>Arms the joint to break: when the load holding it passes <paramref name="maxForceN"/>
+    /// (linear) or <paramref name="maxTorqueNm"/> (angular), in newtons and newton-metres, it is disabled
+    /// and a <see cref="JointBreak"/> is queued (<see cref="Physics.JointBreaks"/>). 0 for a threshold
+    /// means that part is never checked; 0 for both is unbreakable. Set <see cref="Enabled"/> to repair.</summary>
+    public bool SetBreak(float maxForceN, float maxTorqueNm = 0f) =>
+        Native.aver_phys_joint_set_break(Handle, maxForceN, maxTorqueNm) != 0;
+
     // ---- Reading a joint back ------------------------------------------------------------------------------
 
     /// <summary>A hinge's current angle in radians, or a slider's current offset in centimetres. Null

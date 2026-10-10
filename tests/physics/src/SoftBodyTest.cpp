@@ -598,21 +598,15 @@ static void testCharacterEmbeddedInPoolDoesNotMoveIt() {
     AVER_INFO("  the character itself drifted {} cm from where it was dropped (proves real geometric overlap)",
               characterDrift);
 
-    // ASYMMETRY, MEASURED. The character reacts to the pool -- Jolt's general shape-cast collision
-    // (mechanism (1) in this section's opening comment) ejects it from the overlap by many times its
-    // own capsule radius. But the pool's own vertex, sitting the whole time inside that same capsule,
-    // moves NO MORE than it would have moved on its own with no character there at all: this is
-    // TODAY'S REAL BEHAVIOUR, not a guess, and this assertion is what would fail the day it changes.
+    // BOTH SIDES REACT since 2026-10-11: the character carries an inner rigid body
+    // (aver_phys_character_set_inner_body, on by default), which the soft body's collision solver sees.
+    // Before that the embedded vertex moved no more than the pool's own jiggle (measured ~2.5 cm vs ~2.5 cm).
     check(characterDrift > 10.0f,
           "the character was visibly ejected by the overlap, so the two shapes genuinely touched (" +
           std::to_string(characterDrift) + " cm)");
-    check(vertexMoved < controlVertexMoved + 5.0f,
-          "AS OF TODAY: the pool vertex embedded inside the character moved no more than the pool's own "
-          "natural jiggle explains (" + std::to_string(vertexMoved) + " cm vs " +
-          std::to_string(controlVertexMoved) + " cm unperturbed) -- the soft body's own collision solver "
-          "is not reacting to the character at all. If this ever fails, the passive path started "
-          "working: flip this assertion to require vertexMoved to clear the capsule's own radius, the "
-          "way testPressureHoldsAShellUp pins its own two ends.");
+    check(vertexMoved > controlVertexMoved + 5.0f,
+          "the pool vertex embedded inside the character is pushed by the character's inner body (" +
+          std::to_string(vertexMoved) + " cm vs " + std::to_string(controlVertexMoved) + " cm unperturbed)");
 }
 
 // The realistic version: the actual gameplay call (aver_phys_character_set_velocity, exactly what

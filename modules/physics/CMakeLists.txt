@@ -32,7 +32,13 @@ add_library(Aver.Physics SHARED
   # finish). Its own TU and header for the reason joints and characters are: a flat sheet of entry points
   # over the handle tables in src/PhysicsInternal.hpp, with the vehicle table and its teardown hooks
   # (destroyAllVehicles, releaseVehicleOfBody) defined here and called from PhysicsWorld.cpp.
-  src/PhysicsVehicle.cpp)
+  src/PhysicsVehicle.cpp
+  # Ragdolls from a skeleton (physics_ragdoll_abi.h): Jolt's Ragdoll with kinematic, limp and powered modes.
+  src/PhysicsRagdoll.cpp
+  # Shape casts, overlaps, multi-hit rays and point queries (physics_queries_abi.h).
+  src/PhysicsQueries.cpp
+  # Per-body extras: locked axes, continuous collision, breakable joints' events (physics_body_ext_abi.h).
+  src/PhysicsBodyExt.cpp)
 
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)
