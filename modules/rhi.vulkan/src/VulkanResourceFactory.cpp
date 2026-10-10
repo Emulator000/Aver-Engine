@@ -2410,6 +2410,16 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     const u32 rtCount = d.renderTargetCount < 4 ? d.renderTargetCount : 4;
     VkPipelineColorBlendAttachmentState blendAttachments[4];
     for (u32 i = 0; i < rtCount; ++i) blendAttachments[i] = blendAttachment;
+    // A blended multi-target pipeline writes target 0 only (IResourceFactory::createGraphicsPipeline's
+    // contract, as on D3D12): zeroed entries have colorWriteMask 0. Needs independentBlend.
+    if (d.blend != BlendMode::Opaque && rtCount > 1) {
+        if (dev_->independentBlend_) {
+            for (u32 i = 1; i < rtCount; ++i) blendAttachments[i] = VkPipelineColorBlendAttachmentState{};
+        } else {
+            AVER_WARN("[RHI.Vulkan] a blended {}-target pipeline needs independentBlend to leave targets 1+ alone; "
+                      "this device lacks it, so they are blended too", rtCount);
+        }
+    }
     VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     blend.attachmentCount = rtCount;
     blend.pAttachments = blendAttachments;

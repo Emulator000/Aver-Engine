@@ -684,8 +684,9 @@ public:
 
     // The opaque scene, copied, so a translucent surface can read what's behind it. Returns a copy
     // of the scene colour taken just BEFORE blended draws replay. One copy, taken once: a second
-    // translucent layer samples a background missing the first. 0 when unavailable (before first
-    // resize, unimplemented backend, or under MSAA where CopyResource into single-sample is invalid).
+    // translucent layer samples a background missing the first. 0 when unavailable: before first
+    // resize, unimplemented backend, D3D12 under MSAA (CopyResource into single-sample is invalid;
+    // Vulkan copies the resolved image), and on Vulkan until the first blended draw allocates it.
     virtual TextureHandle sceneColorBackdropTexture() { return 0; }
 
     // ---------------------------------------------------------------------------------------

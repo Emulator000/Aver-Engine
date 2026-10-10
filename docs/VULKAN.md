@@ -12,7 +12,7 @@ Two modules, both new since the 2026-08-02 draft:
 
 | Module | Files | Purpose |
 |---|---|---|
-| `Aver.RHI.Vulkan` (`modules/rhi.vulkan`) | `VulkanDevice.cpp` (4065 lines), `VulkanResourceFactory.cpp` (3366 lines), `VulkanCommon.hpp` (2206 lines), `VulkanRenderContext.cpp` (1695 lines), `VulkanPipeline.cpp` (687 lines, **not built** — see below), `VulkanShaderCompiler.cpp` (472 lines) | The `IDevice` implementation: instance/device bring-up, swapchain, the fixed scene/sky/line/mesh pipelines, resources, binding, barriers, acceleration structures, capture. |
+| `Aver.RHI.Vulkan` (`modules/rhi.vulkan`) | `VulkanDevice.cpp` (4065 lines), `VulkanResourceFactory.cpp` (3366 lines), `VulkanCommon.hpp` (2206 lines), `VulkanRenderContext.cpp` (1695 lines), `VulkanShaderCompiler.cpp` (472 lines) | The `IDevice` implementation: instance/device bring-up, swapchain, the fixed scene/sky/line/mesh pipelines, resources, binding, barriers, acceleration structures, capture. |
 | `Aver.RHI.Vulkan.ImGui` (`modules/rhi.vulkan.imgui`) | `ImGuiVulkanUiBackend.cpp` | The concrete Dear ImGui backend, structural twin of `modules/rhi.d3d12.imgui`, plugged into `Aver.RHI.Vulkan`'s `vkb::IUiBackend` seam. Only `Sandbox` links it. |
 
 `modules/rhi.vulkan/src/VulkanCommon.hpp` declares `class VulkanDevice final : public IDevice` with
@@ -31,6 +31,28 @@ range are shared-code changes (a texture-copy RHI addition, a line-mesh leak fix
 and cloud/atmosphere work) that happened to also touch a Vulkan file, or are the two 2026-08-10
 commits (`c7c6147`, `8a3eaf5`) that got the module compiling and vendored a working shader compiler
 for it.
+
+## Translucency (blended replay)
+
+`caps().blendedReplay` is true. `setDrawBlended(true)` makes `drawMesh` hand the draw to every feature
+(`submitDraw(..., blended=true)`) and capture it instead of drawing; `endFrame` replays the captures
+after the sky and before `transparentPass`, furthest first (squared distance of `world[12..14]` to
+the camera), through the scene feature's `scenePipeline(..., blended=true)`. Glass and water no longer
+draw opaque, and `transparentPass` (particles) now runs on this backend. With no blended draws the
+frame records exactly as before.
+
+A draw that samples the scene behind it (`blendedDrawReadsBackdrop`) needs a copy of the scene colour,
+and a copy cannot happen inside a dynamic-rendering scope. So the replay closes the scene scope (under
+MSAA that resolves inline into `sceneResolved_`), copies the resolved image into the backdrop texture
+(`sceneColorBackdropTexture()`), and reopens the scope with LOAD ops. Each further overlapping layer
+re-captures, up to 8 per frame, as on D3D12. The backdrop is allocated only after the first blended
+draw (the handle is 0 until then, so that first frame's translucent draws read a cleared slot) and is
+dropped with the post targets on a scene resize. Unlike D3D12 it works under MSAA, since the resolved
+image is what gets copied. Compute never runs between the split scopes.
+
+Known gap: the replay is unverified on a Vulkan GPU in this tree (no gate runs this backend).
+
+---
 
 ## Why no SDK is needed
 
@@ -284,14 +306,10 @@ the same harness D3D12 is held to.
 ## What is not done
 
 - **The cascaded shadow map bug above.** The single confirmed rendering defect.
-- **`VulkanPipeline.cpp` is dead code that still exists.** 687 lines, deliberately excluded from
-  `modules/rhi.vulkan/CMakeLists.txt`'s `SOURCES` list. It holds an unfinished file split: six
-  functions (`tableSetLayout`, `getOrCreateSampler`, `descriptorLayout`, both pipeline creators, the
-  free `pushConstantLayout`) were moved out of `VulkanResourceFactory.cpp` and the originals were
-  never deleted — all six now **differ** between the two files. `26220c6`'s own investigation proved
-  by linker warning (`LNK4006 ... second definition ignored`, six times) that
-  `VulkanResourceFactory.cpp`'s copies are the ones that link; `VulkanPipeline.cpp` compiles to
-  nothing live. It stays on disk, unbuilt, as a trap for whoever edits the "wrong" copy next.
+- **`VulkanPipeline.cpp` is gone.** It was an unfinished, never-built file split that duplicated six
+  functions of `VulkanResourceFactory.cpp` (the linker discarded its copies, `LNK4006`), so deleting
+  it changed no behaviour. The one thing only it had, masking targets 1+ of a blended multi-target
+  pipeline (`independentBlend`), now lives in `VulkanResourceFactory::createGraphicsPipeline`.
 - **9 of the 10 remaining validation errors are a genuine gap, not noise**: 7 on the mesh-shader
   stage (`MSVoxel`'s `gVerts`/`gIndices`/`MeshCB` — the fixed compute-driven mesh-geometry path this
   backend has not implemented) and some on the instancing path where a
@@ -340,9 +358,6 @@ In rough order of leverage:
    all, and cannot ever be turned on by default responsibly.
 3. **Install a LunarG SDK on a development machine** and re-run with `--debug-layer` before trusting
    the "10 errors" figure as current.
-4. **Finish or delete the `VulkanPipeline.cpp` split.** Two files with six functions that disagree is
-   a standing hazard, not a cosmetic issue — the linker resolves it silently today, but "silently" is
-   exactly the failure mode this project has been burned by before.
-5. **Implement the mesh-geometry compute path** (`gVerts`/`gIndices`/`MeshCB`) this backend currently
+4. **Implement the mesh-geometry compute path** (`gVerts`/`gIndices`/`MeshCB`) this backend currently
    falls back around, to close the 9 remaining validation errors for real rather than routing past
    them.

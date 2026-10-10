@@ -1066,8 +1066,9 @@ void VulkanDevice::removeRenderFeature(IRenderFeature* f) {
 void VulkanDevice::queryCaps() {
     caps_ = {};
     caps_.computeShaders = true;   // core 1.0 mandates a compute-capable queue existing
-    // computeInScenePass, gBuffer and blendedReplay stay false until this backend implements them:
-    // the scene scope would have to end around a dispatch, and the G-buffer getters are not overridden.
+    // computeInScenePass and gBuffer stay false until this backend implements them: the scene scope
+    // would have to end around a dispatch, and the G-buffer getters are not overridden.
+    caps_.blendedReplay = true;   // endFrame replays setDrawBlended draws after the sky (scene scope split for the backdrop copy)
 
     caps_.msaaMask = 1;
     caps_.maxMsaaSamples = 1;
@@ -1661,6 +1662,8 @@ bool VulkanDevice::createMsaaColor() {
     ci.samples = toVkSampleCount(sampleCount_);
     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     ci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    // Single-sample, this image IS the scene colour: the blended backdrop and AverSR copy out of it.
+    if (sampleCount_ == 1) ci.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     toSceneReferred(clear_, sceneClear_);
     if (!createImageCommitted(*this, ci, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, msaaColor_, msaaColorMemory_, "scene colour")) return false;
@@ -2466,6 +2469,170 @@ void VulkanDevice::packAtmosphere(const SkyAtmosphere& s) {
     }
 }
 
+// The scene colour a translucent surface reads. Allocated only once a blended draw has been seen (one
+// scene-sized HDR image a glass-free scene never pays for); 0 until then, and the feature rebinds when
+// the handle changes (VoxiRenderer::beginScene). Dropped with the post targets on a scene resize.
+TextureHandle VulkanDevice::sceneColorBackdropTexture() {
+    if (!blendedSeen_ || !rhiFactory_ || !hasSwapchain_ || !sceneWidth_ || !sceneHeight_) return 0;
+    if (blendBackdropTex_ && blendBackdropW_ == sceneWidth_ && blendBackdropH_ == sceneHeight_) return blendBackdropTex_;
+    if (blendBackdropTex_) { rhiFactory_->destroyTexture(blendBackdropTex_); blendBackdropTex_ = 0; }
+    TextureDesc td;
+    td.width = sceneWidth_; td.height = sceneHeight_;
+    td.format = fromVkFormat(kVkSceneColorFormat);
+    td.bind = ResourceBind::ShaderResource;
+    td.initialState = ResourceState::ShaderResource;
+    td.debugName = "Blended.Backdrop";
+    blendBackdropTex_ = rhiFactory_->createTexture(td);
+    blendBackdropW_ = sceneWidth_; blendBackdropH_ = sceneHeight_;
+    return blendBackdropTex_;
+}
+
+// Replays blendedDraws_ furthest first through the owner feature's blended pipeline, inside the open
+// scene scope. A draw that reads the backdrop first has the scope closed (that resolves MSAA inline),
+// the resolved scene colour copied into the backdrop, and the scope reopened with LOAD -- Vulkan's
+// stand-in for D3D12's ResolveSubresource/CopyResource mid-pass. No blended draws: never called, so
+// the frame records as it always did. Compute never runs here (dispatch is not scope-wrapped).
+void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
+    IRenderFeature* owner = nullptr;
+    for (IRenderFeature* f : features_) {
+        if (f->overridesScenePipeline()) { owner = f; break; }
+    }
+    const bool featureMs = msActive_ && meshPso_;
+    const PipelineHandle blendedPso = owner ? owner->scenePipeline(featureMs, false, true) : 0;
+    if (!blendedPso) {
+        // 0 for blended=true means no blended variant: drop rather than draw opaque.
+        if (!blendedPipelineMissingWarned_) {
+            AVER_WARN("[RHI.Vulkan] {} blended draw(s) this frame but no feature offers "
+                      "scenePipeline(..., blended=true); dropping them rather than drawing them "
+                      "opaque (said once per frame)", blendedDraws_.size());
+            blendedPipelineMissingWarned_ = true;
+        }
+        return;
+    }
+
+    // Backdrop copy source: the resolved image under MSAA, else the scene colour itself. Size check is
+    // load-bearing: the backdrop can briefly lag a scene resize.
+    const bool msaa = sampleCount_ > 1;
+    const VkImage colorImg = msaa ? sceneResolved_ : msaaColor_;
+    RhiTexture* bt = (blendBackdropTex_ && rhiFactory_ && blendBackdropW_ == sceneWidth_ && blendBackdropH_ == sceneHeight_)
+                         ? rhiFactory_->texture(blendBackdropTex_) : nullptr;
+    const bool canCapture = bt && bt->image && colorImg;
+    const VkPipelineStageFlags2 sampleStages = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    const VkViewport vp{vpW_ ? static_cast<f32>(vpX_) : 0.0f, vpW_ ? static_cast<f32>(vpY_) : 0.0f,
+                        vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_),
+                        vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_), 0.0f, 1.0f};
+    const VkRect2D sc{{static_cast<i32>(vp.x), static_cast<i32>(vp.y)}, {static_cast<u32>(vp.width), static_cast<u32>(vp.height)}};
+
+    auto captureBackdrop = [&]() {
+        if (!canCapture) return;
+        popRenderScope(cmd, sceneScopeOpened_);   // ends the pass; under MSAA that resolves into sceneResolved_
+        sceneScopeOpened_ = false;
+        VkImageMemoryBarrier2 pre[2] = {
+            imgBarrier(colorImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT),
+            imgBarrier(bt->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, sampleStages,
+                       VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT),
+        };
+        pipelineBarrier(api_, cmd, pre, 2);
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.extent = {sceneWidth_, sceneHeight_, 1};
+        api_.CmdCopyImage(cmd, colorImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, bt->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        // Back to attachment use for the LOAD scope. Under MSAA the multisampled target and depth keep
+        // their layout but still need the store -> load dependency across the two scopes.
+        constexpr VkAccessFlags2 kColorRw = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        VkImageMemoryBarrier2 post[4];
+        u32 n = 0;
+        post[n++] = imgBarrier(colorImg, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                               VK_ACCESS_2_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                               kColorRw, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+        post[n++] = imgBarrier(bt->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
+                               VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, sampleStages);
+        if (msaa)
+            post[n++] = imgBarrier(msaaColor_, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                   kColorRw, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+        post[n++] = imgBarrier(depthBuffer_, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                               VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                               VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT);
+        pipelineBarrier(api_, cmd, post, n);
+        sceneScopeOpened_ = openSceneScope(cmd, /*load=*/true);
+        api_.CmdSetViewport(cmd, 0, 1, &vp);
+        api_.CmdSetScissor(cmd, 0, 1, &sc);
+        if (!blendBackdropCopyLogged_) {
+            blendBackdropCopyLogged_ = true;
+            AVER_INFO("[RHI.Vulkan] blended backdrop: {} {}x{} from the scene target",
+                      msaa ? "resolved" : "copied", blendBackdropW_, blendBackdropH_);
+        }
+    };
+
+    // Back-to-front: furthest first, by squared distance of the world translation (world[12..14]) to the camera.
+    const f32 cx = frameCB_.camPos[0], cy = frameCB_.camPos[1], cz = frameCB_.camPos[2];
+    std::sort(blendedDraws_.begin(), blendedDraws_.end(), [cx, cy, cz](const BlendedDraw& a, const BlendedDraw& b) {
+        const f32 adx = a.world[12] - cx, ady = a.world[13] - cy, adz = a.world[14] - cz;
+        const f32 bdx = b.world[12] - cx, bdy = b.world[13] - cy, bdz = b.world[14] - cz;
+        return (adx * adx + ady * ady + adz * adz) > (bdx * bdx + bdy * bdy + bdz * bdz);
+    });
+
+    // Bound once: pipeline, descriptor sets and constants survive the scope split above.
+    rhiContext_->setPipeline(blendedPso);
+    rhiContext_->setBindlessTable(owner->sceneBindlessTable());
+    if (const BindingSetHandle bs = owner->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
+    const void* cb = nullptr; u32 cbBytes = 0;
+    if (owner->sceneConstants(&cb, &cbBytes) && cb && cbBytes) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
+
+    u32 layerResolves = 0, captures = 0, drawsDone = 0;
+    bool captured = false, capReached = false;
+    for (const BlendedDraw& bd : blendedDraws_) {
+        // Stale handle: a capture can outlive its mesh within the frame.
+        if (bd.mesh == 0 || bd.mesh > meshes_.size() || !meshes_[bd.mesh - 1].alive) continue;
+        ++drawsDone;
+        // Only draws that sample the backdrop need it; each later layer re-captures so it sees the ones drawn since.
+        if (owner->blendedDrawReadsBackdrop(bd.binding.constants, bd.binding.bytes)) {
+            if (!captured) {
+                captureBackdrop(); ++captures; captured = true;
+            } else if (layerResolves < kMaxBlendLayerResolves) {
+                ++layerResolves;
+                captureBackdrop(); ++captures;
+            } else {
+                capReached = true;
+                if (!blendLayerCapWarned_) {
+                    blendLayerCapWarned_ = true;
+                    AVER_WARN("[RHI.Vulkan] more than {} overlapping translucent layers this frame; the ones "
+                              "beyond that composite against a backdrop missing the nearer surfaces (said once)",
+                              kMaxBlendLayerResolves);
+                }
+            }
+        }
+        rhiContext_->setDrawBinding(bd.binding.set, bd.binding.constants, bd.binding.bytes);
+        f32 fc[kObjectConstantDwords];
+        std::memcpy(fc, bd.world, 16 * sizeof(f32));
+        std::memcpy(fc + 16, bd.color, 4 * sizeof(f32));
+        fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;   // unlit blended mesh not plumbed, as on D3D12
+        writeShadingConstants(fc);
+        rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
+        if (featureMs) rhiContext_->dispatchMeshFor(bd.mesh);
+        else           rhiContext_->drawMesh(bd.mesh);
+    }
+
+    // Logged on CHANGE, power-of-two spaced.
+    if (drawsDone != blendStatDrawsLogged_ || layerResolves != blendStatResolvesLogged_ || captures != blendStatCapturesLogged_) {
+        ++blendStatChanges_;
+        if ((blendStatChanges_ & (blendStatChanges_ - 1)) == 0)
+            AVER_INFO("[RHI.Vulkan] blended replay: {} translucent draw(s), {} layer re-capture(s) (cap {}){}, {} backdrop capture(s)",
+                      drawsDone, layerResolves, kMaxBlendLayerResolves, capReached ? ", cap reached" : "", captures);
+        blendStatDrawsLogged_ = drawsDone;
+        blendStatResolvesLogged_ = layerResolves;
+        blendStatCapturesLogged_ = captures;
+    }
+}
+
 // ================================================================================================
 // 11. The central per-instance draw. Structurally identical to D3D12Device::drawMesh: submitDraw on
 //     every feature, then suppression, then an overridesScenePipeline feature's own PSO/bindings,
@@ -2489,25 +2656,32 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     // D3D12Device::drawMesh's twin and IDevice::setWireframe.
     if (wireframe_) {
         for (IRenderFeature* f : features_)
-            f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
+            f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, drawBlended_);
         editorLines_.queueWire(mesh, world, meshVertexBuffer(mesh) != 0);
         return;
     }
-    // `blended` explicit false: translucent meshes are D3D12-only (IDevice::setDrawBlended, RHI.hpp:613); VulkanDevice's setter is a no-op so drawBlended() always answers false -- both explicit `false`s below say so rather than leaning on a default.
+    // Blended draw: every feature sees it (the path tracer still wants the instance), then it leaves the
+    // opaque path. endFrame replays it after the sky, whose depth-EQUAL fill would paint over it, so
+    // it is not gated on suppressesScene here; endFrame gates on frameSuppressed_. D3D12Device's twin.
+    if (drawBlended_) {
+        for (IRenderFeature* f : features_)
+            f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/true);
+        if (!blendedSeen_) { blendedSeen_ = true; sceneColorBackdropTexture(); }   // this frame's replay can already fill it
+        BlendedDraw& bd = blendedDraws_.emplace_back();
+        bd.mesh = mesh;
+        std::memcpy(bd.world, world, 16 * sizeof(f32));
+        std::memcpy(bd.color, color, 4 * sizeof(f32));
+        bd.metallic = metallic;
+        bd.roughness = roughness;
+        storeDrawBinding(bd.binding, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
+        return;
+    }
     for (IRenderFeature* f : features_)
         f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
-    // CONCRETELY WRONG, not just unsupported: a blended glass mesh takes the same opaque path --
-    // scenePso_/meshPso_ each hardcode an opaque VkPipelineColorBlendAttachmentState
-    // (createPipeline() ~1321, initMeshShaders() ~1490), with no BlendMode read anywhere; it paints
-    // solid, and nothing logs or asserts it.
-    // TODO: override setDrawBlended/drawBlended (sticky, like D3D12Device's); after the submitDraw
-    // loop above (so e.g. the path tracer still sees the blended instance) divert blended meshes to
-    // a per-frame vector; in endFrame, after the sky draw (its depth-EQUAL no-write PSO would paint
-    // over blended geometry drawn earlier) and before transparentPass, sort that vector back-to-front
-    // and replay through a blendEnable=VK_TRUE PSO variant (toVkBlendAttachment already has one for
-    // BlendMode::AlphaBlend, VulkanResourceFactory.cpp:500-528) with depth-write off.
+    // The backend's own scenePso_/meshPso_ below are opaque only: translucency needs an
+    // overridesScenePipeline feature offering scenePipeline(..., blended=true) (see endFrame's replay).
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
         // A prepassed draw must reuse the same geometry path its depth was written through (the input
@@ -2749,6 +2923,9 @@ void VulkanDevice::beginFrame() {
 
     postRing_[frameIndex_].used = 0;
     drawBinding_ = defaultDrawBinding_;
+    drawBlended_ = false;   // sticky per-draw state resets like drawBinding_
+    blendedDraws_.clear();
+    blendedPipelineMissingWarned_ = false;
     depthOnlyMesh_ = 0;   // backstop; drawMesh consumes it -- see D3D12Device's beginFrame
     wireframeFrame_ = wireframe_;   // re-latched by this frame's own setWireframe(true), if any
     seedSkinTargets();
@@ -2774,38 +2951,7 @@ void VulkanDevice::beginFrame() {
                                                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
     pipelineBarrier(api_, cmd, startBarriers, startCount);
 
-    VkRenderingAttachmentInfo colorAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    colorAtt.imageView = msaaColorView_;
-    colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    std::memcpy(colorAtt.clearValue.color.float32, sceneClear_, sizeof(sceneClear_));
-    // AND sceneResolvedView_: createPostTargets builds the resolve target only when sampleCount_>1
-    // and gets that far, so "MSAA is on" alone doesn't guarantee somewhere to resolve to -- asking
-    // for a resolve without one is rejected outright ("resolveMode ... is not VK_RESOLVE_MODE_NONE,
-    // resolveImageView must not be VK_NULL_HANDLE"); the two guards disagreeing was the bug.
-    if (msaa && sceneResolvedView_) {
-        // The MSAA resolve happens HERE, ending this scope -- no separate vkCmdResolveImage call
-        // exists in this backend; VkRenderingAttachmentInfo's resolveMode/resolveImageView/
-        // resolveImageLayout fields do it inline, simpler than D3D12's ResolveSubresource, not missing.
-        colorAtt.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
-        colorAtt.resolveImageView = sceneResolvedView_;
-        colorAtt.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    }
-    VkRenderingAttachmentInfo depthAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    depthAtt.imageView = depthView_;
-    depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAtt.clearValue.depthStencil = {1.0f, 0};
-
-    // The rendering scope's area is the SCENE extent -- msaaColorView_/depthView_ are now sceneWidth_ x sceneHeight_, and Vulkan's dynamic rendering requires renderArea to fit inside every attachment.
-    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
-    ri.renderArea = {{0, 0}, {sceneWidth_, sceneHeight_}};
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = 1; ri.pColorAttachments = &colorAtt;
-    ri.pDepthAttachment = &depthAtt;
-    sceneScopeOpened_ = pushRenderScope(cmd, ri);
+    sceneScopeOpened_ = openSceneScope(cmd, /*load=*/false);
 
     // vpX_/vpY_/vpW_/vpH_ are already scene-space (setViewportRect rescales via scaleToSceneW/H
     // before storing); the "no sub-rect" fallback must be the scene's own extent, or renderScale_<1
@@ -2857,6 +3003,42 @@ void VulkanDevice::beginFrame() {
     // point binds its own before drawing (see drawMesh's own comment), so there's no "last bound" cache to save.
 }
 
+bool VulkanDevice::openSceneScope(VkCommandBuffer cmd, bool load) {
+    const VkAttachmentLoadOp loadOp = load ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+    VkRenderingAttachmentInfo colorAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    colorAtt.imageView = msaaColorView_;
+    colorAtt.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAtt.loadOp = loadOp;
+    colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    std::memcpy(colorAtt.clearValue.color.float32, sceneClear_, sizeof(sceneClear_));
+    // AND sceneResolvedView_: createPostTargets builds the resolve target only when sampleCount_>1
+    // and gets that far, so "MSAA is on" alone doesn't guarantee somewhere to resolve to -- asking
+    // for a resolve without one is rejected outright ("resolveMode ... is not VK_RESOLVE_MODE_NONE,
+    // resolveImageView must not be VK_NULL_HANDLE"); the two guards disagreeing was the bug.
+    if (sampleCount_ > 1 && sceneResolvedView_) {
+        // The MSAA resolve happens HERE, ending this scope -- no separate vkCmdResolveImage call
+        // exists in this backend; VkRenderingAttachmentInfo's resolveMode/resolveImageView/
+        // resolveImageLayout fields do it inline, simpler than D3D12's ResolveSubresource, not missing.
+        colorAtt.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+        colorAtt.resolveImageView = sceneResolvedView_;
+        colorAtt.resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    VkRenderingAttachmentInfo depthAtt{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    depthAtt.imageView = depthView_;
+    depthAtt.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAtt.loadOp = loadOp;
+    depthAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAtt.clearValue.depthStencil = {1.0f, 0};
+
+    // The rendering scope's area is the SCENE extent -- msaaColorView_/depthView_ are now sceneWidth_ x sceneHeight_, and Vulkan's dynamic rendering requires renderArea to fit inside every attachment.
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, {sceneWidth_, sceneHeight_}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1; ri.pColorAttachments = &colorAtt;
+    ri.pDepthAttachment = &depthAtt;
+    return pushRenderScope(cmd, ri);
+}
+
 // KNOWN DEFECT, MEASURED, NOT FIXED: a pass wanting its own render target doesn't get one -- this
 // joins whatever scope is already open and discards the caller's VkRenderingInfo, which is right for
 // two owners sharing one command buffer (dynamic-rendering scopes can't nest) but wrong when the
@@ -2891,23 +3073,44 @@ void VulkanDevice::endFrame() {
     if (!hasSwapchain_) return;
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
 
+    // Scene-space rect shared by the sky, the blended replay and the transparent pass (see beginFrame's fallback).
+    const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
+    const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
+    const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
+    const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
+    const VkViewport sceneVp{rx, ry, rw, rh, 0.0f, 1.0f};
+    const VkRect2D sceneSc{{static_cast<i32>(rx), static_cast<i32>(ry)}, {static_cast<u32>(rw), static_cast<u32>(rh)}};
+
     // THE DEFERRED SKY DRAW -- same timing as D3D12Device::endFrame: after every opaque drawMesh call, before the rendering scope closes (frameSuppressed_, not sceneSuppressed_ -- see D3D12's comment).
     // Not in the wireframe view, whose background is black (D3D12's twin says why).
     if (skyEnabled_ && !frameSuppressed_ && !wireframeFrame_) {
         // Still inside the rendering scope over msaaColorView_/depthView_ (SCENE-sized) -- see beginFrame's fallback.
-        const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
-        const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
-        const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(sceneWidth_);
-        const f32 rh = vpW_ ? static_cast<f32>(vpH_) : static_cast<f32>(sceneHeight_);
-        VkViewport vp{rx, ry, rw, rh, 0.0f, 1.0f};
-        VkRect2D sc{{static_cast<i32>(rx), static_cast<i32>(ry)}, {static_cast<u32>(rw), static_cast<u32>(rh)}};
-        api_.CmdSetViewport(cmd, 0, 1, &vp);
-        api_.CmdSetScissor(cmd, 0, 1, &sc);
+        api_.CmdSetViewport(cmd, 0, 1, &sceneVp);
+        api_.CmdSetScissor(cmd, 0, 1, &sceneSc);
         const u32 zeroOffset = 0;
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPso_);
         api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipelineLayout_, kVkSetConstants, 1,
                                    &sceneFrameSet_[frameIndex_], 1, &zeroOffset);
         api_.CmdDraw(cmd, 3, 1, 0, 0);
+    }
+
+    // Blended mesh flush, between the sky (its depth-EQUAL fill would paint over translucency) and the
+    // transparent pass. Gated on frameSuppressed_ like D3D12; a scene feature that composited the
+    // translucency in its own pass owns those draws this frame. Needs our scope open: replay splits it.
+    bool blendedInScene = false;
+    if (sceneSuppressed_) for (IRenderFeature* f : features_) blendedInScene = blendedInScene || f->blendedDrawsResolvedInScene();
+    if (!blendedDraws_.empty() && rhiContext_ && sceneScopeOpened_ && !frameSuppressed_ && !blendedInScene) {
+        api_.CmdSetViewport(cmd, 0, 1, &sceneVp);
+        api_.CmdSetScissor(cmd, 0, 1, &sceneSc);
+        replayBlendedDraws(cmd);
+    }
+
+    // IRenderFeature::transparentPass: after opaque drawMesh, sky and blended meshes; depth test on, write off.
+    // Same gates as D3D12 (a ray-driven frame's particles are as real as a rastered one's; not in wireframe).
+    if (rhiContext_ && sceneScopeOpened_ && !frameSuppressed_ && !wireframeFrame_) {
+        api_.CmdSetViewport(cmd, 0, 1, &sceneVp);
+        api_.CmdSetScissor(cmd, 0, 1, &sceneSc);
+        for (IRenderFeature* f : features_) f->transparentPass(*rhiContext_);
     }
 
     if (!sceneSuppressed_ || true) {
@@ -3349,8 +3552,10 @@ void VulkanDevice::releasePostTargets() {
     if (rhiFactory_) {
         if (sceneColorTex_) { rhiFactory_->destroyTexture(sceneColorTex_); sceneColorTex_ = 0; }
         if (presentHdrTex_) { rhiFactory_->destroyTexture(presentHdrTex_); presentHdrTex_ = 0; }
+        if (blendBackdropTex_) { rhiFactory_->destroyTexture(blendBackdropTex_); blendBackdropTex_ = 0; }   // scene-sized; sceneColorBackdropTexture() remakes it
     }
     sceneColorTexW_ = sceneColorTexH_ = presentHdrTexW_ = presentHdrTexH_ = 0;
+    blendBackdropW_ = blendBackdropH_ = 0;
     if (postDescriptorPool_) api_.ResetDescriptorPool(device_, postDescriptorPool_, 0);   // safe: waitForGpu() always precedes this (resize/setSampleCount)
     postSets_.clear();
     bloomMips_ = bloomW_ = bloomH_ = 0;
@@ -3442,7 +3647,7 @@ bool VulkanDevice::createPostTargets() {
         ci.mipLevels = 1; ci.arrayLayers = 1;
         ci.samples = VK_SAMPLE_COUNT_1_BIT;
         ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;   // TRANSFER_SRC: the resolved scene is copied out (blended backdrop, AverSR)
         ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (!createImageCommitted(*this, ci, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, sceneResolved_, sceneResolvedMemory_, "scene resolve")) return false;
         VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};

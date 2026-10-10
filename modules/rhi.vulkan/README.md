@@ -76,4 +76,4 @@ It replaced a per-block needle that handled only `PerObject` at b1. **A cbuffer'
 
 ## Also worth knowing
 
-`src/VulkanPipeline.cpp` is **on disk and deliberately not in the build**. It holds an unfinished file split: six functions moved out of `VulkanResourceFactory.cpp` whose originals were never deleted, and all six **differ**. The linker proved which side wins. See `CMakeLists.txt` for the full story before touching either file.
+The old unbuilt `src/VulkanPipeline.cpp` (an unfinished split of `VulkanResourceFactory.cpp`) is deleted; its one live idea, masking blend on render targets 1+ of a blended pipeline, moved into `createGraphicsPipeline`.

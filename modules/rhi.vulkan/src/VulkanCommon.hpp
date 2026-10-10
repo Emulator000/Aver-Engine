@@ -1426,6 +1426,10 @@ public:
     void setDefaultDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
         storeDrawBinding(defaultDrawBinding_, set, constants, bytes);
     }
+    // ---- translucency: sticky like setDrawBinding; drawMesh captures, endFrame replays (IDevice::setDrawBlended) ----
+    void setDrawBlended(bool blended) override { drawBlended_ = blended; }
+    bool drawBlended() const override { return drawBlended_; }
+    TextureHandle sceneColorBackdropTexture() override;
 
     // ---- same-frame depth prepass -- full contract on IDevice (RHI.hpp); mirrors D3D12Device.cpp
     // :1005-1013. OFF by default: --depth-prepass measured as a LOSS on this engine's scenes
@@ -1675,6 +1679,32 @@ private:
 
     DrawBinding drawBinding_{}, defaultDrawBinding_{};
     bool drawBindingIgnored_ = false;   // the "backend's own pipeline drops it" warning, said once
+
+    // ---- translucency: the blended-mesh path (twin of D3D12Device's) ----
+    bool drawBlended_ = false;
+    struct BlendedDraw {
+        MeshHandle mesh = 0;
+        f32 world[16] = {};
+        f32 color[4] = {};
+        f32 metallic = 0.0f, roughness = 0.0f;
+        DrawBinding binding{};
+    };
+    std::vector<BlendedDraw> blendedDraws_;   // filled by drawMesh, sorted and drained by endFrame, cleared at beginFrame
+    bool blendedPipelineMissingWarned_ = false;
+    bool blendedSeen_ = false;   // a blended draw has been submitted: only then is the backdrop allocated (scene-sized HDR)
+    // Opens the scene scope over msaaColorView_/depthView_ (+ the MSAA resolve target): CLEAR at beginFrame,
+    // LOAD when endFrame reopens it after the backdrop copy. Returns pushRenderScope's result.
+    bool openSceneScope(VkCommandBuffer cmd, bool load);
+    // endFrame: replays blendedDraws_ back to front inside the scene scope. See its definition.
+    void replayBlendedDraws(VkCommandBuffer cmd);
+    // Copy of the scene colour a translucent surface reads (t10 in Voxi). Scene-sized, created lazily
+    // by sceneColorBackdropTexture(), refilled by endFrame's replay (the scene scope is split around the copy).
+    TextureHandle blendBackdropTex_ = 0;
+    u32           blendBackdropW_ = 0, blendBackdropH_ = 0;
+    bool          blendBackdropCopyLogged_ = false;
+    static constexpr u32 kMaxBlendLayerResolves = 8;   // re-captures per frame, same cap as D3D12
+    bool          blendLayerCapWarned_ = false;
+    u32 blendStatDrawsLogged_ = ~0u, blendStatResolvesLogged_ = ~0u, blendStatCapturesLogged_ = ~0u, blendStatChanges_ = 0;
 
     // ---- same-frame depth prepass (see IDevice::setDepthPrepassEnabled and drawMesh below) --
     // field-for-field mirror of D3D12Device's own trio (D3D12Device.cpp:1311-1320); see that
