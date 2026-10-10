@@ -6,6 +6,7 @@
 #include "SandboxApp.hpp"
 #include "aver/assets/LevelSky.hpp"
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
+#include "InstanceSetEditor.hpp"   // makeInstanceSetEditor (.ocinst); not pulled in by SandboxApp.hpp
 #include "aver/game/GameCamera.hpp"
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
@@ -445,6 +446,7 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeParticleEditor);  // .ocparticle
 #endif
     assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);  // .ocfoliage
+    assetEditors_.registerFactory(&editor::makeInstanceSetEditor);  // .ocinst
     assetEditors_.registerFactory(&editor::makeInputSchemeEditor);  // .ocinput
     assetEditors_.registerFactory(&editor::makeTextureEditor);  // image formats, read-only
     {
@@ -461,6 +463,20 @@ void SandboxApp::onInit(Engine& e)  {
         };
         editor::setInputSchemeEditorHooks(std::move(hooks));
     }
+#if AVER_MODULE_SCENE
+    {
+        // The .ocinst tab asks the level whether it uses the file, and for the streaming rebake.
+        editor::InstanceSetEditorHooks hooks;
+        hooks.levelReferences = [this](const std::string& abs) {
+            std::error_code ec;
+            for (const std::string& f : levelHeader_.foliageFiles)
+                if (std::filesystem::equivalent(std::filesystem::path(project_.contentDir()) / f, abs, ec) && !ec) return true;
+            return false;
+        };
+        hooks.regenerateStreaming = [this](std::string& report) { return regenerateStreamData(report); };
+        editor::setInstanceSetEditorHooks(std::move(hooks));
+    }
+#endif
     // Locate AverDesign before ActorEditor (caches Roslyn availability).
     locateAverDesign();
     {
@@ -2505,6 +2521,7 @@ void SandboxApp::onShutdown(Engine& e)  {
             AVER_WARN("[Project] could not flush unsaved settings on exit: {}", why);
     }
     editor::shutdownActorEditors();
+    editor::shutdownInstanceSetEditors();
 editor::shutdownAnimEditors();
 #if AVER_MODULE_PARTICLES
     editor::shutdownParticleEditors();

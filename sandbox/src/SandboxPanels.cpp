@@ -1579,6 +1579,18 @@ void SandboxApp::buildOutlinerPanel() {
             ImGui::SetTooltip("Ray-traced instanced foliage from %s -- static, not individually "
                               "selectable or editable per instance.", files.c_str());
         }
+        // Each baked instance table opens in the instance-set editor (the Content Browser's
+        // double-click goes to the same tab).
+        for (usize fi = 0; fi < levelHeader_.foliageFiles.size(); ++fi) {
+            const std::string& rel = levelHeader_.foliageFiles[fi];
+            ImGui::PushID(static_cast<int>(fi));
+            ImGui::TextDisabled("    %s", std::filesystem::path(rel).filename().string().c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open instance set"))
+                assetEditors_.open((std::filesystem::path(project_.contentDir()) / rel).make_preferred().string());
+            if (fi == 0) uiReg_.track("outliner.foliageOpenInstanceSet");
+            ImGui::PopID();
+        }
     }
 #endif
 #endif

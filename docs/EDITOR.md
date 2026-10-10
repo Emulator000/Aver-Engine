@@ -459,6 +459,18 @@ On the timeline, click a key to select it (Ctrl or Shift adds to the selection, 
 
 ---
 
+## Instance-set editor
+
+A baked `.ocinst` (a level's instanced foliage: groups of one mesh each, a flat table of 12-float transforms) opens in its own tab from the Content Browser (double-click; the create menu's **New Instance Set** writes an empty one under `Content/Instances`) or from the Outliner's Foliage row (**Open instance set**, one button per file the level lists). Source: `sandbox/src/InstanceSetEditor.cpp`, over `InstanceSetModel` (ids, selection, delta undo, spatial index) and `PreviewGizmo` (the gizmo maths).
+
+**Its own preview.** The tab owns an `ActorPreview` and a `PreviewMeshCache` of its own, never `sharedPreview()`, so it can sit beside the level viewport and a mesh tab. The preview is switched off at the top of every frame (`NewFramePre` context hook) and back on by whichever tab draws, so a hidden tab records nothing. Closing the tab hands its GPU state to a graveyard that is freed at the next frame's start, because the tab's image is still on the closing frame's draw list; `shutdownInstanceSetEditors()` frees everything left before the device goes.
+
+**What is drawn.** Each frame the model culls (frustum, then a 1.5 px size cull) and keeps at most 150,000 instances, the nearest if over; the HUD says "capped". Each group becomes one `PreviewInstanceBatch` over a member buffer of the culled rows. Meshes load at most three per frame, up to 128 distinct, and set the model's per-asset bounds; a group whose mesh is not loaded (still pending, over the cap, or missing) draws a box proxy. Selected instances are drawn one by one with the highlight, up to 256, and beyond that as a tinted batch.
+
+**Controls.** Left click picks (Shift adds, Ctrl toggles), left drag is a marquee; right drag orbits (so does Alt + left), middle drag pans, wheel zooms, **F** frames the selection or everything. Tools 1-4 are Select / Move / Rotate / Scale (the gizmo drag is one undo step; Escape cancels it); the panel has World / Local and translate, rotate and scale snaps. **Delete**, **Ctrl+D** (duplicates 50 cm aside), **Ctrl+Z / Ctrl+Y**, **Ctrl+S** work in the tab (the `kScopeInstanceEditor` keybind scope). The side panel lists groups (filter, click selects the group and makes it the target of **Add instance at view centre**, which lands on the ground plane under the view centre), and edits the selection's position, rotation (yaw, pitch, roll) and uniform scale through the model.
+
+**Saving.** Save writes through `fmt::saveOcInstances` (atomic) and clears the file's baked cells, so the level's streaming data (`Binaries/Streaming`) is out of date: the tab says so and, when the open level lists this file, offers **Regenerate Streaming Data** (the World Settings action: saves the level, rebakes, reopens it). A file change on disk reloads a clean tab; a dirty tab asks (Reload / Keep my edits). The tab's own save is recognised by the file's size and mtime and ignored.
+
 ## Driving it from the command line
 
 Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the rest. Those below exist for one reason: each names a path whose only proof was that somebody had clicked it once.

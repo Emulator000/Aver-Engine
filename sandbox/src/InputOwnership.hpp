@@ -54,6 +54,9 @@ enum Scope : u32 {
     kScopeGraphEditor   = 1u << 5,
     kScopeActorEditor   = 1u << 6,
     kScopeAssetEditor   = 1u << 7,   // any asset tab: the shared Ctrl+S lives here
+    // The .ocinst instance-set tab: its own viewport with the four tools, Delete, duplicate, undo/redo
+    // and frame. Separate from kScopeActorEditor so a chord rebound there does not silently move here.
+    kScopeInstanceEditor = 1u << 8,
 };
 
 // Everything the decision depends on, gathered once per frame at the call site.

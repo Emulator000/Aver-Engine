@@ -4,6 +4,7 @@
 
 #include "SandboxApp.hpp"
 #include "aver/anim/AnimGraphAsset.hpp"
+#include "aver/formats/OcInstances.hpp"   // New Instance Set
 #if AVER_MODULE_PBR
 #include "aver/formats/ImportCook.hpp"
 #endif
@@ -462,6 +463,21 @@ void SandboxApp::cbCreateParticleEffect() {
 #endif
 
 #if AVER_WITH_IMGUI
+namespace {
+// A free <Content>/Instances/NewInstanceSet[N].ocinst, creating the folder; empty when none is free.
+// Never returns an existing path: an instance set is baked data someone may have spent hours on.
+std::filesystem::path freeInstanceSetPath(const std::string& contentDir) {
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::path(contentDir) / "Instances";
+    std::filesystem::create_directories(dir, ec);
+    for (int n = 0; n < 1000; ++n) {
+        const std::filesystem::path p = dir / ("NewInstanceSet" + (n == 0 ? std::string() : std::to_string(n)) + ".ocinst");
+        if (!std::filesystem::exists(p, ec)) return p;
+    }
+    return {};
+}
+} // namespace
+
 // Writes a starter .ocfoliage (one foliage type) and opens it. Same shape as cbCreateParticleEffect
 // above, but unconditional: editor::foliageStarterType/fmt::saveOcFoliage are reachable in every
 // module configuration (see OcFoliage.hpp on why foliage needs neither Aver.Scene nor Aver.Landscape).
@@ -1131,6 +1147,20 @@ void SandboxApp::drawContentBrowser() {
 #endif
         if (ImGui::MenuItem("New Foliage Type"))    cbCreateFoliageType();
         uiReg_.track("cb.add.foliageType");
+        if (ImGui::MenuItem("New Instance Set")) {
+            const std::filesystem::path target = project_.valid() ? freeInstanceSetPath(project_.contentDir()) : std::filesystem::path();
+            std::string why;
+            if (target.empty()) {
+                cbStatus_ = "Could not find a free name for a new instance set";
+            } else if (!fmt::saveOcInstances(target.string(), fmt::OcInstanceData{}, &why)) {
+                cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+                AVER_ERROR("[Editor] new instance set failed: {}", why);
+            } else {
+                cbNavigate(target.parent_path().string());
+                cbAdoptNewAsset(target);
+            }
+        }
+        uiReg_.track("cb.add.instanceSet");
         if (ImGui::MenuItem("New Input Scheme"))    cbCreateInputScheme();
         uiReg_.track("cb.add.inputScheme");
 #if AVER_MODULE_PBR
@@ -1696,6 +1726,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocmat",      {ICON_TUNE,       IM_COL32( 64, 192,  64, 255), "Material"}},
         {".ocparticle", {ICON_ADD,        IM_COL32(  0, 200, 180, 255), "Particles"}},
         {".ocfoliage",  {ICON_TERRAIN,    IM_COL32( 60, 200,  90, 255), "Foliage Type"}},
+        {".ocinst",     {ICON_TERRAIN,    IM_COL32(120, 220, 120, 255), "Instance Set"}},
         // No Unreal equivalent (its Enhanced Input plugin's icon isn't licensed to copy):
         // ICON_SETTINGS since binding a key is a settings choice, same as .fsproj/.csproj below,
         // though coloured apart from them.

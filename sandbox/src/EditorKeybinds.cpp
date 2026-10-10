@@ -172,10 +172,10 @@ constexpr u32 kPlaySessionOrEjected = kScopePlaySession | kViewportScope;
 // rebinds it once.
 constexpr u32 kEditScope = kViewportScope | kScopeGraphEditor;
 // The actor editor has its own viewport with the SAME four tools, hardcoded a second time.
-constexpr u32 kToolScope = kScopeObjectMode | kScopeActorEditor;
+constexpr u32 kToolScope = kScopeObjectMode | kScopeActorEditor | kScopeInstanceEditor;
 // Commands that mean the same thing wherever the user is -- the level, any asset tab -- so conflict
 // detection compares them against every scope a chord could collide in.
-constexpr u32 kAnywhereScope = kViewportScope | kScopeGraphEditor | kScopeActorEditor | kScopeAssetEditor;
+constexpr u32 kAnywhereScope = kViewportScope | kScopeGraphEditor | kScopeActorEditor | kScopeAssetEditor | kScopeInstanceEditor;
 constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::ToolSelect,  "tool.select",  "Select Tool",           {ImGuiKey_1, false,false,false}, kToolScope,    false,false, true},
     {CommandId::ToolMove,    "tool.move",    "Move Tool",             {ImGuiKey_2, false,false,false}, kToolScope,    false,false, true},
@@ -186,7 +186,7 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::SculptSmooth,  "sculpt.smooth",  "Sculpt: Smooth",    {ImGuiKey_3, false,false,false}, kScopeLandscapeMode, false,false, true},
     {CommandId::SculptFlatten, "sculpt.flatten", "Sculpt: Flatten",   {ImGuiKey_4, false,false,false}, kScopeLandscapeMode, false,false, true},
     {CommandId::ModeToggleLandscape, "mode.toggleLandscape", "Toggle Landscape Mode", {ImGuiKey_Tab, false,false,false}, kViewportScope, false,false, true},
-    {CommandId::ViewFrameSelected,   "view.frameSelected",   "Frame Selected",        {ImGuiKey_F,   false,false,false}, kEditScope | kScopeActorEditor, false,false, true},
+    {CommandId::ViewFrameSelected,   "view.frameSelected",   "Frame Selected",        {ImGuiKey_F,   false,false,false}, kEditScope | kScopeActorEditor | kScopeInstanceEditor, false,false, true},
     {CommandId::PlayStart,        "play.start",        "Play",                 {ImGuiKey_P,      false,false,true }, kViewportScope,    true, true,  false},
     {CommandId::PlaySimulate,     "play.simulate",     "Simulate",             {ImGuiKey_S,      false,false,true }, kViewportScope,    true, true,  false},
     {CommandId::PlayReleaseMouse, "play.releaseMouse", "Release Mouse (Play)", {ImGuiKey_F1,     false,true, false}, kScopePlaySession, false,true,  false},
@@ -198,12 +198,12 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::DrawerDismiss,       "drawer.dismiss",       "Dismiss Drawer",          {ImGuiKey_Escape, false,false,false}, kScopeDrawerOpen, false,false, false},
     {CommandId::DrawerToggleContent, "drawer.toggleContent", "Toggle Content Browser",  {ImGuiKey_Space,  true, false,false}, kScopeGlobalUI,   true, false, false},
     {CommandId::DrawerToggleConsole, "drawer.toggleConsole", "Toggle Console",          {ImGuiKey_GraveAccent, false,false,false}, kScopeGlobalUI, false,false, false},
-    {CommandId::EditDelete, "edit.delete", "Delete",    {ImGuiKey_Delete, false,false,false}, kEditScope, false,false, false},
-    {CommandId::EditUndo,   "edit.undo",   "Undo",      {ImGuiKey_Z,      true, false,false}, kEditScope | kScopeAssetEditor, true, true,  false},
-    {CommandId::EditRedo,   "edit.redo",   "Redo",      {ImGuiKey_Y,      true, false,false}, kEditScope | kScopeAssetEditor, true, false, false},
+    {CommandId::EditDelete, "edit.delete", "Delete",    {ImGuiKey_Delete, false,false,false}, kEditScope | kScopeInstanceEditor, false,false, false},
+    {CommandId::EditUndo,   "edit.undo",   "Undo",      {ImGuiKey_Z,      true, false,false}, kEditScope | kScopeAssetEditor | kScopeInstanceEditor, true, true,  false},
+    {CommandId::EditRedo,   "edit.redo",   "Redo",      {ImGuiKey_Y,      true, false,false}, kEditScope | kScopeAssetEditor | kScopeInstanceEditor, true, false, false},
     {CommandId::EditCopy,      "edit.copy",      "Copy",      {ImGuiKey_C, true,false,false}, kEditScope, true, true, false},
     {CommandId::EditPaste,     "edit.paste",     "Paste",     {ImGuiKey_V, true,false,false}, kEditScope, true, true, false},
-    {CommandId::EditDuplicate, "edit.duplicate", "Duplicate", {ImGuiKey_D, true,false,false}, kEditScope, true, true, false},
+    {CommandId::EditDuplicate, "edit.duplicate", "Duplicate", {ImGuiKey_D, true,false,false}, kEditScope | kScopeInstanceEditor, true, true, false},
     {CommandId::EditSelectAll, "edit.selectAll", "Select All", {ImGuiKey_A, true,false,false}, kViewportScope, true, true, false},
     {CommandId::AssetSave,     "asset.save",     "Save Asset", {ImGuiKey_S, true,false,false}, kScopeAssetEditor, true, true, false},
     {CommandId::LevelSave,     "level.save",     "Save Level",            {ImGuiKey_S, true,false,false}, kViewportScope, true, true, false},
