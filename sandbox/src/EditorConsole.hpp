@@ -676,6 +676,57 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Fog in-scatter respects occlusion: enclosed air (arcades, rooms) stops glowing with sky light it cannot see. Built from the GI voxel volume, so it needs voxel GI on; off = the old unoccluded fog",
         []{ return vBool(Renderer::get().settings().fogOcclusion); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->fogOcclusion = on; }); }});
+    // Volumetric fog / light shafts (Settings::volumetricFog*, docs/rendering/VOLUMETRIC_FOG.md): a froxel volume of
+    // sun light scattered by the air, added to the authored height fog. All dials are live; the grid re-creates the volume.
+    t.push_back({"voxi.volumetricFog", VarType::Bool, false,
+        "Volumetric fog: light shafts from a camera-aligned froxel volume, shadowed by the scene (ray query, else the cascade map), added to the height fog. Off by default; off allocates nothing. Needs SM 6.0 + DXC",
+        []{ return vBool(Renderer::get().settings().volumetricFog); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->volumetricFog = on; }); }});
+    {
+        struct VolFogF32 { const char* name; f32 Settings::* field; f32 lo, hi; const char* help; };
+        static const VolFogF32 kVolFogF32[] = {
+            {"voxi.volFogDensity", &Settings::volumetricFogDensity, 0.0f, 0.01f,
+             "uniform extinction per cm added to the height fog (0-0.01, default 0.00002: clear haze; 0.001 is thick mist)"},
+            {"voxi.volFogHeightFog", &Settings::volumetricFogHeightFog, 0.0f, 8.0f,
+             "share of the authored height fog's density the light shafts see (0-8, default 1)"},
+            {"voxi.volFogIntensity", &Settings::volumetricFogIntensity, 0.0f, 16.0f,
+             "multiplies the sun's scattered light (0-16, default 1); the sky ambient is not scaled"},
+            {"voxi.volFogAnisotropy", &Settings::volumetricFogAnisotropy, -0.95f, 0.95f,
+             "Henyey-Greenstein g (-0.95 to 0.95, default 0.6): towards 1 piles the glow up around the sun"},
+            {"voxi.volFogTemporal", &Settings::volumetricFogTemporal, 0.0f, 0.98f,
+             "weight of the reprojected previous frame (0-0.98, default 0.85): higher is smoother and lags more"},
+            {"voxi.volFogDistance", &Settings::volumetricFogMaxDistance, 100.0f, 500000.0f,
+             "where the volume ends, cm (100-500000, default 20000); farther surfaces and the sky take its last slice"}};
+        for (const VolFogF32& d : kVolFogF32) {
+            f32 Settings::* f = d.field;
+            const f32 lo = d.lo, hi = d.hi;
+            const std::string name = d.name;
+            t.push_back({d.name, VarType::F32, false, std::string("Volumetric fog: ") + d.help,
+                [f]{ return vF32(Renderer::get().settings().*f); },
+                [f](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([f, n](void* sp){ static_cast<Settings*>(sp)->*f = n; }); },
+                [lo, hi, name](const VarValue& v, std::string& err) -> bool {
+                    if (!(v.as.f >= lo && v.as.f <= hi)) { err = name + " must be " + std::to_string(lo) + " to " + std::to_string(hi); return false; }
+                    return true;
+                }});
+        }
+        struct VolFogGrid { const char* name; u32 Settings::* field; u32 lo, hi; const char* help; };
+        static const VolFogGrid kVolFogGrid[] = {
+            {"voxi.volFogGridX", &Settings::volumetricFogGridX, 16u, 320u, "froxels across the view (16-320, default 160)"},
+            {"voxi.volFogGridY", &Settings::volumetricFogGridY, 9u, 180u, "froxels down the view (9-180, default 90)"},
+            {"voxi.volFogGridZ", &Settings::volumetricFogGridZ, 16u, 128u, "depth slices, exponential in distance (16-128, default 64)"}};
+        for (const VolFogGrid& d : kVolFogGrid) {
+            u32 Settings::* f = d.field;
+            const u32 lo = d.lo, hi = d.hi;
+            const std::string name = d.name;
+            t.push_back({d.name, VarType::U32, false, std::string("Volumetric fog: ") + d.help + "; changing it re-creates the volume",
+                [f]{ return vU32(Renderer::get().settings().*f); },
+                [f](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([f, n](void* sp){ static_cast<Settings*>(sp)->*f = n; }); },
+                [lo, hi, name](const VarValue& v, std::string& err) -> bool {
+                    if (v.as.u < lo || v.as.u > hi) { err = name + " must be " + std::to_string(lo) + " to " + std::to_string(hi); return false; }
+                    return true;
+                }});
+        }
+    }
     // DIAL, not a tier; reads back what is ACTUALLY running via voxi::resolve()'s denoiser field.
     // Requires RT hardware, the RT tier not Off, something to denoise, D3D12 and MSAA 1; above 1x
     // sample count the pass skips itself and says so once at WARN.

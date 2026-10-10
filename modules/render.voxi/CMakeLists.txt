@@ -25,6 +25,7 @@ set_target_properties(Aver.Render.Voxi PROPERTIES
 add_library(Aver.Render.Voxi.Renderer STATIC
   src/VoxiRenderer.cpp
   src/NeuRaC.cpp
+  src/VoxiFroxelFog.cpp
   src/VoxiGiShaders.cpp)
 
 target_include_directories(Aver.Render.Voxi.Renderer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

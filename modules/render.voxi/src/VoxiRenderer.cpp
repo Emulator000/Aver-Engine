@@ -13,6 +13,7 @@
 #include "aver/voxi/VoxiGiShaders.hpp"   // kGiSrvCount/kGiUavCount: the "typed twice" fix below
 #include "aver/formats/IesProfile.hpp"   // kIesTableV/H: the table's one definition
 #include "aver/voxi/GiVisibility.hpp"   // givis::packAmbientW/halfDim -- the C++/HLSL bit-table's one definition
+#include "aver/voxi/VoxiFroxelFog.hpp"   // kVolumeUavSlot, checked against the slot table below
 
 #include "VoxiShaders.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
@@ -141,7 +142,7 @@ constexpr u32 kVoxiSrvCount = kGiSrvCount + 16;
 
 // Wider than kGiUavCount (same reasoning as kVoxiSrvCount).
 // Includes history, ray-driven, and radiance-cache outputs. u11+ always declared, bound to placeholders when absent.
-constexpr u32 kVoxiUavCount = kGiUavCount + 20;
+constexpr u32 kVoxiUavCount = kGiUavCount + 21;
 
 // Declares slot kinds for all table 0 bindings (Vulkan requires type consistency).
 void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
@@ -194,7 +195,9 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[21] = rhi::SlotKind::StructuredBuffer;      // u21 radiance-cache cells
     uav[22] = rhi::SlotKind::StructuredBuffer;      // u22 Path Tracing progressive accumulation
     uav[23] = rhi::SlotKind::Texture2D;             // u23 reflection denoiser input (write)
-    static_assert(kVoxiSrvCount == 25 && kVoxiUavCount == 24 && kGiSrvCount == 9 && kGiUavCount == 4,
+    uav[24] = rhi::SlotKind::Texture3D;             // u24 volumetric-fog froxel volume (VoxiFroxelFog; the shade passes only load it)
+    static_assert(kVoxiSrvCount == 25 && kVoxiUavCount == 25 && kGiSrvCount == 9 && kGiUavCount == 4 &&
+                      VoxiFroxelFog::kVolumeUavSlot == kVoxiUavCount - 1,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -392,6 +395,7 @@ void VoxiRenderer::shutdown() {
     denoiseGiOutput_ = 0;
     materials_.shutdown();
     if (!res_) { dev_ = nullptr; return; }
+    froxel_.destroy(bindings_);   // before the set it points u24 of goes away
     for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
     mipBindings_.clear();
     if (resolveBindings_) res_->destroyBindingSet(resolveBindings_);
@@ -1172,6 +1176,7 @@ void VoxiRenderer::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f
 // Runs Voxi's frame: acceleration structures, shadow map, voxelise, filter volume.
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     rdVisWrittenThisFrame_ = false;
+    froxelRecorded_ = false;
     if (!giReady_) return;
     // Material graph appeared since pipelines were built.
     if (scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
@@ -1388,6 +1393,8 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         }
         if (!full) airVisSlab_ = (airVisSlab_ + 1) % kSlabs;
     }
+    // Volumetric fog: after the acceleration structure and shadow map are final, before any shade pass reads it.
+    recordFroxelFog(ctx);
     endShadowHistory();
 
     // Raise lamp constants for raster scene draws; u19 marked written here.
@@ -7689,6 +7696,62 @@ void VoxiRenderer::dispatchAirVis(rhi::IRenderContext& ctx, u32 zLo, u32 zHi) {
     ctx.uavBarrierTexture(airVisTex_);
     ctx.textureBarrier(airVisTex_, rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
     if (zLo == 0 && zHi >= kAirVisResolution) airVisDirty_ = false;
+}
+
+// Volumetric fog (docs/rendering/VOLUMETRIC_FOG.md): keeps the froxel volume in line with Settings::volumetricFog
+// and records its passes. While off this frees everything and publishes "no volume" to the shade passes.
+void VoxiRenderer::recordFroxelFog(rhi::IRenderContext& ctx) {
+    // gShadowDraw.yzw (spare: the depth pass reads .x): near cm, 1/ln(far/near), volume is live.
+    auto publish = [&](bool live) {
+        cb_.shadowDraw[1] = live ? froxel_.nearCm() : 0.0f;
+        cb_.shadowDraw[2] = live ? froxel_.invLogRange() : 0.0f;
+        cb_.shadowDraw[3] = live ? 1.0f : 0.0f;
+    };
+    if (!settings_.volumetricFog && !froxel_.alive()) { publish(false); return; }
+    if (!res_ || !dev_ || !bindings_) { publish(false); return; }
+
+    // Typed UAV loads of RGBA16F: the shade passes and the sky read the volume through u24 (DeviceCaps::typedUavLoads).
+    const bool shaderOk = caps_.shaderModel >= 60 && caps_.dxcAvailable && caps_.typedUavLoads;
+    const bool rtOk = caps_.rayTracingTier >= 11 && caps_.shaderModel >= 65 && caps_.dxcAvailable;
+    // Voxi's main layout, with the volume's history (t25) and scratch (u25) as table 1 in place of the materials.
+    rhi::PipelineLayout layout = giLayout();
+    layout.srvCount1 = 1;
+    layout.uavCount1 = 1;
+    layout.srvKinds1[0] = rhi::SlotKind::Texture3D;
+    layout.uavKinds1[0] = rhi::SlotKind::Texture3D;
+
+    froxel_.setTargets(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat());
+    const VoxiFroxelFog::Params p = VoxiFroxelFog::fromSettings(settings_);
+    const bool live = froxel_.ensure(*res_, layout, rtOk, shaderOk, settings_.volumetricFog, p, bindings_);
+    publish(live);
+    if (!live) return;
+
+    VoxiFroxelFog::Frame f;
+    f.cascadeViewProj = &cb_.cascadeViewProj[0][0];
+    f.cascadeSplit    = &cb_.cascadeSplit[0][0];
+    f.shadowAtlasTexel = cb_.shadowParams[0];
+    f.cascadeCount    = static_cast<u32>(cb_.shadowParams[3]);
+    // Sun visibility from whatever this frame has: the TLAS when it is built, else the cascade map when it was
+    // rendered (shadowPass skips it while ray tracing is on), else none.
+    const bool tlas = rtActive_ && cb_.shadowParams[2] > 0.5f && froxel_.rayQueryBuilt();
+    f.sunMode   = tlas ? 2u : (cb_.shadowParams[1] > 0.5f ? 1u : 0u);
+    f.shadowMap = shadowTex_;
+    f.rayBiasCm = 2.0f;
+    f.voxelOrigin = cb_.voxelOrigin;
+    f.airVisUsable = airVisTex_ && cb_.voxelParams[3] > 0.5f;
+    f32 vp[16];
+    if (!dev_->camera(vp, nullptr, nullptr)) return;
+    f.viewProj = vp;
+    // A camera cut or level load: the G-buffer reports it when it is on, and nothing else does.
+    f.historyOk = !(dev_->gBufferEnabled() && dev_->gBufferHistoryInvalid());
+    f.frameIndex = rtFrameIndex_;
+    froxel_.record(ctx, bindings_, f);
+    froxelRecorded_ = true;
+}
+
+// The sky is the one thing no shade site reaches: apply the volume's far end to the pixels still at the far plane.
+void VoxiRenderer::transparentPass(rhi::IRenderContext& ctx) {
+    if (froxelRecorded_) froxel_.drawSky(ctx);
 }
 
 // Binds GI resources (volume and shadow map) into caller's binding set.

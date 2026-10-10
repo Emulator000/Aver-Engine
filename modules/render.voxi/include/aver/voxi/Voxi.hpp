@@ -299,6 +299,34 @@ struct Settings {
     // COST: one more compute pass, CSAirVis, over a FIXED 32^3 volume, independent of voxelResolution.
     // DEVICE-GATED: needs SM 6.0 and DXC (VoxiRenderer::airVisWanted()).
     bool fogOcclusion = true;
+
+    // ---- volumetric fog: light shafts from a camera-aligned froxel volume (VoxiFroxelFog.hpp) ----
+    // Sun light scattered by the air, shadowed by the scene (ray query, else the cascade map). It ADDS to the
+    // authored height fog: the shafts see that fog's density (volumetricFogHeightFog), plus an optional uniform
+    // medium (volumetricFogDensity) that also dims and tints what is behind it. OFF BY DEFAULT: off, no
+    // resource exists and every pixel shades exactly as before.
+    // COST (on, 160x90x64): two small compute passes, ~1M froxel rays/frame, three RGBA16F volumes (~22 MiB).
+    // Needs SM 6.0, DXC and typed UAV loads (DeviceCaps::typedUavLoads); ray-query shadows additionally need DXR 1.1.
+    // Live-switchable. docs/rendering/VOLUMETRIC_FOG.md.
+    bool volumetricFog = false;
+    // Volume resolution: across, down, and in depth slices (exponential in view depth). Clamped 16-320 /
+    // 9-180 / 16-128 by VoxiFroxelFog::fromSettings. Changing it re-creates the volume.
+    u32 volumetricFogGridX = 160;
+    u32 volumetricFogGridY = 90;
+    u32 volumetricFogGridZ = 64;
+    // Where the volume ends, cm. Farther surfaces and the sky take the last slice.
+    f32 volumetricFogMaxDistance = 20000.0f;
+    // Uniform extinction per cm on top of the height fog (0 = shafts through the authored height fog only).
+    // 0.00002 is a clear day's haze (visibility ~5 km); 0.001 is a thick mist.
+    f32 volumetricFogDensity = 0.00002f;
+    // Share of the authored height fog's density the light shafts see (0 = none, 1 = all of it).
+    f32 volumetricFogHeightFog = 1.0f;
+    // Multiplies the sun's scattered light (not the sky ambient).
+    f32 volumetricFogIntensity = 1.0f;
+    // Henyey-Greenstein g: 0 scatters evenly, towards 1 piles light up around the sun, negative favours back-scatter.
+    f32 volumetricFogAnisotropy = 0.6f;
+    // Weight of the reprojected previous frame (0 = none, 0.98 = very smooth and laggy).
+    f32 volumetricFogTemporal = 0.85f;
 };
 
 // The denoiser as one value: 0 off, 1 AMD FidelityFX, 2 NRD2. Setting 0 keeps the kind, so switching

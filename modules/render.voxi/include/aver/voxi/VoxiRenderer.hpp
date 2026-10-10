@@ -13,6 +13,7 @@
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/render/denoise/Nrd2Capture.hpp"
 #include "aver/voxi/NeuRaC.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
+#include "aver/voxi/VoxiFroxelFog.hpp"   // froxel_ -- volumetric fog (light shafts)
 
 #include <unordered_map>
 #include <unordered_set>
@@ -172,6 +173,8 @@ public:
     // shaders without it, and drawing a material that names it (the blended replay) hung the GPU.
     bool graphStale() const;
     void scenePass(rhi::IRenderContext& ctx) override;
+    // Volumetric fog on the sky (the shade sites fog everything else); see VoxiFroxelFog.hpp.
+    void transparentPass(rhi::IRenderContext& ctx) override;
     // Ray-driven frames record at endFrame so moving objects use this frame's transforms.
     bool wantsLateScenePass() const override;
     // This frame's translucent draws were composited inside the ray-driven frame; skip their replay.
@@ -253,6 +256,9 @@ private:
     bool giBuildLogged_ = false;
     bool ensureAirVis();
     void dispatchAirVis(rhi::IRenderContext& ctx, u32 zLo, u32 zHi);
+    // Volumetric fog: brings the froxel volume in line with the setting, publishes its depth mapping to the
+    // shade passes (cb_.shadowDraw.yzw, spare in the depth pass) and records its two compute passes.
+    void recordFroxelFog(rhi::IRenderContext& ctx);
     void recordStagedRayDriven(rhi::IRenderContext& ctx);
 
     pbr::MaterialSystem materials_;
@@ -286,6 +292,10 @@ private:
     // True from airVisTex_ creation until CSAirVis has written it once (avoids garbage at t17).
     bool airVisDirty_ = false;
     u32 airVisSlab_ = 0;
+    // Volumetric fog (Settings::volumetricFog). Its output volume sits at u24 of bindings_.
+    VoxiFroxelFog froxel_;
+    // The volume was recorded this frame, so transparentPass applies it to the sky.
+    bool froxelRecorded_ = false;
     // Bumped whenever the radiance volume's contents or placement may have changed.
     u64 voxelGen_ = 0;
     // Generation the current slab cycle runs against, and the slabs it still has to rewrite.

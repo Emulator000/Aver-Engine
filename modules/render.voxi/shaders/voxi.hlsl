@@ -11,7 +11,7 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // x = the RADIUS at which this cascade stops applying, y = its normal-offset bias in world units
     float4   gCascadeSplit[AVER_SHADOW_CASCADES];
     float4   gShadowParams; // x = 1/atlasSize, y = enabled, z = accel structure built, w = cascades
-    float4   gShadowDraw;   // x = the cascade the depth-only pass is filling right now
+    float4   gShadowDraw;   // x = the cascade the depth-only pass is filling right now; yzw: volumetric fog (below)
     // x = tan of the sun's ANGULAR RADIUS, which is what sets how fast a shadow edge softens;
     // y = occlusion rays per pixel; z = ray bias in world units at the near plane;
     // w = 1 once the flat geometry table is ready for a reflection ray's hit lookup.
@@ -160,6 +160,29 @@ Texture2D<float4>         gBlendBackdrop : register(t10);
 // 32^3 resolution independent of gVoxelParams.x. If not yet built, treated as "no volume" and returns 1.0.
 Texture3D<float>          gAirVis    : register(t17);
 RWTexture3D<float>        gAirVisOut : register(u16);
+
+// ---- Volumetric fog: the froxel volume (built by voxi_froxel.hlsl, docs/rendering/VOLUMETRIC_FOG.md) ----
+// u24, only LOADED here (typed UAV loads, hand-filtered in voxi_froxel.hlsli): rgb = sun light scattered into the
+// view ray out to this depth, a = transmittance of the uniform medium. It sits on top of the analytic fog below.
+// gShadowDraw.yzw (free: the depth-only pass reads .x) = near cm, 1/ln(far/near), 1 while a volume is live.
+// Off (the default) the first test below fails and nothing else here runs.
+RWTexture3D<float4>       gFroxelVol : register(u24);
+#include "voxi_froxel.hlsli"
+
+// Folds the volume into a fog extinction/in-scatter pair (color * ext + in): ext *= T, in = in * T + S.
+void voxiFroxelCompose(float3 wpos, inout float3 ext, inout float3 inscatter) {
+    if (gShadowDraw.w < 0.5) return;
+    const float4 f = froxelAtWorld(gFroxelVol, wpos, gShadowDraw.y, gShadowDraw.z);
+    ext *= f.a;
+    inscatter = inscatter * f.a + f.rgb;
+}
+
+// The same, applied to a colour already fogged.
+float3 voxiFroxelApply(float3 color, float3 wpos) {
+    if (gShadowDraw.w < 0.5) return color;
+    const float4 f = froxelAtWorld(gFroxelVol, wpos, gShadowDraw.y, gShadowDraw.z);
+    return color * f.a + f.rgb;
+}
 
 // ---- CAUSTICS: light focused by the water surface onto what lies under it ----
 // Pure arithmetic on the clock and box, no rays. Laplacian approximation of height field.
@@ -1408,6 +1431,21 @@ float voxiAirVisibility(float3 wpos) {
     return wSum > 1e-6 ? vSum / wSum : 1.0;
 }
 
+// In-path glass (rdTranslucentPath) under the froxel volume at its first crossing: what the glass adds takes the
+// air in front of it; what it lets through already carries the volume of its own depth. The analytic height fog
+// and aerial are NOT applied here (docs/rendering/VOLUMETRIC_FOG.md, limits): their in-scatter does not converge
+// to the horizon sky, so open sea would darken into a band below the horizon.
+float3 rdFogGlass(float3 acc, float3 thr, float3 dir, float firstT) {
+#if AVER_RD_ABLATE == AVER_RD_ABL_FOG
+    return acc;
+#else
+    if (firstT >= 1.0e7) return acc;
+    float3 ext = 1.0, ins = 0.0;
+    voxiFroxelCompose(gCamPos.xyz + dir * firstT, ext, ins);
+    return acc * ext + ins * (1.0 - dot(thr, 1.0 / 3.0));
+#endif
+}
+
 // ================= additive G-buffer: velocity, view-space depth, normal+roughness =================
 // Gated on AVER_GBUFFER, following AVER_RT's convention: compile-time define, off by default.
 // ADDITIVE: without the define, PSMainVoxi returns one SV_TARGET unchanged.
@@ -1731,6 +1769,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         if (bgWeight < 0.0) bgWeight = 1.0 - outc.a;
         float3 airExt, airIn;
         averFogTermsAirVis(i.wpos, true, voxiAirVisibility(i.wpos), airExt, airIn);
+        voxiFroxelCompose(i.wpos, airExt, airIn);
         outc.rgb = (outc.rgb - dstTerm) * airExt + airIn * (1.0 - bgWeight) + dstTerm;
         // Poison marker applied last (after fog).
         if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
@@ -1748,6 +1787,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
     radiance = averShadeIndirect(radiance, s, ind4);
     radiance = averApplyFogAirVis(radiance, i.wpos, true, voxiAirVisibility(i.wpos));
+    radiance = voxiFroxelApply(radiance, i.wpos);
     // Poison marker.
     if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
         radiance = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
@@ -1916,7 +1956,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         if (vmode >= 2u) {
             o.col = float4(0.02, 0.02, 0.04, 1.0);
         } else {
-            o.col = float4(rdGlassAcc + rdGlassThr * skyColorFull(dir), 1.0);
+            // The sky behind takes the volume's far slice here: this pixel leaves the far plane, so PSFroxelSky skips it.
+            o.col = float4(rdFogGlass(rdGlassAcc, rdGlassThr, dir, rdGlassT) +
+                           rdGlassThr * voxiFroxelApply(skyColorFull(dir), gCamPos.xyz + dir * 1.0e7), 1.0);
         }
         o.depth = 1.0;
         // Glass over the sky takes its own depth, or the deferred sky (depth == far) paints over it.
@@ -2285,6 +2327,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #else
     averFogTermsAirVis(wpos, true, voxiAirVisibility(wpos), nrdFogExt, nrdFogIn);
 #endif
+#if AVER_RD_ABLATE != AVER_RD_ABL_FOG
+    voxiFroxelCompose(wpos, nrdFogExt, nrdFogIn);
+#endif
     radiance = radiance * nrdFogExt + nrdFogIn;
 #elif AVER_RD_ABLATE == AVER_RD_ABL_FOG
     // ablated: no aerial perspective and no fog inscatter march.
@@ -2294,8 +2339,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #else
     radiance = averApplyFogAirVis(radiance, wpos, true, voxiAirVisibility(wpos));
 #endif
+#if !AVER_NRD2 && AVER_RD_ABLATE != AVER_RD_ABL_FOG
+    radiance = voxiFroxelApply(radiance, wpos);
+#endif
 #if AVER_RD_SPLIT
-    radiance = rdGlassAcc + rdGlassThr * radiance;   // the glass traced at the top (rdTranslucentPath)
+    radiance = rdFogGlass(rdGlassAcc, rdGlassThr, dir, rdGlassT) + rdGlassThr * radiance;   // the glass traced at the top
 #endif
 #if AVER_NRD2
     // 0 wherever the colour below is replaced (unlit, debug views, overrides): nothing is added there.
