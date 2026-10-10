@@ -1228,6 +1228,195 @@ internal static class GraphInterop
         return true;
     }
 
+    // ================================================================== physics wave 1b
+    // Breakable joints, body locks and CCD, the shape queries, character can-stand and ragdolls: the
+    // Aver.Physics / Entity surface added in wave 1, flattened to scalars like the rest of this file.
+
+    internal static bool JointSetBreakableForGraph(int joint, float maxForceN, float maxTorqueNm)
+    {
+        AP.Joint j = new AP.Joint(joint);
+        return j.IsValid && j.SetBreak(maxForceN, maxTorqueNm);
+    }
+
+    /// <summary>Six WORLD-axis flags (translation XYZ, rotation XYZ). All six is refused by the native
+    /// side (that is a static body), as is a non-dynamic body.</summary>
+    internal static bool SetLockedAxesForGraph(int body, bool tx, bool ty, bool tz, bool rx, bool ry, bool rz)
+    {
+        AP.Body b = new AP.Body(body);
+        if (!b.IsValid) return false;
+        AP.LockAxes m = AP.LockAxes.None;
+        if (tx) m |= AP.LockAxes.TranslationX;
+        if (ty) m |= AP.LockAxes.TranslationY;
+        if (tz) m |= AP.LockAxes.TranslationZ;
+        if (rx) m |= AP.LockAxes.RotationX;
+        if (ry) m |= AP.LockAxes.RotationY;
+        if (rz) m |= AP.LockAxes.RotationZ;
+        return b.SetLockedAxes(m);
+    }
+
+    internal static bool SetCcdForGraph(int body, bool enabled)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetCcd(enabled);
+    }
+
+    // ---- shape queries -------------------------------------------------------------------------------
+    // Rotation is yaw/pitch/roll DEGREES through Rot.ToQuat, the same convention SetLocalRotation uses,
+    // so a graph's box faces the way a placed actor does. A layerMask of 0 means ALL layers: an unwired
+    // int pin reads 0, and a mask matching nothing is never what a graph wants.
+
+    /// <summary>Upper bound on bodies an overlap or point query reports; count stops there.</summary>
+    private const int QueryMaxResults = 256;
+
+    private static uint QueryMask(int layerMask) =>
+        layerMask == 0 ? AP.Physics.LayerMaskAll : unchecked((uint)layerMask);
+
+    private static AP.QueryFlags QueryFlagsFor(bool includeSensors) =>
+        includeSensors ? AP.QueryFlags.IncludeSensors : AP.QueryFlags.None;
+
+    private static AP.Quaternion QueryRotation(float yaw, float pitch, float roll)
+    {
+        Quat q = new Rot(yaw, pitch, roll).ToQuat();
+        return new AP.Quaternion(q.X, q.Y, q.Z, q.W);
+    }
+
+    /// <summary>Direction and distance in one vector, as the native sweep takes it. False for a zero
+    /// direction or a non-positive distance: nothing to sweep, reported as a miss.</summary>
+    private static bool SweepDisplacement(float dx, float dy, float dz, float maxDist, out AP.Float3 displacement)
+    {
+        float len = MathF.Sqrt(dx * dx + dy * dy + dz * dz);
+        if (len <= 1e-6f || maxDist <= 0f) { displacement = AP.Float3.Zero; return false; }
+        float s = maxDist / len;
+        displacement = new AP.Float3(dx * s, dy * s, dz * s);
+        return true;
+    }
+
+    private static void ShapeHitOut(AP.ShapeHit h, out bool hit, out int body, out float distance,
+                                    out float px, out float py, out float pz, out float nx, out float ny, out float nz)
+    {
+        hit = h.Hit;
+        body = h.Body.Handle;
+        distance = h.Distance;
+        px = h.Point.X; py = h.Point.Y; pz = h.Point.Z;
+        nx = h.Normal.X; ny = h.Normal.Y; nz = h.Normal.Z;
+    }
+
+    internal static void BoxCastForGraph(
+        float cx, float cy, float cz, float hx, float hy, float hz, float yaw, float pitch, float roll,
+        float dx, float dy, float dz, float maxDist, int layerMask, int ignoreBody, bool includeSensors,
+        out bool hit, out int body, out float distance,
+        out float px, out float py, out float pz, out float nx, out float ny, out float nz)
+    {
+        AP.ShapeHit h = default;
+        if (SweepDisplacement(dx, dy, dz, maxDist, out AP.Float3 d))
+            h = AP.Physics.BoxCast(new AP.Float3(cx, cy, cz), new AP.Float3(hx, hy, hz), QueryRotation(yaw, pitch, roll), d,
+                                   QueryMask(layerMask), new AP.Body(ignoreBody), QueryFlagsFor(includeSensors));
+        ShapeHitOut(h, out hit, out body, out distance, out px, out py, out pz, out nx, out ny, out nz);
+    }
+
+    /// <summary>height is the TOTAL height, both caps included (Shapes.AddStaticCapsule's convention);
+    /// the native side refuses a capsule no taller than its two caps and the node reports a miss.</summary>
+    internal static void CapsuleCastForGraph(
+        float cx, float cy, float cz, float radius, float height, float yaw, float pitch, float roll,
+        float dx, float dy, float dz, float maxDist, int layerMask, int ignoreBody, bool includeSensors,
+        out bool hit, out int body, out float distance,
+        out float px, out float py, out float pz, out float nx, out float ny, out float nz)
+    {
+        AP.ShapeHit h = default;
+        if (SweepDisplacement(dx, dy, dz, maxDist, out AP.Float3 d))
+            h = AP.Physics.CapsuleCast(new AP.Float3(cx, cy, cz), radius, height, QueryRotation(yaw, pitch, roll), d,
+                                       QueryMask(layerMask), new AP.Body(ignoreBody), QueryFlagsFor(includeSensors));
+        ShapeHitOut(h, out hit, out body, out distance, out px, out py, out pz, out nx, out ny, out nz);
+    }
+
+    /// <summary>count is the number of distinct bodies (capped at QueryMaxResults); body is the first.</summary>
+    internal static void OverlapBoxForGraph(
+        float cx, float cy, float cz, float hx, float hy, float hz, float yaw, float pitch, float roll,
+        int layerMask, int ignoreBody, bool includeSensors, out int count, out int body)
+    {
+        AP.Body[] r = AP.Physics.OverlapBox(new AP.Float3(cx, cy, cz), new AP.Float3(hx, hy, hz), QueryRotation(yaw, pitch, roll),
+                                            QueryMask(layerMask), new AP.Body(ignoreBody), QueryFlagsFor(includeSensors), QueryMaxResults);
+        count = r.Length;
+        body = r.Length > 0 ? r[0].Handle : 0;
+    }
+
+    /// <summary>One entry per HIT, not per body (a ray through a body twice counts twice). The outputs
+    /// after count describe the nearest hit and are zero when count is 0.</summary>
+    internal static void RaycastAllForGraph(
+        float ox, float oy, float oz, float dx, float dy, float dz, float maxDist,
+        int layerMask, int ignoreBody, bool includeSensors,
+        out int count, out int body, out float distance, out float px, out float py, out float pz)
+    {
+        AP.ShapeHit[] r = AP.Physics.RaycastAll(new AP.Float3(ox, oy, oz), new AP.Float3(dx, dy, dz), maxDist,
+                                                QueryMask(layerMask), new AP.Body(ignoreBody), QueryFlagsFor(includeSensors), QueryMaxResults);
+        count = r.Length;
+        AP.ShapeHit n = r.Length > 0 ? r[0] : default;
+        body = n.Body.Handle;
+        distance = n.Distance;
+        px = n.Point.X; py = n.Point.Y; pz = n.Point.Z;
+    }
+
+    internal static void BodiesAtPointForGraph(
+        float x, float y, float z, int layerMask, int ignoreBody, bool includeSensors, out int count, out int body)
+    {
+        AP.Body[] r = AP.Physics.BodiesAtPoint(new AP.Float3(x, y, z), QueryMask(layerMask), new AP.Body(ignoreBody),
+                                               QueryFlagsFor(includeSensors), QueryMaxResults);
+        count = r.Length;
+        body = r.Length > 0 ? r[0].Handle : 0;
+    }
+
+    // ---- character can-stand --------------------------------------------------------------------------
+    // The entity's capsule handle is AverCharacter's private field; the physics module hands it back by
+    // the entity stamp (aver_phys_character_of_entity), so this file binds that one export itself rather
+    // than widening Character.cs, as Physics.cs's Phys class does for the calls Character.cs makes.
+
+    private static class CharNative
+    {
+        [System.Runtime.InteropServices.DllImport("Aver.Physics")]
+        internal static extern int aver_phys_character_of_entity(int entity);
+    }
+
+    /// <summary>Whether a capsule of radius/halfHeight fits where the character's feet are now (pure
+    /// query, nothing changes). False return: the entity has no live character, canStand false too.</summary>
+    internal static bool CharacterCanStandForGraph(int entity, float radius, float halfHeight, out bool canStand)
+    {
+        canStand = false;
+        int ch = CharNative.aver_phys_character_of_entity(entity);
+        if (ch == 0) return false;
+        canStand = new AP.CharacterBody(ch).CanSetShape(radius, halfHeight * 2f);
+        return true;
+    }
+
+    // ---- ragdolls ------------------------------------------------------------------------------------
+    // Mode is RagdollMode's numbering (0 Kinematic, 1 Limp, 2 Powered).
+
+    internal static bool RagdollStartForGraph(int entity, int mode, float blendSeconds)
+    {
+        Entity e = new Entity(entity);
+        return e.IsAlive && mode >= 0 && mode <= 2 && e.StartRagdoll((RagdollMode)mode, blendSeconds);
+    }
+
+    internal static bool RagdollStopForGraph(int entity, float blendSeconds)
+    {
+        Entity e = new Entity(entity);
+        return e.IsAlive && e.StopRagdoll(blendSeconds);
+    }
+
+    internal static bool SetRagdollStrengthForGraph(int entity, float strength)
+    {
+        Entity e = new Entity(entity);
+        return e.IsAlive && e.SetRagdollStrength(strength);
+    }
+
+    /// <summary>An empty bone pushes the root part, as Entity.AddRagdollImpulse(Vec3) does.</summary>
+    internal static bool RagdollImpulseForGraph(int entity, string bone, float x, float y, float z)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        Vec3 impulse = new Vec3(x, y, z);
+        return string.IsNullOrEmpty(bone) ? e.AddRagdollImpulse(impulse) : e.AddRagdollImpulse(bone, impulse);
+    }
+
     // ================================================================== named input actions (rebindable)
     // ActionHandleForGraph is how an InputAction/InputActionPressed/InputActionReleased node's own
     // action= attribute (GraphCompiler's EmitInputAction family, contract D) resolves to the native

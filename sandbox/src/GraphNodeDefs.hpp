@@ -289,6 +289,54 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"JointRemove", "Joint Remove", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"GetJointValue", "Get Joint Value", "Physics", {pin("joint", "int", false), pin("value", "float", true), pin("success", "bool", true)}});
 
+    // -- PHYSICS WAVE 1b: breakable joints, body locks and CCD, shape queries, character can-stand,
+    //    ragdolls. Mirrors OcGraphParser.cs's wave 1b cases pin-for-pin.
+    //    SetJointBreakable keys off a JOINT handle; thresholds are NEWTONS and NEWTON-METRES (SI, unlike
+    //    the cm-based forces above) and 0 means "never check that part", both 0 = unbreakable.
+    t.push_back({"SetJointBreakable", "Set Joint Breakable", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("maxForceN", "float", false), pin("maxTorqueNm", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    //    SetLockedAxes: six WORLD-axis flags (translation XYZ, rotation XYZ), engine axes (X forward, Y right,
+    //    Z up). Dynamic bodies only; locking all six is refused (success=false) -- use a static body.
+    t.push_back({"SetLockedAxes", "Set Locked Axes", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("lockX", "bool", false), pin("lockY", "bool", false), pin("lockZ", "bool", false), pin("lockRotX", "bool", false), pin("lockRotY", "bool", false), pin("lockRotZ", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetCcd", "Set CCD", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("enabled", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    //    SHAPE QUERIES. Cached per exec visit like Sphere Cast: one native call, every output readable
+    //    afterwards. Rotation is yaw/pitch/roll DEGREES (Set Local Rotation's convention); distances and
+    //    positions are centimetres. dir need not be unit length (a zero dir is a miss). A capsule's
+    //    height is TOTAL, both caps included. Filters: layerMask 0 = ALL layers (an unwired pin reads 0
+    //    and a mask matching nothing helps no one), ignoreBody 0 = ignore nothing, sensors are skipped
+    //    unless includeSensors. count is the number of distinct bodies (capped at 256), body the first;
+    //    Raycast All counts HITS, nearest first, and distance/point describe the nearest.
+    {
+        auto query = [](std::vector<GraphPinSpec> ins, std::vector<GraphPinSpec> outs) {
+            ins.push_back(pin("layerMask", "int", false));
+            ins.push_back(pin("ignoreBody", "int", false));
+            ins.push_back(pin("includeSensors", "bool", false));
+            ins.insert(ins.begin(), pin("exec", "exec", false));
+            ins.push_back(pin("then", "exec", true));
+            ins.insert(ins.end(), outs.begin(), outs.end());
+            return ins;
+        };
+        const auto fl = [](const char* n) { return pin(n, "float", false); };
+        const auto castOut = std::vector<GraphPinSpec>{pin("hit", "bool", true), pin("body", "int", true), pin("distance", "float", true), pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true), pin("normalX", "float", true), pin("normalY", "float", true), pin("normalZ", "float", true)};
+        t.push_back({"BoxCast", "Box Cast", "Physics", query({fl("cx"), fl("cy"), fl("cz"), fl("hx"), fl("hy"), fl("hz"), fl("yaw"), fl("pitch"), fl("roll"), fl("dirX"), fl("dirY"), fl("dirZ"), fl("maxDist")}, castOut)});
+        t.push_back({"CapsuleCast", "Capsule Cast", "Physics", query({fl("cx"), fl("cy"), fl("cz"), fl("radius"), fl("height"), fl("yaw"), fl("pitch"), fl("roll"), fl("dirX"), fl("dirY"), fl("dirZ"), fl("maxDist")}, castOut)});
+        t.push_back({"OverlapBox", "Overlap Box", "Physics", query({fl("cx"), fl("cy"), fl("cz"), fl("hx"), fl("hy"), fl("hz"), fl("yaw"), fl("pitch"), fl("roll")}, {pin("count", "int", true), pin("body", "int", true)})});
+        t.push_back({"RaycastAll", "Raycast All", "Physics", query({fl("originX"), fl("originY"), fl("originZ"), fl("dirX"), fl("dirY"), fl("dirZ"), fl("maxDist")}, {pin("count", "int", true), pin("body", "int", true), pin("distance", "float", true), pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)})});
+        t.push_back({"BodiesAtPoint", "Bodies At Point", "Physics", query({fl("x"), fl("y"), fl("z")}, {pin("count", "int", true), pin("body", "int", true)})});
+    }
+    //    CharacterCanStand: a pure read like Is Grounded. Would a capsule of this radius and HALF height
+    //    fit where the character's feet are now (the question to ask before standing up from a crouch)?
+    //    success=false when the entity has no live character, so "no capsule" is not read as "blocked".
+    t.push_back({"CharacterCanStand", "Character Can Stand", "Character", {pin("entity", "int", false), pin("radius", "float", false), pin("halfHeight", "float", false), pin("canStand", "bool", true), pin("success", "bool", true)}});
+    //    RAGDOLLS, on a skinned entity. mode is Aver.Framework.RagdollMode (0 Kinematic, 1 Limp, 2
+    //    Powered); strength 0..1 only matters while Powered; blend is seconds. Ragdoll Impulse takes a
+    //    world-space impulse in kg*cm/s, at the part of the bone= NODE-line attribute (empty = the root
+    //    part). All four report success=false when the entity is dead or has no ragdoll support.
+    t.push_back({"RagdollStart", "Ragdoll Start", "Scene", {pin("exec", "exec", false), pin("entity", "int", false), pin("mode", "int", false), pin("blend", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"RagdollStop", "Ragdoll Stop", "Scene", {pin("exec", "exec", false), pin("entity", "int", false), pin("blend", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetRagdollStrength", "Set Ragdoll Strength", "Scene", {pin("exec", "exec", false), pin("entity", "int", false), pin("strength", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"RagdollImpulse", "Ragdoll Impulse", "Scene", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("bone", "Bone")}});
+
     // -- FUNCTION: the three node types a user-defined function is made of, present here only for
     //    DISPLAY NAME and HEADER COLOUR -- the palette skips "Function" entirely since none of the
     //    three is placed by an author directly (a second FuncEntry breaks the function -- Validate:

@@ -2516,11 +2516,100 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // ---- Physics wave 1b: ragdolls, shape queries, breakable joints, body locks/CCD, can-stand ----
+            // Pin sets via AddPinSpec (inputs '>' outputs), not one Pin per line: the query nodes carry
+            // twenty-odd pins. GraphNodeDefs.hpp's catalog entries are the hand-kept mirror.
+            case "ragdollstart":
+                AddPinSpec(node, "exec:exec,entity:int,mode:int,blend:float>then:exec,success:bool");
+                break;
+            case "ragdollstop":
+                AddPinSpec(node, "exec:exec,entity:int,blend:float>then:exec,success:bool");
+                break;
+            case "setragdollstrength":
+                AddPinSpec(node, "exec:exec,entity:int,strength:float>then:exec,success:bool");
+                break;
+            // The bone is a NODE-line bone= attribute (PinType has no string); empty pushes the root part.
+            case "ragdollimpulse":
+                AddPinSpec(node, "exec:exec,entity:int,x:float,y:float,z:float>then:exec,success:bool");
+                break;
+
+            case "boxcast":
+                AddPinSpec(node, "exec:exec,cx:float,cy:float,cz:float,hx:float,hy:float,hz:float," +
+                                 "yaw:float,pitch:float,roll:float,dirX:float,dirY:float,dirZ:float,maxDist:float," + QueryFilterPins +
+                                 ">then:exec,hit:bool,body:int,distance:float,pointX:float,pointY:float,pointZ:float," +
+                                 "normalX:float,normalY:float,normalZ:float");
+                break;
+            case "capsulecast":
+                AddPinSpec(node, "exec:exec,cx:float,cy:float,cz:float,radius:float,height:float," +
+                                 "yaw:float,pitch:float,roll:float,dirX:float,dirY:float,dirZ:float,maxDist:float," + QueryFilterPins +
+                                 ">then:exec,hit:bool,body:int,distance:float,pointX:float,pointY:float,pointZ:float," +
+                                 "normalX:float,normalY:float,normalZ:float");
+                break;
+            case "overlapbox":
+                AddPinSpec(node, "exec:exec,cx:float,cy:float,cz:float,hx:float,hy:float,hz:float," +
+                                 "yaw:float,pitch:float,roll:float," + QueryFilterPins +
+                                 ">then:exec,count:int,body:int");
+                break;
+            case "raycastall":
+                AddPinSpec(node, "exec:exec,originX:float,originY:float,originZ:float,dirX:float,dirY:float,dirZ:float," +
+                                 "maxDist:float," + QueryFilterPins +
+                                 ">then:exec,count:int,body:int,distance:float,pointX:float,pointY:float,pointZ:float");
+                break;
+            case "bodiesatpoint":
+                AddPinSpec(node, "exec:exec,x:float,y:float,z:float," + QueryFilterPins + ">then:exec,count:int,body:int");
+                break;
+
+            case "setjointbreakable":
+                AddPinSpec(node, "exec:exec,joint:int,maxForceN:float,maxTorqueNm:float>then:exec,success:bool");
+                break;
+            case "setlockedaxes":
+                AddPinSpec(node, "exec:exec,body:int,lockX:bool,lockY:bool,lockZ:bool,lockRotX:bool,lockRotY:bool,lockRotZ:bool" +
+                                 ">then:exec,success:bool");
+                break;
+            case "setccd":
+                AddPinSpec(node, "exec:exec,body:int,enabled:bool>then:exec,success:bool");
+                break;
+
+            // A pure read like IsGrounded, with `success` (false: no live character on the entity) so a
+            // missing capsule is not read as "something is overhead".
+            case "charactercanstand":
+                AddPinSpec(node, "entity:int,radius:float,halfHeight:float>canStand:bool,success:bool");
+                break;
+
             default:
                 // The table-driven families (timers, blackboard, audio streaming, anim state machines,
                 // game UI, prefabs, decals, crowds): GameSystemNodes carries their pins.
                 GameSystemNodes.AddDefaultPins(node, graph);
                 break;
+        }
+    }
+
+    /// The filter pins every physics query shares: layerMask 0 means all layers (a mask of 0 would match
+    /// nothing, and an unwired int pin reads 0), ignoreBody 0 ignores nothing, sensors are skipped.
+    private const string QueryFilterPins = "layerMask:int,ignoreBody:int,includeSensors:bool";
+
+    /// Adds pins from `name:type,...>name:type,...` (inputs, then outputs after the '>'). Types are
+    /// exec/float/int/bool.
+    private static void AddPinSpec(Node node, string spec)
+    {
+        int split = spec.IndexOf('>');
+        string ins = split < 0 ? spec : spec[..split];
+        string outs = split < 0 ? string.Empty : spec[(split + 1)..];
+        foreach (var (list, isOutput) in new[] { (ins, false), (outs, true) })
+        {
+            foreach (var part in list.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var nt = part.Split(':');
+                var type = nt[1] switch
+                {
+                    "exec" => PinType.Exec,
+                    "float" => PinType.Float,
+                    "int" => PinType.Int,
+                    "bool" => PinType.Bool,
+                    _ => throw new ArgumentException("pin type " + nt[1]),
+                };
+                node.Pins.Add(new Pin { Name = nt[0], Type = type, IsOutput = isOutput, NodeId = node.Id });
+            }
         }
     }
 

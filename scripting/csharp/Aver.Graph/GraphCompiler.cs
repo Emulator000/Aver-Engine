@@ -454,6 +454,7 @@ public partial class GraphCompiler
                 EmitSimpleApiRead(node);
                 break;
             case "isgrounded":
+            case "charactercanstand":
             case "hastag":
             case "gettags":
             case "getplayerpawn":
@@ -1164,6 +1165,14 @@ public partial class GraphCompiler
             case "setgravity":
                 EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
                 _il.Emit(OpCodes.Call, SetGravityMethod); break;
+            // Wave 1b: six lock flags (translation XYZ, then rotation XYZ) and a CCD switch.
+            case "setlockedaxes":
+                foreach (string a in new[] { "lockX", "lockY", "lockZ", "lockRotX", "lockRotY", "lockRotZ" })
+                    EmitPullInput(node, a);
+                _il.Emit(OpCodes.Call, SetLockedAxesMethod); break;
+            case "setccd":
+                EmitPullInput(node, "enabled");
+                _il.Emit(OpCodes.Call, SetCcdMethod); break;
             default:
                 _il.Emit(OpCodes.Call, DestroyBodyMethod); break;
         }
@@ -1256,6 +1265,9 @@ public partial class GraphCompiler
             case "jointsetenabled":
                 EmitPullInput(node, "enabled");
                 _il.Emit(OpCodes.Call, JointSetEnabledMethod); break;
+            case "setjointbreakable":
+                EmitPullInput(node, "maxForceN"); EmitPullInput(node, "maxTorqueNm");
+                _il.Emit(OpCodes.Call, JointSetBreakableMethod); break;
             default: // jointremove
                 _il.Emit(OpCodes.Call, JointRemoveMethod); break;
         }
@@ -1277,6 +1289,87 @@ public partial class GraphCompiler
         _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointY", typeof(float)));
         _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, "pointZ", typeof(float)));
         _il.Emit(OpCodes.Call, SphereCastMethod);
+    }
+
+    /// The wave-1b queries, EmitExecSphereCast's shape: pull the inputs, hand a local address per
+    /// output, one call. The interop method's parameters are exactly the input pins then the output
+    /// pins in the order below, so the pin lists here ARE the signature.
+    private void EmitExecPhysicsQuery(Node node)
+    {
+        if (_il == null) return;
+        string[] filters = { "layerMask", "ignoreBody", "includeSensors" };
+        string[] rotation = { "yaw", "pitch", "roll" };
+        string[] castOut = { "hit", "body", "distance", "pointX", "pointY", "pointZ", "normalX", "normalY", "normalZ" };
+        string[] ins, outs;
+        MethodInfo method;
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "boxcast":
+                ins = new[] { "cx", "cy", "cz", "hx", "hy", "hz" }.Concat(rotation)
+                    .Concat(new[] { "dirX", "dirY", "dirZ", "maxDist" }).Concat(filters).ToArray();
+                outs = castOut; method = BoxCastMethod; break;
+            case "capsulecast":
+                ins = new[] { "cx", "cy", "cz", "radius", "height" }.Concat(rotation)
+                    .Concat(new[] { "dirX", "dirY", "dirZ", "maxDist" }).Concat(filters).ToArray();
+                outs = castOut; method = CapsuleCastMethod; break;
+            case "overlapbox":
+                ins = new[] { "cx", "cy", "cz", "hx", "hy", "hz" }.Concat(rotation).Concat(filters).ToArray();
+                outs = new[] { "count", "body" }; method = OverlapBoxMethod; break;
+            case "raycastall":
+                ins = new[] { "originX", "originY", "originZ", "dirX", "dirY", "dirZ", "maxDist" }.Concat(filters).ToArray();
+                outs = new[] { "count", "body", "distance", "pointX", "pointY", "pointZ" }; method = RaycastAllMethod; break;
+            default: // bodiesatpoint
+                ins = new[] { "x", "y", "z" }.Concat(filters).ToArray();
+                outs = new[] { "count", "body" }; method = BodiesAtPointMethod; break;
+        }
+        foreach (string a in ins) EmitPullInput(node, a);
+        foreach (string o in outs)
+        {
+            var pin = PinOf(node, o) ?? throw new InvalidOperationException(
+                $"{node.Type} node '{node.Id}' has no output pin '{o}' (a node with PIN records needs every pin)");
+            _il.Emit(OpCodes.Ldloca, GetOrCreateExecLocal(node.Id, o, PinTypeToCLRType(pin.Type)));
+        }
+        _il.Emit(OpCodes.Call, method);
+    }
+
+    /// The four ragdoll writes: entity first, then op-specific args, then the usual "success into an
+    /// exec local" tail. RagdollImpulse's bone is a NODE-line bone= attribute, empty (= root part) when absent.
+    private void EmitExecRagdoll(Node node)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "entity");
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "ragdollstart":
+                EmitPullInput(node, "mode"); EmitPullInput(node, "blend");
+                _il.Emit(OpCodes.Call, RagdollStartMethod); break;
+            case "ragdollstop":
+                EmitPullInput(node, "blend");
+                _il.Emit(OpCodes.Call, RagdollStopMethod); break;
+            case "setragdollstrength":
+                EmitPullInput(node, "strength");
+                _il.Emit(OpCodes.Call, SetRagdollStrengthMethod); break;
+            default: // ragdollimpulse
+                _il.Emit(OpCodes.Ldstr, AttributeFor(node, "bone?"));
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, RagdollImpulseMethod); break;
+        }
+        var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
+        if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+        else                    _il.Emit(OpCodes.Pop);
+    }
+
+    /// CharacterCanStand's PULL emission, EmitPullSynapsePerception's shape with one out-parameter.
+    private void EmitPullCharacterCanStand(Node node, string pinName)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "entity"); EmitPullInput(node, "radius"); EmitPullInput(node, "halfHeight");
+        var canStandL = _il.DeclareLocal(typeof(bool));
+        _il.Emit(OpCodes.Ldloca, canStandL);
+        _il.Emit(OpCodes.Call, CharacterCanStandMethod);
+        if (pinName == "success") return;
+        _il.Emit(OpCodes.Pop);
+        _il.Emit(OpCodes.Ldloc, canStandL);
     }
 
     private void EmitExecTransformWrite(Node node)
@@ -2750,6 +2843,8 @@ public partial class GraphCompiler
                     else if (IsExecCapableJointCreateType(node.Type)) EmitExecJointCreate(node);
                     else if (IsExecCapableJointOpType(node.Type)) EmitExecJointOp(node);
                     else if (IsExecCapableSphereCastType(node.Type)) EmitExecSphereCast(node);
+                    else if (IsExecCapablePhysicsQueryType(node.Type)) EmitExecPhysicsQuery(node);
+                    else if (IsExecCapableRagdollType(node.Type)) EmitExecRagdoll(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     else if (IsExecCapableSaveLoadType(node.Type)) EmitExecSaveLoad(node);
                     else if (IsExecCapableInputBindingOpType(node.Type)) EmitExecInputBindingOp(node);
@@ -3261,7 +3356,8 @@ public partial class GraphCompiler
                t == "addforce" || t == "addimpulse" || t == "addtorque" || t == "addangularimpulse" ||
                t == "setbodyangularvelocity" || t == "setbodyfriction" || t == "setbodyrestitution" ||
                t == "setbodygravityfactor" || t == "setbodymass" || t == "setbodymotiontype" ||
-               t == "activatebody" || t == "setbodylayer";
+               t == "activatebody" || t == "setbodylayer" ||
+               t == "setlockedaxes" || t == "setccd";
     }
 
     private static bool IsExecCapablePhysicsCreateType(string type)
@@ -3287,7 +3383,22 @@ public partial class GraphCompiler
     private static bool IsExecCapableJointOpType(string type)
     {
         string t = type.ToLowerInvariant();
-        return t == "jointsetmotor" || t == "jointsetenabled" || t == "jointremove";
+        return t == "jointsetmotor" || t == "jointsetenabled" || t == "jointremove" || t == "setjointbreakable";
+    }
+
+    /// The wave-1b shape queries -- EmitExecPhysicsQuery's dispatch list. Exec-cached like SphereCast:
+    /// one native call per visit, N results into N exec-locals.
+    private static bool IsExecCapablePhysicsQueryType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "boxcast" || t == "capsulecast" || t == "overlapbox" || t == "raycastall" || t == "bodiesatpoint";
+    }
+
+    /// The four ragdoll writes -- EmitExecRagdoll's dispatch list. Entity-keyed, so apart from the body writers.
+    private static bool IsExecCapableRagdollType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "ragdollstart" || t == "ragdollstop" || t == "setragdollstrength" || t == "ragdollimpulse";
     }
 
     private static bool IsExecCapableTransformWriteType(string type)
@@ -4028,6 +4139,7 @@ public partial class GraphCompiler
         IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
         IsExecCapablePhysicsCreateType(type) || IsExecCapableSaveLoadType(type) ||
         IsExecCapableJointCreateType(type) || IsExecCapableJointOpType(type) ||
+        IsExecCapablePhysicsQueryType(type) || IsExecCapableRagdollType(type) ||
         IsExecCapableInputBindingOpType(type) || IsExecCapableRebindActionType(type) ||
         GameSystemNodes.IsExec(type);
 
@@ -4272,6 +4384,8 @@ public partial class GraphCompiler
                 EmitPullInput(source, "a"); _il.Emit(OpCodes.Conv_I4); return;
             case "isgrounded":
                 EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsGroundedMethod); return;
+            case "charactercanstand":
+                EmitPullCharacterCanStand(source, pinName); return;
             case "hastag":
                 EmitPullInput(source, "entity"); EmitPullInput(source, "mask");
                 _il.Emit(OpCodes.Call, HasTagMethod); return;
@@ -4976,6 +5090,46 @@ public partial class GraphCompiler
     private static readonly MethodInfo JointSetMotorMethod =
         typeof(GraphInterop).GetMethod("JointSetMotorForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointSetMotorForGraph was not found by reflection");
+    // Physics wave 1b: breakable joints, body locks/CCD, shape queries, can-stand, ragdolls.
+    private static readonly MethodInfo JointSetBreakableMethod =
+        typeof(GraphInterop).GetMethod("JointSetBreakableForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointSetBreakableForGraph was not found by reflection");
+    private static readonly MethodInfo SetLockedAxesMethod =
+        typeof(GraphInterop).GetMethod("SetLockedAxesForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetLockedAxesForGraph was not found by reflection");
+    private static readonly MethodInfo SetCcdMethod =
+        typeof(GraphInterop).GetMethod("SetCcdForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetCcdForGraph was not found by reflection");
+    private static readonly MethodInfo BoxCastMethod =
+        typeof(GraphInterop).GetMethod("BoxCastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BoxCastForGraph was not found by reflection");
+    private static readonly MethodInfo CapsuleCastMethod =
+        typeof(GraphInterop).GetMethod("CapsuleCastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CapsuleCastForGraph was not found by reflection");
+    private static readonly MethodInfo OverlapBoxMethod =
+        typeof(GraphInterop).GetMethod("OverlapBoxForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.OverlapBoxForGraph was not found by reflection");
+    private static readonly MethodInfo RaycastAllMethod =
+        typeof(GraphInterop).GetMethod("RaycastAllForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RaycastAllForGraph was not found by reflection");
+    private static readonly MethodInfo BodiesAtPointMethod =
+        typeof(GraphInterop).GetMethod("BodiesAtPointForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodiesAtPointForGraph was not found by reflection");
+    private static readonly MethodInfo CharacterCanStandMethod =
+        typeof(GraphInterop).GetMethod("CharacterCanStandForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CharacterCanStandForGraph was not found by reflection");
+    private static readonly MethodInfo RagdollStartMethod =
+        typeof(GraphInterop).GetMethod("RagdollStartForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RagdollStartForGraph was not found by reflection");
+    private static readonly MethodInfo RagdollStopMethod =
+        typeof(GraphInterop).GetMethod("RagdollStopForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RagdollStopForGraph was not found by reflection");
+    private static readonly MethodInfo SetRagdollStrengthMethod =
+        typeof(GraphInterop).GetMethod("SetRagdollStrengthForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetRagdollStrengthForGraph was not found by reflection");
+    private static readonly MethodInfo RagdollImpulseMethod =
+        typeof(GraphInterop).GetMethod("RagdollImpulseForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RagdollImpulseForGraph was not found by reflection");
     private static readonly MethodInfo JointSetEnabledMethod =
         typeof(GraphInterop).GetMethod("JointSetEnabledForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointSetEnabledForGraph was not found by reflection");

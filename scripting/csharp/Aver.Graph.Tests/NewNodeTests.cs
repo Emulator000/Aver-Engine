@@ -534,6 +534,13 @@ OUT rc pointZ
                 Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
                 return 1;
             }
+            // The managed Aver.Physics.dll can sit in the output where the native one would be looked for;
+            // a missing entry point naming the export proves the same real call.
+            catch (EntryPointNotFoundException epEx) when (epEx.Message.Contains("aver_phys_"))
+            {
+                Console.WriteLine($"  PASS: real call reached {epEx.Message}");
+                return 0;
+            }
             catch (DllNotFoundException dnfEx)
             {
                 if (!dnfEx.Message.Contains("Aver.Physics"))
@@ -591,6 +598,13 @@ OUT rc pointZ
                 object[] unused = fn();
                 Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
                 return 1;
+            }
+            // The managed Aver.Physics.dll can sit in the output where the native one would be looked for;
+            // a missing entry point naming the export proves the same real call.
+            catch (EntryPointNotFoundException epEx) when (epEx.Message.Contains("aver_phys_"))
+            {
+                Console.WriteLine($"  PASS: real call reached {epEx.Message}");
+                return 0;
             }
             catch (DllNotFoundException dnfEx)
             {
@@ -740,6 +754,13 @@ OUT rc hit
                 object[] unused = fn(0f);
                 Console.WriteLine($"  FAIL: expected invoking this to throw but it returned [{string.Join(", ", unused)}]");
                 return 1;
+            }
+            // The managed Aver.Physics.dll can sit in the output where the native one would be looked for;
+            // a missing entry point naming the export proves the same real call.
+            catch (EntryPointNotFoundException epEx) when (epEx.Message.Contains("aver_phys_"))
+            {
+                Console.WriteLine($"  PASS: real call reached {epEx.Message}");
+                return 0;
             }
             catch (DllNotFoundException dnfEx)
             {

@@ -252,6 +252,10 @@ static int Main()
         // Physics status reads. See NameAndPhysicsStatusNodeTests.cs's own header.
         failures += NameAndPhysicsStatusNodeTests.RunAll();
 
+        // Physics wave 1b: ragdoll, shape-query, breakable-joint, body-lock/CCD and can-stand nodes.
+        // See PhysicsWave1bNodeTests.cs's own header for what a hostless process can prove.
+        failures += PhysicsWave1bNodeTests.RunAll();
+
         // The six audio nodes -- the graph half of connecting a mixer nothing had ever called.
         // See AudioNodeTests.cs's own header for what these can and cannot prove.
         failures += AudioNodeTests.RunAll();
