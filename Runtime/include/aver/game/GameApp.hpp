@@ -123,6 +123,9 @@ struct GameConfig {
     // --aversr off|quality|balanced|performance|auto: render upscaler level (-1 = not given).
     // Parsed locally; GameApp never includes aver/sr/* (module boundary).
     int averSrArg = -1;   // -1 = unstated/auto, else the ladder's numbering 0..3
+    // --taa / --no-taa: AverSR temporal AA + upscale (TAAU) on or off, over the project's RENDER.TAA
+    // (unstated = on, as in the editor). Off keeps FSR 1 as the upscaler. -1 = not given.
+    int taaArg = -1;
     // --frame-interp 0|1: frame interpolation over the project's RENDER.FRAMEINTERP. -1 = not given.
     int frameInterpArg = -1;
     // --frame-interp-trajectory linear|quadratic|neural: trajectory mode for frame interpolation.
@@ -139,8 +142,9 @@ public:
 
     // AverSR upscaler installer. Called once by createApplication, before onInit.
     // Left null is the legal default for builds without the SR module.
-    using AverSrInstaller = bool (*)(rhi::IDevice& dev, u32 level, std::unique_ptr<rhi::IUpscaler>& out,
-                                      f32& renderScale);
+    // `temporal`: build the TAAU upscaler (jitter + G-buffer history) instead of FSR 1.
+    using AverSrInstaller = bool (*)(rhi::IDevice& dev, u32 level, bool temporal,
+                                      std::unique_ptr<rhi::IUpscaler>& out, f32& renderScale);
     void setAverSrInstaller(AverSrInstaller fn) { averSrInstaller_ = fn; }
 
     BootConfig config() const override;
@@ -326,6 +330,8 @@ private:
     std::unique_ptr<rhi::IUpscaler> averSrUpscaler_;
     // Set once by setAverSrInstaller. Null is the ordinary "this build has no SR module" case.
     AverSrInstaller averSrInstaller_ = nullptr;
+    // True once TAAU is the installed upscaler; keeps the G-buffer (velocity, view Z) on every frame.
+    bool temporalAa_ = false;
 
     // Frame interpolation. Detached from the device in onShutdown before it resets.
     std::unique_ptr<neurafi::NeuraFI> frameInterpolator_;

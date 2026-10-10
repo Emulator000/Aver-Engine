@@ -449,6 +449,9 @@ GameConfig parseArgs(int argc, char** argv) {
             else if (v && equalsAsciiCI(v, "performance")) { c.averSrArg = 3;  ++i; }
             else if (v && equalsAsciiCI(v, "auto"))        { c.averSrArg = -1; ++i; }
         }
+        // Temporal AA + upscale on/off; --no-taa leaves FSR 1 (the editor's flags, same meaning)
+        else if (std::strcmp(a, "--taa") == 0)    { c.taaArg = 1; }
+        else if (std::strcmp(a, "--no-taa") == 0) { c.taaArg = 0; }
         // Override frame interpolation setting
         else if (std::strcmp(a, "--frame-interp") == 0) {
             const char* v = valueAfter(argc, argv, i, nullptr);
@@ -1635,7 +1638,9 @@ void GameApp::pushFrame(Engine& e) {
             }
         }
         dev->setFrameInterpolation(wantFrameInterp);
-        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted || wantFrameInterp);
+        // TAAU's resolve reads velocity and view Z.
+        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted ||
+                               wantFrameInterp || temporalAa_);
         // Ray-driven frames run at 1x whatever MSAA says (voxi::Resolution::sampleCount).
         {
             const u32 samples = voxi::resolve(vx.settings(), vx.deviceInfo()).sampleCount;
@@ -1753,17 +1758,21 @@ void GameApp::onInit(Engine& e) {
 #if AVER_MODULE_VOXI
     // AverSR resolved after openProject. applyProjectRenderSettings committed project's GI/RT tiers.
     // CLI (--aversr) beats RENDER.AVERSR beats Auto. Shipped game: userLevel pinned to -1.
+    // Upscaler: TAAU (the editor's choice) unless --no-taa / RENDER.TAA 0, then FSR 1. TAAU also runs at
+    // native scale (Off) as the anti-aliasing; FSR 1 only when a level scales the scene.
     if (rhi::IDevice* dev = e.device()) {
         const voxi::Renderer& vx = voxi::Renderer::get();
         const voxi::AverSrDecision dec = voxi::resolveAverSrLevel(
             cfg_.averSrArg, -1, project_.averSr, voxi::autoAverSrLevel(vx.settings(), vx.deviceInfo()));
+        const bool wantTaa = cfg_.taaArg >= 0 ? cfg_.taaArg == 1 : project_.taa != 0;
 
         // averSrInstaller_ is null when SR module is absent. Resolved level with no installer stays native 1.0.
         f32 scale = 1.0f;
-        if (dec.level != voxi::ladder::kAverSrOff && averSrInstaller_ &&
-            averSrInstaller_(*dev, dec.level, averSrUpscaler_, scale)) {
+        if ((dec.level != voxi::ladder::kAverSrOff || wantTaa) && averSrInstaller_ &&
+            averSrInstaller_(*dev, dec.level, wantTaa, averSrUpscaler_, scale)) {
             dev->setRenderScale(scale);
             dev->setUpscaler(averSrUpscaler_.get());
+            temporalAa_ = wantTaa;
         }
 
         // Mirrors setRenderScale formula: scene renders at round(present * scale).
@@ -1771,8 +1780,9 @@ void GameApp::onInit(Engine& e) {
         const u32 presentH = e.window() ? e.window()->height() : cfg_.height;
         const u32 sceneW = static_cast<u32>(std::lround(static_cast<f64>(presentW) * scale));
         const u32 sceneH = static_cast<u32>(std::lround(static_cast<f64>(presentH) * scale));
-        AVER_INFO("[AverSR] {} ({}): scene {}x{} -> present {}x{}",
-                  averSrLevelName(dec.level), averSrSourceName(dec.source), sceneW, sceneH, presentW, presentH);
+        AVER_INFO("[AverSR] {} ({}): scene {}x{} -> present {}x{}, upscaler {}",
+                  averSrLevelName(dec.level), averSrSourceName(dec.source), sceneW, sceneH, presentW, presentH,
+                  !averSrUpscaler_ ? "none" : temporalAa_ ? "TAAU" : "FSR 1");
     }
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE

@@ -29,6 +29,7 @@
 #if AVER_MODULE_SR
 #  include "aver/sr/AverSrQuality.hpp"
 #  include "aver/sr/AverSrFsr.hpp"
+#  include "aver/sr/AverSrTaa.hpp"
 #  if AVER_MODULE_VOXI
 #    include "aver/voxi/QualityLadder.hpp"
 // Cross-checked here, not assumed: GameApp::onInit resolves an AverSR level as a plain u32 through
@@ -55,8 +56,9 @@ namespace aver {
 #if AVER_MODULE_SR
 namespace {
 
-// game::GameApp::AverSrInstaller (3.3 C): builds a concrete FsrUpscaler (FSR 1 EASU + RCAS) against `dev`'s resource
-// factory and reports the render scale for `level` -- the one function this executable hands GameApp
+// game::GameApp::AverSrInstaller (3.3 C): builds a concrete upscaler against `dev`'s resource factory --
+// TemporalUpscaler (TAAU + RCAS, the editor's default) when `temporal`, else FsrUpscaler (FSR 1 EASU + RCAS) --
+// and reports the render scale for `level` -- the one function this executable hands GameApp
 // so it can install AverSR without ever naming sr::anything itself. `out` is GameApp's own
 // averSrUpscaler_ member, handed back by reference so ownership stays with GameApp exactly the way
 // SandboxApp.cpp's own averSrUpscaler_ owns its upscaler; see GameApp::onShutdown for the matching
@@ -70,10 +72,14 @@ namespace {
 // FALSE ONLY WHEN THERE IS NO RESOURCE FACTORY (a headless/mock device) -- SandboxApp.cpp's own
 // ensureAverSrUpscaler guards the identical case the same way. `out` is left untouched on failure, so
 // a transient miss does not discard an upscaler a previous, successful call already built.
-bool installAverSr(rhi::IDevice& dev, u32 level, std::unique_ptr<rhi::IUpscaler>& out, f32& renderScale) {
+bool installAverSr(rhi::IDevice& dev, u32 level, bool temporal, std::unique_ptr<rhi::IUpscaler>& out,
+                   f32& renderScale) {
     rhi::IResourceFactory* res = dev.resources();
     if (!res) return false;
-    if (!out) out = std::make_unique<sr::FsrUpscaler>(*res);
+    if (!out) {
+        if (temporal) out = std::make_unique<sr::TemporalUpscaler>(*res);
+        else          out = std::make_unique<sr::FsrUpscaler>(*res);
+    }
     renderScale = sr::renderScaleFor(static_cast<sr::Quality>(level));
     return true;
 }

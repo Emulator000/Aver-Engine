@@ -202,6 +202,11 @@ Auto then uses the ladder value at the higher of its GI and RT tiers.
 The packaged game (`AverEngineRuntime.exe`) walks the same chain minus step 3: there is no Display
 preference outside the editor, so a manifest value or Auto is all it has.
 
+The packaged game also picks the upscaler the way the editor does: the temporal path (TAAU, see
+`modules/render.sr/README.md`) unless `--no-taa` or `RENDER.TAA 0` is stated, then FSR 1. `--taa` /
+`--no-taa` outrank the manifest key; an unstated key means on. TAAU runs at native scale too, as the
+anti-aliasing.
+
 AverSR deliberately stays outside Custom detection — it lives at the module boundary above
 `voxi::Settings` (see "Module boundaries", above), so a project reading Custom in the Overall combo
 says nothing about its resolved upscaling level on its own. Where the two disagree, the editor's

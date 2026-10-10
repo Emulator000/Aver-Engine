@@ -381,6 +381,9 @@ Kept:
 - userLevel pinned to -1: packaged game has no Display page to prefer from.
 - averSrInstaller_ null when SR module absent (sole TU allowed to name sr::anything is Runtime/host/RuntimeMain.cpp under AVER_MODULE_SR).
 - Resolved level with no installer stays native 1.0; game must still build/run with SR module absent.
+- Upscaler kind (same choice as the editor): AverSR TAAU (`sr::TemporalUpscaler`) unless `--no-taa` or the project's `RENDER.TAA 0`; then FSR 1 (`sr::FsrUpscaler`), which is installed only when the level scales the scene. `--taa` / `--no-taa` beat `RENDER.TAA`; an unstated key is on. TAAU also runs at level Off (native scale) as the anti-aliasing, so `--aversr off` no longer means "no resolve pass"; pass `--no-taa` for a native, unfiltered capture.
+- `AverSrInstaller` takes `temporal`; the host builds the matching type. GameApp keeps `temporalAa_` (true once TAAU is installed) and ORs it into `setGBufferEnabled` each frame, since the resolve reads velocity and view Z. With MSAA > 1 or on a backend that cannot retarget (Vulkan) TAAU falls back to FSR 1 inside the upscaler; there is no jitter on Vulkan yet.
+- Log: `[AverSR] {level} ({source}): scene WxH -> present WxH, upscaler TAAU|FSR 1|none`.
 
 ### Scripting bootstrap cost on graph-free project
 - Measured cost unconditionally: 40-60ms extra startup (938-965ms against 890-908ms baseline).
