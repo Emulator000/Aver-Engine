@@ -367,6 +367,15 @@ struct NullResources {
 };
 NullResources gNull;
 
+// What an unbound slot is written with: VK_NULL_HANDLE under robustness2's nullDescriptor (D3D12's
+// null descriptor: reads 0, size queries 0), else the dummy. Callers have run ensureNullResources.
+VkImageView nullSlotView(const VulkanDevice& dev, bool tex3D) {
+    return dev.nullDescriptors() ? VK_NULL_HANDLE : (tex3D ? gNull.view3D : gNull.view2D);
+}
+VkBuffer nullSlotBuffer(const VulkanDevice& dev) {
+    return dev.nullDescriptors() ? VK_NULL_HANDLE : gNull.buffer;
+}
+
 bool ensureNullResources(VulkanDevice& dev) {
     if (gNull.ready) return true;
     const VulkanApi& api = dev.api();
@@ -730,6 +739,9 @@ u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 ma
     // Own set (kVkSetInstances): that number can equal kVkUavBindingBase and collide with set 0's UAVs.
     if (instanced) put('t', declaredSrvCount(layout), kVkSetInstances, 0);
 
+    // The bindless texture array, t0 in register SPACE 1 (D3D12's root table range), own set.
+    if (layout.bindlessTextureCount && n < maxOut) out[n++] = VkRegisterBind{'t', 0, 1, kVkSetBindless, 0};
+
     return n;
 }
 
@@ -755,6 +767,8 @@ u32 shaderVariantKey(const PipelineLayout& layout, bool mesh, bool instanced) {
     // source/layout (one extra -fvk-bind-register); without this the two would alias to one cached
     // variant and whichever compiled first would serve both.
     if (instanced) key |= 1u << 30;
+    // Bit 29: a bindless pipeline maps one more register (t0 space1) into its own set.
+    if (layout.bindlessTextureCount) key |= 1u << 29;
     return key;
 }
 
@@ -1143,6 +1157,13 @@ VulkanResourceFactory::~VulkanResourceFactory() {
 
     if (instanceSetLayout_) api.DestroyDescriptorSetLayout(device, instanceSetLayout_, nullptr);
     instanceSetLayout_ = VK_NULL_HANDLE;
+    for (RhiBindlessTable& t : bindlessTables_)
+        if (t.pool) api.DestroyDescriptorPool(device, t.pool, nullptr);
+    bindlessTables_.clear();
+    for (auto& [cap, l] : bindlessSetLayouts_) api.DestroyDescriptorSetLayout(device, l, nullptr);
+    bindlessSetLayouts_.clear();
+    if (emptySetLayout_) api.DestroyDescriptorSetLayout(device, emptySetLayout_, nullptr);
+    emptySetLayout_ = VK_NULL_HANDLE;
 
     destroyNullResources(*dev_);
 
@@ -1424,6 +1445,39 @@ VkSampler VulkanResourceFactory::getOrCreateSampler(const SamplerDesc& d) {
     return s;
 }
 
+// Set kVkSetBindless: one SAMPLED_IMAGE array binding of `capacity`. PARTIALLY_BOUND because a
+// table entry may name a texture since destroyed (bound but never read is then legal) -- every
+// entry is still written, with the null view where unset, as D3D12 null-fills its range.
+VkDescriptorSetLayout VulkanResourceFactory::bindlessSetLayout(u32 capacity) {
+    for (const auto& [cap, l] : bindlessSetLayouts_) if (cap == capacity) return l;
+    VkDescriptorSetLayoutBinding b{};
+    b.binding = 0;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    b.descriptorCount = capacity;
+    b.stageFlags = VK_SHADER_STAGE_ALL;
+    const VkDescriptorBindingFlags flags = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo fi{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+    fi.bindingCount = 1;
+    fi.pBindingFlags = &flags;
+    VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ci.pNext = &fi;
+    ci.bindingCount = 1;
+    ci.pBindings = &b;
+    VkDescriptorSetLayout l = VK_NULL_HANDLE;
+    if (!vkOk(dev_->api().CreateDescriptorSetLayout(dev_->vkDevice(), &ci, nullptr, &l), "rhi bindless set layout"))
+        return VK_NULL_HANDLE;
+    bindlessSetLayouts_.push_back({capacity, l});
+    return l;
+}
+
+VkDescriptorSetLayout VulkanResourceFactory::emptySetLayout() {
+    if (emptySetLayout_ != VK_NULL_HANDLE) return emptySetLayout_;
+    VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    if (!vkOk(dev_->api().CreateDescriptorSetLayout(dev_->vkDevice(), &ci, nullptr, &emptySetLayout_), "rhi empty set layout"))
+        emptySetLayout_ = VK_NULL_HANDLE;
+    return emptySetLayout_;
+}
+
 // The one descriptor-set layout every GraphicsPipelineDesc::instanced pipeline shares: a single
 // STORAGE_BUFFER_DYNAMIC at binding 0 (gInstanceWorlds).
 // SHARED RATHER THAN PER-ENTRY: shape never depends on the PipelineLayout, and Vulkan descriptor-set
@@ -1623,16 +1677,30 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
         }
     }
 
+    const bool bindless = layout.bindlessTextureCount != 0;
+    if (bindless) {
+        e.bindlessSetLayout = bindlessSetLayout(layout.bindlessTextureCount);
+        if (e.bindlessSetLayout == VK_NULL_HANDLE) {
+            if (e.samplersSet) api.FreeDescriptorSets(device, descriptorPool_, 1, &e.samplersSet);
+            if (e.samplersSetLayout) api.DestroyDescriptorSetLayout(device, e.samplersSetLayout, nullptr);
+            api.DestroyDescriptorSetLayout(device, e.constantsSetLayout, nullptr);
+            return nullptr;
+        }
+    }
     VkDescriptorSetLayout setLayouts[kVkDescriptorSetCount] = {
         e.tableSetLayouts[kVkSetTable0], e.tableSetLayouts[kVkSetTable1], e.constantsSetLayout,
-        e.samplersSetLayout, e.instancesSetLayout,
+        e.samplersSetLayout, e.instancesSetLayout, e.bindlessSetLayout,
     };
-    // TRAILING sets are what may be dropped, never interior ones -- pSetLayouts has no holes. So an
-    // instanced pipeline takes all five (set 3 is empty-but-present above when it has no samplers),
-    // a sampler pipeline four, and everything else three.
-    const u32 setLayoutCount = instanced                 ? kVkDescriptorSetCount
+    // TRAILING sets are what may be dropped, never interior ones -- pSetLayouts has no holes. So a
+    // bindless pipeline takes all six, an instanced one five (set 3 is empty-but-present above when
+    // it has no samplers), a sampler pipeline four, and everything else three. An interior index a
+    // bindless pipeline does not use gets the shared empty layout.
+    const u32 setLayoutCount = bindless                  ? kVkDescriptorSetCount
+                             : instanced                 ? kVkSetInstances + 1
                              : (layout.samplerCount > 0) ? kVkSetSamplers + 1
                                                          : kVkSetSamplers;
+    for (u32 i = kVkSetSamplers; i < setLayoutCount; ++i)
+        if (setLayouts[i] == VK_NULL_HANDLE) setLayouts[i] = emptySetLayout();
 
     VkPushConstantRange pcRange{};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -2322,6 +2390,16 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
         std::string fallbackSrc = s.source;
         if (!patchCbuffersForLayout(fallbackSrc, layout, mesh, /*annotateDescriptors=*/true))
             return VK_NULL_HANDLE;
+        // Without the map, space1 would land in SET 1 (table 1's): place the bindless array by hand.
+        if (layout.bindlessTextureCount) {
+            const std::size_t at = fallbackSrc.find("register(t0, space1)");
+            if (at != std::string::npos) {
+                std::size_t line = fallbackSrc.rfind('\n', at);
+                line = (line == std::string::npos) ? 0 : line + 1;
+                while (line < at && (fallbackSrc[line] == ' ' || fallbackSrc[line] == '\t')) ++line;
+                fallbackSrc.insert(line, "[[vk::binding(0, " + std::to_string(kVkSetBindless) + ")]] ");
+            }
+        }
         if (!vulkanShaderCompiler().compile(fallbackSrc.c_str(), s.entry.c_str(), s.stage, s.minShaderModel,
                                             s.defines.empty() ? nullptr : s.defines.c_str(), var.spirv) ||
             var.spirv.empty()) {
@@ -2638,7 +2716,9 @@ void VulkanResourceFactory::writeBindingSlot(RhiBindingSet& s, bool isUav, u32 s
 
 VkDescriptorSet VulkanResourceFactory::bindingSetForFrame(RhiBindingSet& s) {
     const u32 cur = dev_->frameIndexInFlight();
-    if (s.staleMask & (1u << cur)) {
+    // Not once this frame has bound it: a replay then is an update-after-bind (scrubBindingSets can
+    // leave the current slot stale on purpose); it waits for this slot's next frame.
+    if ((s.staleMask & (1u << cur)) && s.lastBoundSerial != dev_->frameSerial()) {
         // Safe here and only here: beginFrame() waited on this slot's timeline value, so no pending
         // command buffer still references it, and nothing has bound it yet this frame.
         for (u32 i = 0; i < s.srvCount && i < kMaxBindingSlots; ++i)
@@ -2648,6 +2728,46 @@ VkDescriptorSet VulkanResourceFactory::bindingSetForFrame(RhiBindingSet& s) {
         s.staleMask &= ~(1u << cur);
     }
     return s.sets[cur];
+}
+
+void VulkanResourceFactory::scrubBindingSets(VkImage image, VkBuffer buffer) {
+    if (!ensureNullResources(*dev_)) return;
+    const bool rtSupported = dev_->cachedCaps().rayTracingTier != 0;
+    const u32 cur = dev_->frameIndexInFlight();
+    for (RhiBindingSet& s : bindingSets_) {
+        if (!s.alive) continue;
+        for (int uav = 0; uav < 2; ++uav) {
+            const u32 count = uav ? s.uavCount : s.srvCount;
+            for (u32 i = 0; i < count && i < kMaxBindingSlots; ++i) {
+                BindingSlotState& st = uav ? s.uavSlots[i] : s.srvSlots[i];
+                const bool names = (image && st.image_ == image) ||
+                                   (buffer && st.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && st.buffer.buffer == buffer);
+                if (!names) continue;
+                const SlotKind kind = uav ? s.uavKinds[i] : s.srvKinds[i];
+                BindingSlotState n;
+                n.type = uav ? toVkUavDescriptorType(kind) : toVkSrvDescriptorType(kind, rtSupported);
+                if (kind == SlotKind::StructuredBuffer)
+                    n.buffer = VkDescriptorBufferInfo{nullSlotBuffer(*dev_), 0, VK_WHOLE_SIZE};
+                else
+                    n.image = VkDescriptorImageInfo{VK_NULL_HANDLE, nullSlotView(*dev_, kind == SlotKind::Texture3D),
+                                                    VK_IMAGE_LAYOUT_GENERAL};
+                if (st.ownedView != VK_NULL_HANDLE) {
+                    const VkImageView dead = st.ownedView;
+                    retire([this, dead]() { dev_->api().DestroyImageView(dev_->vkDevice(), dead, nullptr); });
+                }
+                st = n;
+                // Every ring slot, the current one included unless this frame has not bound it yet
+                // (then it is safe to write now); a bound one is replayed in its next frame, after
+                // its fence -- the deferred destroy below cannot run before that slot is idle.
+                const u32 binding = uav ? (kVkUavBindingBase + i) : i;
+                for (u32 f = 0; f < kFrameCount; ++f) s.staleMask |= (1u << f);
+                if (s.lastBoundSerial != dev_->frameSerial()) {
+                    applySlot(dev_->api(), dev_->vkDevice(), s.sets[cur], binding, st);
+                    s.staleMask &= ~(1u << cur);
+                }
+            }
+        }
+    }
 }
 
 BindingSetHandle VulkanResourceFactory::createBindingSet(const BindingSetDesc& d) {
@@ -2738,7 +2858,7 @@ void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
         w.descriptorCount = 1;
         w.descriptorType = toVkSrvDescriptorType(kind, rtSupported);
         if (kind == SlotKind::StructuredBuffer) {
-            bufferInfos.push_back({gNull.buffer, 0, VK_WHOLE_SIZE});
+            bufferInfos.push_back({nullSlotBuffer(*dev_), 0, VK_WHOLE_SIZE});
             w.pBufferInfo = &bufferInfos.back();
             writes.push_back(w);
         } else if (kind == SlotKind::AccelerationStructure && rtSupported) {
@@ -2750,7 +2870,7 @@ void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
             writes.push_back(w);
         } else {
             const bool tex3D = (kind == SlotKind::Texture3D);
-            imageInfos.push_back({VK_NULL_HANDLE, tex3D ? gNull.view3D : gNull.view2D, VK_IMAGE_LAYOUT_GENERAL});
+            imageInfos.push_back({VK_NULL_HANDLE, nullSlotView(*dev_, tex3D), VK_IMAGE_LAYOUT_GENERAL});
             w.pImageInfo = &imageInfos.back();
             writes.push_back(w);
         }
@@ -2764,11 +2884,11 @@ void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
         w.descriptorCount = 1;
         w.descriptorType = toVkUavDescriptorType(kind);
         if (kind == SlotKind::StructuredBuffer) {
-            bufferInfos.push_back({gNull.buffer, 0, VK_WHOLE_SIZE});
+            bufferInfos.push_back({nullSlotBuffer(*dev_), 0, VK_WHOLE_SIZE});
             w.pBufferInfo = &bufferInfos.back();
         } else {
             const bool tex3D = (kind == SlotKind::Texture3D);
-            imageInfos.push_back({VK_NULL_HANDLE, tex3D ? gNull.view3D : gNull.view2D, VK_IMAGE_LAYOUT_GENERAL});
+            imageInfos.push_back({VK_NULL_HANDLE, nullSlotView(*dev_, tex3D), VK_IMAGE_LAYOUT_GENERAL});
             w.pImageInfo = &imageInfos.back();
         }
         writes.push_back(w);
@@ -3243,6 +3363,8 @@ void VulkanResourceFactory::destroyTexture(TextureHandle h) {
     if (dev_) dev_->releaseUiTextureId(h);
     RhiTexture* t = texture(h);
     if (!t) return;
+    if (!bindlessTables_.empty()) forgetBindlessTexture(h);   // no table keeps naming its view
+    if (t->image) scrubBindingSets(t->image, VK_NULL_HANDLE);
     VkImage image = t->image;
     VkDeviceMemory memory = t->memory;
     // See RhiTexture::externallyOwned: an adopted depth-texture record's image/memory belong to
@@ -3272,6 +3394,7 @@ void VulkanResourceFactory::destroyBuffer(BufferHandle h) {
     if (!b) return;
     VkBuffer buf = b->buffer;
     VkDeviceMemory mem = b->memory;
+    if (buf) scrubBindingSets(VK_NULL_HANDLE, buf);
     retire([this, buf, mem]() { destroyBufferCommitted(*dev_, buf, mem); });
     b->buffer = VK_NULL_HANDLE;
     b->memory = VK_NULL_HANDLE;
@@ -3358,6 +3481,7 @@ void VulkanResourceFactory::setSrv(BindingSetHandle set, u32 slot, TextureHandle
     BindingSlotState st;
     st.type = toVkSrvDescriptorType(s->srvKinds[slot], dev_->cachedCaps().rayTracingTier != 0);
     st.image = VkDescriptorImageInfo{VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    st.image_ = t->image;
     // The one-off mip view is now OWNED BY THE SLOT rather than retired at the end of this call: a
     // replay into another ring slot happens frames later and would otherwise write a dead view.
     // writeBindingSlot retires whichever view the slot held before.
@@ -3385,6 +3509,7 @@ void VulkanResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle
     st.type = toVkUavDescriptorType(s->uavKinds[slot]);
     // t->uavViews[mip] is cached on the texture and outlives every replay, so the slot does not own it.
     st.image = VkDescriptorImageInfo{VK_NULL_HANDLE, t->uavViews[mip], VK_IMAGE_LAYOUT_GENERAL};
+    st.image_ = t->image;
     writeBindingSlot(*s, /*isUav=*/true, slot, st);
 }
 
@@ -3408,12 +3533,12 @@ void VulkanResourceFactory::clearSrv(BindingSetHandle set, u32 slot) {
     BindingSlotState st;
     st.type = toVkSrvDescriptorType(kind, rtSupported);
     if (kind == SlotKind::StructuredBuffer) {
-        st.buffer = VkDescriptorBufferInfo{gNull.buffer, 0, VK_WHOLE_SIZE};
+        st.buffer = VkDescriptorBufferInfo{nullSlotBuffer(*dev_), 0, VK_WHOLE_SIZE};
     } else if (kind == SlotKind::AccelerationStructure && rtSupported) {
         st.accel = gNull.dummyTlas;
     } else {
         const bool tex3D = (kind == SlotKind::Texture3D);
-        st.image = VkDescriptorImageInfo{VK_NULL_HANDLE, tex3D ? gNull.view3D : gNull.view2D,
+        st.image = VkDescriptorImageInfo{VK_NULL_HANDLE, nullSlotView(*dev_, tex3D),
                                          VK_IMAGE_LAYOUT_GENERAL};
     }
     // NOT owned: gNull's views are global and outlive every binding set, so the slot must not retire
@@ -3513,6 +3638,140 @@ bool VulkanResourceFactory::textureInfo(TextureHandle h, TextureDesc& out) const
 void VulkanResourceFactory::waitIdle() {
     dev_->waitForGpu();
     collect();
+}
+
+// ================================================================================================
+// The ray path's bindless texture table. See RhiBindlessTable for the ring and why writes wait.
+// ================================================================================================
+BindlessTableHandle VulkanResourceFactory::createBindlessTextureTable(u32 capacity) {
+    collect();
+    if (capacity == 0) { AVER_ERROR("[RHI.Vulkan] createBindlessTextureTable with capacity 0"); return 0; }
+    if (!ensureNullResources(*dev_)) { AVER_ERROR("[RHI.Vulkan] bindless table: no null view to fill it with"); return 0; }
+    const VkDescriptorSetLayout layout = bindlessSetLayout(capacity);
+    if (layout == VK_NULL_HANDLE) return 0;
+    const VulkanApi& api = dev_->api();
+    VkDevice device = dev_->vkDevice();
+
+    RhiBindlessTable t;
+    t.capacity = capacity;
+    // Its own pool: kFrameCount x capacity sampled images would crowd the shared one.
+    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, capacity * kFrameCount};
+    VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pci.maxSets = kFrameCount;
+    pci.poolSizeCount = 1;
+    pci.pPoolSizes = &size;
+    if (!vkOk(api.CreateDescriptorPool(device, &pci, nullptr, &t.pool), "rhi bindless descriptor pool")) return 0;
+    VkDescriptorSetLayout layouts[kFrameCount];
+    for (u32 f = 0; f < kFrameCount; ++f) layouts[f] = layout;
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = t.pool;
+    ai.descriptorSetCount = kFrameCount;
+    ai.pSetLayouts = layouts;
+    if (!vkOk(api.AllocateDescriptorSets(device, &ai, t.sets), "rhi bindless descriptor sets")) {
+        api.DestroyDescriptorPool(device, t.pool, nullptr);
+        return 0;
+    }
+    // Null-filled up front (nothing can be using a set still being created), like D3D12's range.
+    t.views.assign(capacity, gNull.view2D);
+    t.textures.assign(capacity, 0);
+    std::vector<VkDescriptorImageInfo> infos(capacity, VkDescriptorImageInfo{VK_NULL_HANDLE, gNull.view2D, VK_IMAGE_LAYOUT_GENERAL});
+    for (u32 f = 0; f < kFrameCount; ++f) {
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = t.sets[f];
+        w.dstBinding = 0;
+        w.descriptorCount = capacity;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        w.pImageInfo = infos.data();
+        api.UpdateDescriptorSets(device, 1, &w, 0, nullptr);
+        t.boundSerial[f] = ~0ull;
+    }
+    t.alive = true;
+    bindlessTables_.push_back(std::move(t));
+    AVER_INFO("[RHI.Vulkan] bindless texture table: {} descriptors x {} frame slots", capacity, kFrameCount);
+    return static_cast<BindlessTableHandle>(bindlessTables_.size());
+}
+
+void VulkanResourceFactory::destroyBindlessTextureTable(BindlessTableHandle h) {
+    if (h == 0 || h > bindlessTables_.size() || !bindlessTables_[h - 1].alive) return;
+    RhiBindlessTable& t = bindlessTables_[h - 1];
+    t.alive = false;
+    const VkDescriptorPool pool = t.pool;   // its sets die with it, once no frame in flight reads them
+    t.pool = VK_NULL_HANDLE;
+    retire([this, pool]() { dev_->api().DestroyDescriptorPool(dev_->vkDevice(), pool, nullptr); });
+    t.views.clear(); t.textures.clear();
+    for (u32 f = 0; f < kFrameCount; ++f) { t.sets[f] = VK_NULL_HANDLE; t.pending[f].clear(); }
+}
+
+u32 VulkanResourceFactory::bindlessTableCapacity(BindlessTableHandle h) const {
+    if (h == 0 || h > bindlessTables_.size()) return 0;
+    return bindlessTables_[h - 1].alive ? bindlessTables_[h - 1].capacity : 0;
+}
+
+bool VulkanResourceFactory::setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle th) {
+    if (h == 0 || h > bindlessTables_.size() || !bindlessTables_[h - 1].alive) {
+        AVER_ERROR("[RHI.Vulkan] setBindlessTexture with an invalid table handle");
+        return false;
+    }
+    RhiBindlessTable& t = bindlessTables_[h - 1];
+    if (index >= t.capacity) {
+        AVER_ERROR("[RHI.Vulkan] setBindlessTexture index {} past the table's {} slots -- refused. "
+                   "The material keeps its factor colour instead of a texture.", index, t.capacity);
+        return false;
+    }
+    RhiTexture* tex = texture(th);
+    if (!tex || !tex->srvView) { AVER_ERROR("[RHI.Vulkan] setBindlessTexture with an invalid texture handle"); return false; }
+    if (tex->desc.dim != TextureDim::Tex2D) {
+        AVER_ERROR("[RHI.Vulkan] setBindlessTexture: the table holds Texture2D only");
+        return false;
+    }
+    t.views[index] = tex->srvView;
+    t.textures[index] = th;
+    for (u32 f = 0; f < kFrameCount; ++f) t.pending[f].push_back(index);
+    return true;
+}
+
+void VulkanResourceFactory::forgetBindlessTexture(TextureHandle h) {
+    for (RhiBindlessTable& t : bindlessTables_) {
+        if (!t.alive) continue;
+        for (u32 i = 0; i < t.capacity; ++i) {
+            if (t.textures[i] != h) continue;
+            t.textures[i] = 0;
+            t.views[i] = gNull.view2D;
+            for (u32 f = 0; f < kFrameCount; ++f) t.pending[f].push_back(i);
+        }
+    }
+}
+
+VkDescriptorSet VulkanResourceFactory::bindlessSetForFrame(RhiBindlessTable& t) {
+    const u32 cur = dev_->frameIndexInFlight();
+    const u64 serial = dev_->frameSerial();
+    // Writes only before this slot's first bind of the frame: beginFrame waited for its last use,
+    // and nothing has bound it since. A texture added after that waits for the slot's next frame.
+    if (t.boundSerial[cur] != serial && !t.pending[cur].empty()) {
+        std::vector<u32>& pend = t.pending[cur];
+        std::sort(pend.begin(), pend.end());
+        pend.erase(std::unique(pend.begin(), pend.end()), pend.end());
+        std::vector<VkDescriptorImageInfo> infos;
+        std::vector<VkWriteDescriptorSet> writes;
+        infos.reserve(pend.size());
+        writes.reserve(pend.size());
+        for (u32 i : pend) {
+            const bool isNull = t.views[i] == gNull.view2D;
+            infos.push_back({VK_NULL_HANDLE, t.views[i], isNull ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = t.sets[cur];
+            w.dstBinding = 0;
+            w.dstArrayElement = i;
+            w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            writes.push_back(w);
+        }
+        for (usize k = 0; k < writes.size(); ++k) writes[k].pImageInfo = &infos[k];
+        dev_->api().UpdateDescriptorSets(dev_->vkDevice(), static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+        pend.clear();
+    }
+    t.boundSerial[cur] = serial;
+    return t.sets[cur];
 }
 
 } // namespace aver::rhi::vkb

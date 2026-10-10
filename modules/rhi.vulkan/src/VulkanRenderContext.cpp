@@ -277,6 +277,7 @@ void VulkanRenderContext::setRenderTargets(const TextureHandle* colors, u32 coun
 void VulkanRenderContext::clearDepth(TextureHandle depth, f32 value) {
     RhiTexture* t = res_->texture(depth);
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!t || !t->dsvView || !cb) { AVER_ERROR("[RHI.Vulkan] clearDepth on a non-depth texture"); return; }
     VkRenderingAttachmentInfo a{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     a.imageView = t->dsvView;
@@ -295,6 +296,7 @@ void VulkanRenderContext::clearDepth(TextureHandle depth, f32 value) {
 void VulkanRenderContext::clearColor(TextureHandle target, const f32 color[4]) {
     RhiTexture* t = res_->texture(target);
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!t || !t->rtvView || !cb) { AVER_ERROR("[RHI.Vulkan] clearColor on a non-render-target texture"); return; }
     VkRenderingAttachmentInfo a{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
     a.imageView = t->rtvView;
@@ -728,13 +730,13 @@ void VulkanRenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount
 }
 
 // ====================================================================================================
-// dispatch -- compute. Deliberately never wrapped in a rendering scope: vkCmdDispatch must run
-// OUTSIDE one, and since no VulkanRenderContext method ever leaves a scope open (see the file
-// banner), this is automatically satisfied without an explicit check.
+// dispatch -- compute. vkCmdDispatch must run OUTSIDE a rendering scope; one the device left open
+// (the scene pass: occlusion's HZB build runs between its draw batches) is suspended first.
 // ====================================================================================================
 void VulkanRenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
     if (!pipe_ || !pipe_->compute) { AVER_ERROR("[RHI.Vulkan] dispatch without a compute pipeline"); return; }
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (cb) dev_->api().CmdDispatch(cb, gx, gy, gz);
 }
 
@@ -743,6 +745,7 @@ void VulkanRenderContext::dispatch(u32 gx, u32 gy, u32 gz) {
 // ====================================================================================================
 void VulkanRenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes, u64 dstOffset, u64 srcOffset) {
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !res_) return;
     VkBuffer d = res_->bufferResource(dst);
     VkBuffer s = res_->bufferResource(src);
@@ -757,14 +760,11 @@ void VulkanRenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 byt
 //
 // LEGAL ONLY OUTSIDE A RENDERING SCOPE, which is a Vulkan rule rather than a choice here:
 // vkCmdCopyImageToBuffer and vkCmdCopyBufferToImage are transfer commands and cannot be recorded
-// between vkCmdBeginRendering and vkCmdEndRendering. That is satisfied by WHERE the one caller
-// stands rather than by anything enforced here -- every render feature's prePass runs before
-// VulkanDevice::beginFrame opens the scene scope (VulkanDevice.cpp: prePass at :2460, the scope at
-// :2514), which is exactly where a GI bake reads its volume back. A caller that issued one of these
-// from inside a draw pass would get a validation error naming the active render pass, and the fix
-// would be to move the call, not to suspend the scope.
+// between vkCmdBeginRendering and vkCmdEndRendering, so an open device scope is suspended first
+// (VulkanDevice::suspendRenderScope) and the next draw resumes it with LOAD.
 void VulkanRenderContext::copyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) {
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !dev_->api().CmdCopyImageToBuffer) return;
     RhiBuffer* d = res_->buffer(dst);
     RhiTexture* t = res_->texture(src);
@@ -791,6 +791,7 @@ void VulkanRenderContext::copyTextureToBuffer(BufferHandle dst, u64 dstOffset, T
 
 void VulkanRenderContext::copyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) {
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !dev_->api().CmdCopyBufferToImage) return;
     RhiTexture* t = res_->texture(dst);
     RhiBuffer* s = res_->buffer(src);
@@ -816,6 +817,7 @@ void VulkanRenderContext::copyBufferToTexture(TextureHandle dst, u32 mip, Buffer
 
 void VulkanRenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !res_) return;
     RhiTexture* d = res_->texture(dst);
     RhiTexture* s = res_->texture(src);
@@ -914,6 +916,7 @@ void VulkanRenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVe
 // ====================================================================================================
 void VulkanRenderContext::recordBlasBuild(RhiBlas& b, const GpuMesh& m, VkBuildAccelerationStructureModeKHR mode) {
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
 
     VkAccelerationStructureGeometryTrianglesDataKHR tri{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR};
     tri.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;   // MeshVertex::px,py,pz -- see RHI.hpp's layout
@@ -975,6 +978,7 @@ void VulkanRenderContext::buildBlas(BlasHandle h) {
     RhiBlas* b = res_->blas(h);
     if (!b) { AVER_ERROR("[RHI.Vulkan] buildBlas with an invalid handle"); return; }
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
         AVER_ERROR("[RHI.Vulkan] buildBlas without ray-tracing support");
         return;
@@ -1003,6 +1007,7 @@ bool VulkanRenderContext::recordBlasBuildMulti(RhiBlas& b) {
         ranges[i].primitiveCount = count / 3;
     }
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     VkBufferDeviceAddressInfo scratchInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
     scratchInfo.buffer = b.scratchBuffer;
     VkAccelerationStructureBuildGeometryInfoKHR bi{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR};
@@ -1083,6 +1088,7 @@ bool VulkanRenderContext::refitBlas(BlasHandle h) {
     if (!eligible) { buildBlas(h); return false; }
 
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
         AVER_ERROR("[RHI.Vulkan] refitBlas without ray-tracing support");
         return false;
@@ -1146,6 +1152,7 @@ u32 VulkanRenderContext::usableStaticPrefix(RhiTlas& t) {
 
 void VulkanRenderContext::recordTlasBuild(RhiTlas& t, u32 staticUsed, u32 written, VkBuildAccelerationStructureModeKHR mode) {
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
 
     VkAccelerationStructureGeometryInstancesDataKHR instData{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR};
@@ -1243,6 +1250,7 @@ void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances,
     RhiTlas* t = res_->tlas(h);
     if (!t) { AVER_ERROR("[RHI.Vulkan] buildTlas with an invalid handle"); return; }
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
         AVER_ERROR("[RHI.Vulkan] buildTlas without ray-tracing support");
         return;
@@ -1269,6 +1277,7 @@ bool VulkanRenderContext::refitTlas(TlasHandle h, const TlasInstance* instances,
     if (!t) { AVER_ERROR("[RHI.Vulkan] refitTlas with an invalid handle"); return false; }
     if (!t->allowUpdate || !t->built) { buildTlas(h, instances, count); return false; }
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!cb || !dev_->api().CmdBuildAccelerationStructuresKHR) {
         AVER_ERROR("[RHI.Vulkan] refitTlas without ray-tracing support");
         return false;
@@ -1310,6 +1319,7 @@ void VulkanRenderContext::textureBarrier(TextureHandle h, ResourceState from, Re
     if (rejectAsState(from, to, "textureBarrier")) return;
     RhiTexture* t = res_->texture(h);
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!t || !cb) { AVER_ERROR("[RHI.Vulkan] textureBarrier with an invalid handle"); return; }
     // A RECORD CAN EXIST WITHOUT A RESOURCE, and this guard is what stops that becoming a barrier
     // against VK_NULL_HANDLE -- "pImageMemoryBarriers[0].image Invalid VkImage Object 0x0", which
@@ -1353,6 +1363,7 @@ void VulkanRenderContext::bufferBarrier(BufferHandle h, ResourceState from, Reso
     if (rejectAsState(from, to, "bufferBarrier")) return;
     RhiBuffer* b = res_->buffer(h);
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!b || !cb) { AVER_ERROR("[RHI.Vulkan] bufferBarrier with an invalid handle"); return; }
 #if AVER_RHI_TRACK_STATE
     trackBufferBarrier(*b, from, to);
@@ -1376,6 +1387,7 @@ void VulkanRenderContext::bufferBarrier(BufferHandle h, ResourceState from, Reso
 void VulkanRenderContext::uavBarrierTexture(TextureHandle h) {
     RhiTexture* t = res_->texture(h);
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!t || !cb) return;
     if (!t->image) {
         AVER_ERROR("[RHI.Vulkan] uavBarrierTexture on '{}' whose VkImage is null",
@@ -1403,6 +1415,7 @@ void VulkanRenderContext::uavBarrierTexture(TextureHandle h) {
 void VulkanRenderContext::uavBarrierBuffer(BufferHandle h) {
     RhiBuffer* b = res_->buffer(h);
     VkCommandBuffer cb = cmd();
+    if (cb) dev_->suspendRenderScope(cb);   // illegal inside dynamic rendering; see VulkanDevice::suspendRenderScope
     if (!b || !cb) return;
     VkBufferMemoryBarrier2 bar{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
     bar.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;

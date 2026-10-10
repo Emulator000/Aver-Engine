@@ -67,6 +67,7 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <chrono>
+#include <algorithm>
 #include <cstring>
 #include <cwchar>
 #include <filesystem>
@@ -258,6 +259,8 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
         // exact class of divergence DxcShaderInclude.hpp was put in Aver.RHI to prevent.
         L"-I", L".",
     };
+    if (unknownStorageFormat_) args.push_back(L"-fspv-use-unknown-image-format");   // see setUnknownStorageFormat
+    if (dxLayout_) args.push_back(L"-fvk-use-dx-layout");   // see setDxLayout
     // THE SHIFT AND THE EXPLICIT MAP ARE MUTUALLY EXCLUSIVE -- DXC rejects the combination outright
     // ("-fvk-u-shift cannot be used together with -fvk-bind-register"), which is how this was found.
     // It is not a limitation to work around: a map names a set and binding for EVERY register it
@@ -391,6 +394,21 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
     HRESULT hr = compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes,
                                    IID_PPV_ARGS(&result));
     if (SUCCEEDED(hr) && result) result->GetStatus(&hr);
+    // Image atomics need an R32/R64 format on the image type, which DXC does not infer under the
+    // unknown-format flag (spirv-val 04658): such a shader keeps DXC's per-type inference instead.
+    if (FAILED(hr) && unknownStorageFormat_ && result) {
+        ComPtr<IDxcBlobUtf8> errs;
+        if (SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errs), nullptr)) && errs &&
+            errs->GetStringLength() && std::strstr(errs->GetStringPointer(), "OpImageTexelPointer")) {
+            const std::wstring flag = L"-fspv-use-unknown-image-format";
+            args.erase(std::remove_if(args.begin(), args.end(), [&](LPCWSTR a) { return flag == a; }), args.end());
+            result.Reset();
+            hr = compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes,
+                                   IID_PPV_ARGS(&result));
+            if (SUCCEEDED(hr) && result) result->GetStatus(&hr);
+            AVER_TRACE("[RHI.Vulkan] {} ({}): image atomics -- storage image formats inferred from the HLSL types", entry, target);
+        }
+    }
     if (FAILED(hr)) {
         ComPtr<IDxcBlobUtf8> errs;
         if (result && SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errs), nullptr)) &&

@@ -133,6 +133,8 @@ inline constexpr const char* kOptionalDeviceExtensions[] = {
     VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,   // -> DeviceCaps::conservativeRaster
     VK_EXT_MEMORY_BUDGET_EXTENSION_NAME,                // -> videoMemory() only (M6); no DeviceCaps
                                                          //    bit -- see above
+    VK_EXT_ROBUSTNESS_2_EXTENSION_NAME,                 // nullDescriptor only: D3D12's null SRV/UAV
+                                                         //    (reads 0, GetDimensions 0) for unbound slots
 };
 
 // ================================================================================================
@@ -561,7 +563,8 @@ inline bool sameSampler(const SamplerDesc& a, const SamplerDesc& b) {
 inline bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount != b.srvCount || a.uavCount != b.uavCount || a.samplerCount != b.samplerCount) return false;
     if (a.srvCount1 != b.srvCount1 || a.uavCount1 != b.uavCount1) return false;
-    if (a.constantSpace != b.constantSpace || a.samplerSpace != b.samplerSpace) return false;   // in the key even though a non-zero space is REFUSED (descriptorLayout), so a later layout differing only there can't skip that refusal via a cached entry
+    if (a.constantSpace != b.constantSpace || a.samplerSpace != b.samplerSpace) return false;
+    if (a.bindlessTextureCount != b.bindlessTextureCount) return false;   // in the key even though a non-zero space is REFUSED (descriptorLayout), so a later layout differing only there can't skip that refusal via a cached entry
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
     for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;
@@ -614,7 +617,8 @@ constexpr u32 kVkSetTable1    = 1;
 constexpr u32 kVkSetConstants = 2;
 constexpr u32 kVkSetSamplers  = 3;
 constexpr u32 kVkSetInstances = 4;   // PER-INSTANCE WORLD MATRICES (GraphicsPipelineDesc::instanced), one StructuredBuffer<float4x4>; own set because the HLSL declares it at register t(declaredSrvCount), one past the layout's SRVs, else landing on UAV slot 0 in set 0. Absent from a non-instanced pipeline.
-constexpr u32 kVkDescriptorSetCount = 5;   // table0, table1, constants, samplers, instances
+constexpr u32 kVkSetBindless  = 5;   // the ray path's texture array (PipelineLayout::bindlessTextureCount, HLSL t0 space1): one PARTIALLY_BOUND SAMPLED_IMAGE binding
+constexpr u32 kVkDescriptorSetCount = 6;   // table0, table1, constants, samplers, instances, bindless
 constexpr u32 kVkUavBindingBase = kMaxBindingSlots;   // UAV bindings start here so a growing srvCount never renumbers an already-cached UAV binding; kMaxBindingSlots (25) bounds one set's slot count so SRV/UAV ranges never collide
 
 // Moves the shared prelude's per-frame constant buffer to the descriptor set this backend
@@ -1002,6 +1006,21 @@ struct DescriptorLayoutEntry {
     PushConstantLayout pushConstants{};
     bool instanced = false;   // GraphicsPipelineDesc::instanced, a SIBLING of PipelineLayout so part of this cache key too: identical layouts with different instancing need different VkPipelineLayouts
     VkDescriptorSetLayout instancesSetLayout = VK_NULL_HANDLE;   // shared one-binding set-4 layout from instanceSetLayout(); NOT owned here, like tableSetLayouts above
+    VkDescriptorSetLayout bindlessSetLayout = VK_NULL_HANDLE;    // set kVkSetBindless when layout.bindlessTextureCount; shared, NOT owned here
+};
+
+// The ray path's bindless texture table: one set per frame in flight (a ring, like RhiBindingSet),
+// since a set bound by a recording command buffer must not be written. A write lands in every
+// slot's pending list and is applied when that slot is next bound for the first time in a frame.
+struct RhiBindlessTable {
+    bool alive = false;
+    u32 capacity = 0;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet sets[kFrameCount] = {};
+    std::vector<VkImageView> views;     // per index; the null view when unset
+    std::vector<TextureHandle> textures;
+    std::vector<u32> pending[kFrameCount];
+    u64 boundSerial[kFrameCount] = {};   // frameSerial() it was last bound in; set to ~0 (never) at creation
 };
 
 // A pipeline state and the layout-cache entry it was built against.
@@ -1028,6 +1047,7 @@ struct BindingSlotState {
     VkDescriptorBufferInfo     buffer{};
     VkAccelerationStructureKHR accel = VK_NULL_HANDLE;
     VkImageView ownedView = VK_NULL_HANDLE;   // a one-off mip view built by setSrv for THIS slot, owned by it: must outlive the replay into every other ring slot, so can't be retired at the end of the call that made it
+    VkImage image_ = VK_NULL_HANDLE;   // the texture behind `image` (any of its views), for scrubBindingSets
 };
 
 // A binding set, RINGED kFrameCount DEEP.
@@ -1187,7 +1207,18 @@ public:
                  const char* defines, std::vector<u32>& outSpirv,
                  const VkRegisterBind* binds = nullptr, u32 bindCount = 0, bool quiet = false);
 
+    // Storage images/texel buffers compile with format Unknown (the view's format decides), which
+    // needs shaderStorageImageRead/WriteWithoutFormat. Off: DXC infers R32f/Rgba32f from the HLSL
+    // element type, wrong for every 16-bit-float view ("loads or stores ... undefined values").
+    void setUnknownStorageFormat(bool on) { unknownStorageFormat_ = on; }
+    // D3D memory layout for cbuffers, structured buffers and push constants -- what the C++ side
+    // writes, since D3D12 is the reference. DXC's default (std430-like) moved members of structured
+    // buffers the ray-driven path reads (every surface shaded flat white). Needs scalarBlockLayout.
+    void setDxLayout(bool on) { dxLayout_ = on; }
+
 private:
+    bool unknownStorageFormat_ = false;
+    bool dxLayout_ = false;
     bool tried_ = false;
     HMODULE dll_ = nullptr;
     void* utils_ = nullptr;   // IDxcUtils*/IDxcCompiler3* (compiler_ below), kept as void* so this header never includes <dxcapi.h>/<wrl/client.h> -- no more business leaking outside this module than a VkFoo has; cast back to the real types only inside VulkanShaderCompiler.cpp
@@ -1492,6 +1523,11 @@ public:
     // `opened` is pushRenderScope's return value. False closes nothing.
     void popRenderScope(VkCommandBuffer cmd, bool opened);
     bool renderScopeActive() const { return renderScopeDepth_ != 0; }
+    // Work that is illegal inside dynamic rendering (dispatch, copies, barriers) recorded while a
+    // scope is open -- D3D12 records the same mid-pass with OM targets still bound -- ends the scope
+    // here; the next draw (or ensureRenderScope) reopens it with LOAD. Its owner still pops it.
+    void suspendRenderScope(VkCommandBuffer cmd);
+    void ensureRenderScope(VkCommandBuffer cmd);
 
     VkDevice vkDevice() const { return device_; }
     VkPhysicalDevice vkPhysicalDevice() const { return physicalDevice_; }
@@ -1654,6 +1690,11 @@ private:
     // vkCmdEndRendering. pushRenderScope/popRenderScope are now the ONLY way either owner opens a
     // scope, so the inner request becomes a no-op instead.
     u32 renderScopeDepth_ = 0;
+    // The open scope's attachments, kept so a suspended scope can be resumed (suspendRenderScope).
+    bool renderScopeSuspended_ = false;
+    VkRenderingAttachmentInfo scopeColors_[4]{};
+    VkRenderingAttachmentInfo scopeDepth_{};
+    VkRenderingInfo scopeInfo_{};
     // The scene pass opens in beginFrame and closes in endFrame, so "did I open it" has to outlive
     // the call that answered it.
     bool sceneScopeOpened_ = false;
@@ -1697,6 +1738,7 @@ private:
     bool openSceneScope(VkCommandBuffer cmd, bool load);
     // endFrame: replays blendedDraws_ back to front inside the scene scope. See its definition.
     void replayBlendedDraws(VkCommandBuffer cmd);
+    bool isMeshPipeline(PipelineHandle h) const;   // a factory pipeline built with a mesh stage
     // Copy of the scene colour a translucent surface reads (t10 in Voxi). Scene-sized, created lazily
     // by sceneColorBackdropTexture(), refilled by endFrame's replay (the scene scope is split around the copy).
     TextureHandle blendBackdropTex_ = 0;
@@ -1883,6 +1925,13 @@ private:
     // both SUPPORTED and ENABLED at device creation, the only place that knows. Read by queryCaps
     // to set DeviceCaps::rtBindlessTextures.
     bool bindlessCapable_ = false;
+    // VK_EXT_robustness2's nullDescriptor: unbound slots are written VK_NULL_HANDLE, which reads zero
+    // and reports zero size like D3D12's null descriptor. Without it the 1x1 dummy stands in, and a
+    // shader's "GetDimensions > 0 means bound" test (Voxi's gDenoisedAo) reads it as bound.
+    bool nullDescriptor_ = false;
+public:
+    bool nullDescriptors() const { return nullDescriptor_; }
+private:
 
     bool hasSwapchain_ = false;
     bool vsync_ = true;
@@ -2039,6 +2088,17 @@ public:
     // The shared set-4 layout every instanced pipeline uses. Created on first use, owned by this
     // factory, destroyed with it.
     VkDescriptorSetLayout instanceSetLayout();
+    // Set kVkSetBindless's layout for one capacity (cached), and the empty layout that fills an
+    // interior set index a pipeline does not use (pSetLayouts has no holes).
+    VkDescriptorSetLayout bindlessSetLayout(u32 capacity);
+    VkDescriptorSetLayout emptySetLayout();
+    // This frame's set of a bindless table, its pending writes applied if not yet bound this frame.
+    VkDescriptorSet bindlessSetForFrame(RhiBindlessTable& t);
+    void forgetBindlessTexture(TextureHandle h);   // a destroyed texture's table entries go back to the null view
+    // Every binding-set slot naming a resource being destroyed goes back to the null dummy. A set
+    // still naming it, bound by the frame recording when the deferred destroy runs, would turn that
+    // command buffer INVALID ("VkBuffer ... was destroyed"); D3D12 shrugs at such stale descriptors.
+    void scrubBindingSets(VkImage image, VkBuffer buffer);
     // The table-SHAPE cache underneath descriptorLayout() -- see TableShapeEntry for why this is a
     // separate, finer-grained cache createBindingSet() shares with it.
     VkDescriptorSetLayout tableSetLayout(u32 srvCount, u32 uavCount,
@@ -2127,6 +2187,9 @@ private:
     std::vector<TableShapeEntry>       tableShapes_;
     std::vector<SamplerCacheEntry>     samplers_;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;   // lazily built by instanceSetLayout(); owned here, destroyed in the shutdown sweep
+    std::vector<std::pair<u32, VkDescriptorSetLayout>> bindlessSetLayouts_;   // by capacity; owned
+    VkDescriptorSetLayout emptySetLayout_ = VK_NULL_HANDLE;                   // owned
+    std::vector<RhiBindlessTable> bindlessTables_;
     std::vector<RetiredObject>         retired_;
 
     struct ConstantsPool {

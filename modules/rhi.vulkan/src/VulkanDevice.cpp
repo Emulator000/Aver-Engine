@@ -698,6 +698,8 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     VkPhysicalDeviceMeshShaderFeaturesEXT meshFeat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT};
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
     VkPhysicalDeviceRayQueryFeaturesKHR rqFeat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};
+    VkPhysicalDeviceRobustness2FeaturesEXT rb2Feat{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    const bool wantRobustness2 = std::find(devExts.begin(), devExts.end(), std::string(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) != devExts.end();
     VkPhysicalDeviceVulkan13Features v13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
     VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceFeatures2 f2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -706,9 +708,18 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     if (wantMeshShader)  { meshFeat.pNext = tail; tail = &meshFeat; }
     if (wantAccelStruct) { asFeat.pNext = tail;   tail = &asFeat; }
     if (wantRayQuery)    { rqFeat.pNext = tail;   tail = &rqFeat; }
+    if (wantRobustness2) { rb2Feat.pNext = tail;  tail = &rb2Feat; }
     f2.pNext = tail;
     api_.GetPhysicalDeviceFeatures2(physicalDevice_, &f2);
     independentBlend_ = f2.features.independentBlend == VK_TRUE;   // enabled with the rest of f2
+    // nullDescriptor only: the robust-access bits cost performance and change no result we rely on.
+    nullDescriptor_ = wantRobustness2 && rb2Feat.nullDescriptor == VK_TRUE;
+    rb2Feat.robustBufferAccess2 = VK_FALSE;
+    rb2Feat.robustImageAccess2 = VK_FALSE;
+    AVER_INFO("[RHI.Vulkan] null descriptors (robustness2): {}", nullDescriptor_ ? "yes" : "no -- unbound slots get a 1x1 dummy");
+    vulkanShaderCompiler().setUnknownStorageFormat(f2.features.shaderStorageImageReadWithoutFormat &&
+                                                   f2.features.shaderStorageImageWriteWithoutFormat);
+    vulkanShaderCompiler().setDxLayout(v12.scalarBlockLayout == VK_TRUE);   // enabled with the rest of v12
     v12.bufferDeviceAddress = VK_TRUE;   // already confirmed supported above
     v12.timelineSemaphore = VK_TRUE;
 
@@ -1070,8 +1081,9 @@ void VulkanDevice::removeRenderFeature(IRenderFeature* f) {
 void VulkanDevice::queryCaps() {
     caps_ = {};
     caps_.computeShaders = true;   // core 1.0 mandates a compute-capable queue existing
-    // computeInScenePass and gBuffer stay false until this backend implements them: the scene scope
-    // would have to end around a dispatch, and the G-buffer getters are not overridden.
+    // computeInScenePass and gBuffer stay false: the scene scope now suspends around a dispatch
+    // (suspendRenderScope), but the staged passes that would use it need SM 6.6 and are unverified
+    // here, and the G-buffer getters are not overridden.
     caps_.blendedReplay = true;   // endFrame replays setDrawBlended draws after the sky (scene scope split for the backdrop copy)
 
     caps_.msaaMask = 1;
@@ -1127,27 +1139,14 @@ void VulkanDevice::queryCaps() {
     const DeviceCaps hw = caps_;
     clampCaps(caps_);
 
-    // hwBindlessCapable is what hardware+driver can genuinely do (descriptor indexing enabled
-    // above :734-757, inline-query ray path works). caps_.rtBindlessTextures hardcodes false anyway:
-    // createBindlessTextureTable() below is a stub returning 0, and callers (VoxiRenderer::
-    // ensureTextureTable, PathTracer::ensureTexturing), both gated on exactly this flag and nothing
-    // else, treat it as "a working table", not just "hardware bits present" -- reporting the hardware
-    // bit would send them into a stub that can only fail them, with nothing in the log connecting a
-    // "yes" to the flat-albedo shading it actually produces (see RHIResources.hpp's own comment on
-    // createBindlessTextureTable). Revert to the hardware expression once the stub is replaced.
-    const bool hwBindlessCapable = caps_.rayTracingTier >= 11 && bindlessCapable_;
-    caps_.rtBindlessTextures = false;
+    // Descriptor indexing enabled at device creation (bindlessCapable_) plus the inline-query ray
+    // path: the table (VulkanResourceFactory::createBindlessTextureTable) is real on such a device.
+    caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && bindlessCapable_;
     AVER_INFO("[RHI.Vulkan] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster, caps_.resourceBindingTier);
-    // Mirrors D3D12Device.cpp's "ray-traced bindless textures: yes/no" line, plus a WARN (once, at
-    // device creation) D3D12 doesn't need: explains why capable hardware still reads "no" here.
+    // Mirrors D3D12Device.cpp's "ray-traced bindless textures: yes/no" line.
     AVER_INFO("[RHI.Vulkan] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
-    if (hwBindlessCapable)
-        AVER_WARN("[RHI.Vulkan] descriptor indexing and inline ray query are both present and enabled "
-                  "on this device -- the hardware could support ray-traced bindless texturing -- but "
-                  "createBindlessTextureTable() has no implementation on this backend yet, so ray "
-                  "hits keep shading from flat albedo until it does (said once)");
     if (capsOverride().active)
         AVER_WARN("[RHI.Vulkan] caps CLAMPED by --force-caps; the hardware reports MSAA {}x, RT tier {}, SM {}, "
                   "mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
@@ -1764,6 +1763,12 @@ bool VulkanDevice::waitTimeline(u64 value) {
 
 void VulkanDevice::waitForGpu() {
     if (!queue_ || !timeline_) return;
+    // Mid-frame (a waitIdle while the frame's command buffer records): drain what was submitted
+    // without taking a timeline value. Taking one satisfied retireFenceValue() for THIS frame's own
+    // retirements -- collect() then freed descriptor sets the recording buffer had bound (validation:
+    // "destroyed or updated without UPDATE_AFTER_BIND", the buffer goes INVALID and draws nothing)
+    // and the constant/instance rings rewound under draws already recorded.
+    if (frameOpen_) { waitTimeline(nextTimelineValue_); return; }
     const u64 v = ++nextTimelineValue_;
     VkSemaphoreSubmitInfo signalInfo{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     signalInfo.semaphore = timeline_; signalInfo.value = v; signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -2496,6 +2501,11 @@ TextureHandle VulkanDevice::sceneColorBackdropTexture() {
 // the resolved scene colour copied into the backdrop, and the scope reopened with LOAD -- Vulkan's
 // stand-in for D3D12's ResolveSubresource/CopyResource mid-pass. No blended draws: never called, so
 // the frame records as it always did. Compute never runs here (dispatch is not scope-wrapped).
+bool VulkanDevice::isMeshPipeline(PipelineHandle h) const {
+    const RhiPipeline* p = (h && rhiFactory_) ? rhiFactory_->pipeline(h) : nullptr;
+    return p && p->mesh;
+}
+
 void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
     IRenderFeature* owner = nullptr;
     for (IRenderFeature* f : features_) {
@@ -2503,6 +2513,7 @@ void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
     }
     const bool featureMs = msActive_ && meshPso_;
     const PipelineHandle blendedPso = owner ? owner->scenePipeline(featureMs, false, true) : 0;
+    const bool blendedMs = featureMs && isMeshPipeline(blendedPso);
     if (!blendedPso) {
         // 0 for blended=true means no blended variant: drop rather than draw opaque.
         if (!blendedPipelineMissingWarned_) {
@@ -2621,7 +2632,7 @@ void VulkanDevice::replayBlendedDraws(VkCommandBuffer cmd) {
         fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;   // unlit blended mesh not plumbed, as on D3D12
         writeShadingConstants(fc);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-        if (featureMs) rhiContext_->dispatchMeshFor(bd.mesh);
+        if (blendedMs) rhiContext_->dispatchMeshFor(bd.mesh);
         else           rhiContext_->drawMesh(bd.mesh);
     }
 
@@ -2708,9 +2719,10 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         // see writeShadingConstants there for why both fields are written).
         writeShadingConstants(fc, unlit_);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
-        // featureMs, not msActive_: the draw call has to match the pipeline chosen above.
-        if (featureMs) rhiContext_->dispatchMeshFor(mesh);
-        else           rhiContext_->drawMesh(mesh);
+        // The draw call has to match the pipeline actually returned: a feature whose mesh-shader
+        // variant failed to build hands back its vertex pipeline even when asked for featureMs.
+        if (featureMs && isMeshPipeline(fp)) rhiContext_->dispatchMeshFor(mesh);
+        else                                 rhiContext_->drawMesh(mesh);
         return;
     }
 
@@ -2737,6 +2749,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     writeShadingConstants(consts, unlit_);
     api_.CmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, sizeof(consts), consts);
 
+    ensureRenderScope(cmd);
     if (useMs) { dispatchMesh(m); return; }
     VkDeviceSize off = 0;
     api_.CmdBindVertexBuffers(cmd, 0, 1, &m.vb, &off);
@@ -3061,8 +3074,22 @@ bool VulkanDevice::openSceneScope(VkCommandBuffer cmd, bool load) {
 // retarget, reopen lazily, persist across draws) and pipelines must match the targets they actually
 // use; a deliberate change, not a patch under this bug.
 bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
-    if (renderScopeDepth_ != 0) return false;   // already inside one: join it rather than nest
+    if (renderScopeDepth_ != 0) {   // already inside one: join it rather than nest
+        ensureRenderScope(cmd);
+        return false;
+    }
+    // Kept for a resume: the attachments by value, pointers re-aimed at the copies.
+    scopeInfo_ = ri;
+    scopeInfo_.pNext = nullptr;
+    const u32 nc = ri.colorAttachmentCount < 4 ? ri.colorAttachmentCount : 4;
+    for (u32 i = 0; i < nc; ++i) scopeColors_[i] = ri.pColorAttachments[i];
+    scopeInfo_.colorAttachmentCount = nc;
+    scopeInfo_.pColorAttachments = nc ? scopeColors_ : nullptr;
+    if (ri.pDepthAttachment) scopeDepth_ = *ri.pDepthAttachment;
+    scopeInfo_.pDepthAttachment = ri.pDepthAttachment ? &scopeDepth_ : nullptr;
+    scopeInfo_.pStencilAttachment = nullptr;
     api_.CmdBeginRendering(cmd, &ri);
+    renderScopeSuspended_ = false;
     ++renderScopeDepth_;
     return true;
 }
@@ -3070,7 +3097,35 @@ bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& r
 void VulkanDevice::popRenderScope(VkCommandBuffer cmd, bool opened) {
     if (!opened || renderScopeDepth_ == 0) return;
     --renderScopeDepth_;
+    if (renderScopeSuspended_) { renderScopeSuspended_ = false; return; }   // already ended
     api_.CmdEndRendering(cmd);
+}
+
+void VulkanDevice::suspendRenderScope(VkCommandBuffer cmd) {
+    if (renderScopeDepth_ == 0 || renderScopeSuspended_) return;
+    api_.CmdEndRendering(cmd);   // under MSAA this resolves, as the blended replay's split does
+    renderScopeSuspended_ = true;
+}
+
+void VulkanDevice::ensureRenderScope(VkCommandBuffer cmd) {
+    if (renderScopeDepth_ == 0 || !renderScopeSuspended_) return;
+    // Keep what was drawn: LOAD everything. The store -> load dependency across the two instances
+    // is a plain memory barrier (no layout change; the suspending caller restored its layouts).
+    for (u32 i = 0; i < scopeInfo_.colorAttachmentCount; ++i) scopeColors_[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    if (scopeInfo_.pDepthAttachment) scopeDepth_.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    mb.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    mb.dstStageMask = mb.srcStageMask;
+    mb.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+                       VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.memoryBarrierCount = 1;
+    dep.pMemoryBarriers = &mb;
+    api_.CmdPipelineBarrier2(cmd, &dep);
+    api_.CmdBeginRendering(cmd, &scopeInfo_);
+    renderScopeSuspended_ = false;
 }
 
 void VulkanDevice::endFrame() {
@@ -3095,6 +3150,7 @@ void VulkanDevice::endFrame() {
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyPso_);
         api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipelineLayout_, kVkSetConstants, 1,
                                    &sceneFrameSet_[frameIndex_], 1, &zeroOffset);
+        ensureRenderScope(cmd);   // a mid-scene dispatch may have suspended it
         api_.CmdDraw(cmd, 3, 1, 0, 0);
     }
 
@@ -3177,7 +3233,7 @@ void VulkanDevice::endFrame() {
 
         for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
         // The UI paints last, over the overlay and INSIDE this scope (IUiBackend::render must not open its own); only reachable with a backend installed, which no game build does.
-        if (uiBackend_ && uiUp_) uiBackend_->render(reinterpret_cast<u64>(cmd));
+        if (uiBackend_ && uiUp_) { ensureRenderScope(cmd); uiBackend_->render(reinterpret_cast<u64>(cmd)); }
         popRenderScope(cmd, overlayScope);
 
         // Back to what beginFrame's own scene-pass barrier expects next. Not load-bearing for THAT
@@ -4485,29 +4541,20 @@ IDevice* createVulkanDevice(const DeviceDesc& desc) {
 // default now, and a compile error here breaks every default build immediately.
 namespace aver::rhi::vkb {
 
-// ---- the ray path's bindless texture table: DECLINED on this backend, for now ----
-// Declined, not stubbed to a silent zero. Every caller gates on DeviceCaps::rtBindlessTextures
-// (see the caps_.rtBindlessTextures assignment above the AVER_INFO caps lines), which
-// VulkanDevice::queryCaps() deliberately hardcodes false here even where descriptor indexing
-// and inline ray query are genuinely present -- this function has nothing real to back the flag with
-// yet. Reaching here via the normal gated callers (VoxiRenderer::ensureTextureTable,
-// PathTracer::ensureTexturing) should be impossible, not merely unexpected: either a NEW caller
-// forgot to check the flag, or rtBindlessTextures got reconnected to the hardware expression
-// without this stub being replaced. Either way it declines cleanly rather than asserting,
-// and the flat-albedo path takes over, as on hardware that genuinely lacks the capability.
-
-BindlessTableHandle VulkanResourceFactory::createBindlessTextureTable(u32 capacity) {
-    AVER_WARN("[RHI.Vulkan] bindless texture tables are not implemented on this backend yet "
-              "({} descriptors requested); ray-traced texturing stays off here", capacity);
-    return 0;
+// ---- the ray path's bindless texture table (factory half in VulkanResourceFactory.cpp) ----
+// Binds the table at kVkSetBindless; a no-op on a pipeline that declared none, as on D3D12.
+void VulkanRenderContext::setBindlessTable(BindlessTableHandle table) {
+    if (!pipe_) { AVER_ERROR("[RHI.Vulkan] setBindlessTable before setPipeline"); return; }
+    if (!pipe_->layoutEntry || pipe_->layoutEntry->layout.bindlessTextureCount == 0) return;
+    if (table == 0 || table > res_->bindlessTables_.size() || !res_->bindlessTables_[table - 1].alive) {
+        AVER_ERROR("[RHI.Vulkan] setBindlessTable with an invalid table handle");
+        return;
+    }
+    VkCommandBuffer cb = cmd();
+    if (!cb) return;
+    const VkDescriptorSet set = res_->bindlessSetForFrame(res_->bindlessTables_[table - 1]);
+    dev_->api().CmdBindDescriptorSets(cb, pipe_->compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      pipe_->layoutEntry->pipelineLayout, kVkSetBindless, 1, &set, 0, nullptr);
 }
-
-void VulkanResourceFactory::destroyBindlessTextureTable(BindlessTableHandle) {}
-
-bool VulkanResourceFactory::setBindlessTexture(BindlessTableHandle, u32, TextureHandle) { return false; }
-
-u32 VulkanResourceFactory::bindlessTableCapacity(BindlessTableHandle) const { return 0; }
-
-void VulkanRenderContext::setBindlessTable(BindlessTableHandle) {}
 
 } // namespace aver::rhi::vkb
