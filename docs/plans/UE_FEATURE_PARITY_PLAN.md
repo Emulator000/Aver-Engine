@@ -71,6 +71,13 @@ Tonight: wave 0, then wave 1 as far as it gets verified.
   - collision groups and filters;
   - character virtual improvements;
   - Jolt's Hair module evaluated for #16.
+- **J as built (2026-10-11 survey):** motors, limits, sensor enter/exit, layers and sphere casts already exist. New work:
+  - ragdolls (`physics_ragdoll_abi.h`; a new `Aver.Ragdoll` module drives them from a skeleton through AnimSystem's pose-modifier seam, chained after the control rig, and is relayed to C# like animation curves);
+  - queries (box, capsule and body-shape casts and overlaps, multi-hit rays, point queries);
+  - breakable joints, soft limits, locked axes, continuous collision;
+  - character improvements (character-vs-character, an inner body, a can-stand check, contacts);
+  - graph nodes for all of the above (Blueprint parity);
+  - an evaluation of Jolt Hair for #16.
 - **M. Module cherry-picking** (wave 1c):
   - One manifest per module (name, dependencies, optional or required, description) is read by CMake (`cmake/AvModule.cmake`, `aver_check_module_dag`) and by the Aver Launcher.
   - The launcher shows module checkboxes. A module can be disabled only when no enabled module depends on it, and enabling one enables its dependencies.
