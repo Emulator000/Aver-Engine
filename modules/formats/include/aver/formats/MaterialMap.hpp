@@ -14,9 +14,10 @@
 //     water_tank      contiguous tokens, in order: water_tank_01, big_water_tank
 //     *tank*          substring anywhere        tank*   prefix of the whole name
 //     *_01            suffix of the whole name  *       anything
-// THE MOST SPECIFIC MATCHING RULE WINS, so rule order no longer matters: more tokens first, then the
-// longer pattern, and file order only breaks an exact tie. `water_tank Tank` therefore beats
-// `water Water` for water_tank_01 wherever each sits in the file.
+// THE MOST SPECIFIC MATCHING RULE WINS: more tokens first, and at the same token count the earlier
+// line. `water_tank Tank` therefore beats `water Water` for water_tank_01 wherever each sits, while
+// among one-token rules the file's order still decides (list drop rules first: `rvl -` before
+// `asphalt ...` keeps asphalt_crack_rvl overlays out).
 //
 // LEGACY (--material-map-legacy): the first rule in file order wins; a material rule is a plain
 // substring, a drop rule a whole-token match, '*' anything -- exactly what the tool did before the

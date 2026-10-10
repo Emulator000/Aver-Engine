@@ -299,8 +299,9 @@ UVs and a transform.
   (`aver/formats/MaterialMap.hpp`): the pattern is matched against the lowercased leaf name split on `_`,
   as WHOLE tokens (trailing digits allowed, so `stain` hits `wall_stain_01` and not `metal_stainless`);
   `a_b` matches contiguous tokens; `*x*` is a substring, `x*` a prefix, `*x` a suffix, `*` anything. **The
-  most specific matching rule wins** (more tokens, then the longer pattern; file order only breaks an
-  exact tie), so `water_tank Tank` beats `water Water` wherever each sits. `--material-map-legacy` keeps
+  most specific matching rule wins** (more tokens; at the same count the earlier line), so
+  `water_tank Tank` beats `water Water` wherever each sits, and among one-token rules the order still
+  decides (list drop rules first). `--material-map-legacy` keeps
   the old first-substring-in-file-order behaviour. Every run writes `<out-dir>/<base>.materialmap.report.txt`:
   each distinct name with the rule line that won and its material, every dropped and every unmatched
   name, and the rules that won nothing; every mesh a drop empties is also logged.

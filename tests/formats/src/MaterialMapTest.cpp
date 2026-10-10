@@ -110,8 +110,8 @@ int main() {
             check(resolve(m, "water_tank_01") == "Tank", "water_tank beats water in either file order");
             check(resolve(m, "water_01") == "Water", "and water still takes names water_tank does not match");
         }
-        const fmt::MaterialMap len = make("*at* Short\n*water* Long\n");
-        check(resolve(len, "water") == "Long", "at the same token count the longer pattern wins");
+        const fmt::MaterialMap ord = make("rvl -\nasphalt Asphalt\n");
+        check(resolve(ord, "asphalt_crack_01_rvl") == "-", "at the same token count the earlier line wins, not the longer pattern");
         const fmt::MaterialMap tie = make("wall First\nwall Second\n");
         check(resolve(tie, "wall_01") == "First", "an exact tie goes to the earlier line");
         const fmt::MaterialMap dropVsMat = make("glass_clip -\nglass Glass\n");

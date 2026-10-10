@@ -108,10 +108,9 @@ int matchMaterialRule(const MaterialMap& map, const std::string& leaf) {
     for (usize i = 0; i < map.rules.size(); ++i) {
         const MaterialRule& r = map.rules[i];
         if (r.text.find('*') != std::string::npos || !ruleMatches(r, leaf)) continue;
-        // Strictly more specific replaces; an exact tie keeps the earlier line.
-        if (best < 0 || r.tokenCount > map.rules[usize(best)].tokenCount ||
-            (r.tokenCount == map.rules[usize(best)].tokenCount && r.text.size() > map.rules[usize(best)].text.size()))
-            best = static_cast<int>(i);
+        // More tokens replaces; the same count keeps the earlier line. Not pattern length: 'asphalt'
+        // outranking a drop rule 'rvl' kept every asphalt_crack_rvl overlay as solid road.
+        if (best < 0 || r.tokenCount > map.rules[usize(best)].tokenCount) best = static_cast<int>(i);
     }
     return best;
 }
@@ -181,7 +180,7 @@ std::string materialMapReportText(const MaterialMap& map, const MaterialMapRepor
     };
     o << "# material map report for " << source << "\n"
       << "# matching: " << (map.legacy ? "legacy (first rule in file order, plain substring)"
-                                        : "most specific rule wins (tokens, then length, then file order)") << "\n"
+                                        : "most specific rule wins (more tokens, then file order)") << "\n"
       << "# " << map.rules.size() << " rule(s); " << stats.mapped << " submesh(es) mapped, " << stats.dropped
       << " dropped, " << stats.unmatched << " unmatched, " << stats.alreadyBound
       << " already had a material (not looked up), " << stats.emptied << " mesh(es) emptied\n";

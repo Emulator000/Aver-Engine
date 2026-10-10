@@ -1084,7 +1084,11 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
     }
 
     std::vector<std::string> used;
+    usize emptied = 0;
     for (usize i = 0; i < items.size(); ++i) {
+        // Every submesh dropped (a material map's '-' rules): nothing to write, and not a failure.
+        // Its stem stays empty, so its placements are skipped.
+        if (items[i].data.indices.empty() && items[i].data.submeshes.empty()) { ++emptied; continue; }
         fmt::OcMeshData m = items[i].data;
 #if AVER_MODULE_TRIFACTOR
         applyLodAndClustering(m, lodRatio, items[i].name.empty() ? base : items[i].name);
@@ -1106,6 +1110,7 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
         if (!writeAndVerifyMesh(input, outDir + "/" + candidate + ".ocmesh", m, stats)) anyFailed = true;
         else if (outStems) (*outStems)[i] = candidate;
     }
+    if (emptied) AVER_INFO("{} mesh(es) had every submesh dropped by the material map; not written", emptied);
     return anyFailed;
 }
 
@@ -1671,6 +1676,7 @@ int main(int argc, char** argv) {
             fmt::MaterialMapReport mmReport;
             const fmt::MaterialMapStats mmStats = fmt::applyMaterialMap(res.meshes, res.meshNames, mmap, &mmReport);
             const std::string mmReportPath = outDir + "/" + base + ".materialmap.report.txt";
+            createDirectories(outDir);
             std::ofstream rf(mmReportPath, std::ios::binary);
             if (rf) {
                 rf << fmt::materialMapReportText(mmap, mmReport, mmStats, input);
