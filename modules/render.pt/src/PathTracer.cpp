@@ -99,7 +99,7 @@ rhi::PipelineLayout ptLayout(u32 bindlessTextures) {
     rhi::PipelineLayout l{};
     l.srvCount = kSrvCount;
     l.uavCount = kUavCount;
-    // b4 is a ROOT CBV (zero dwords); the 112-byte block suballocates from frame upload ring.
+    // b4 is a ROOT CBV (zero dwords); the 128-byte block suballocates from frame upload ring.
     l.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
     if (bindlessTextures) {
         // Wrap (UV tiling is material's business); Linear (compute kernel has no screen derivatives).
@@ -120,10 +120,11 @@ struct FrameCB {
     u32 image[4];
     u32 sample[4];
     f32 trace[4];
+    u32 media[4];   // x the scene holds a dielectric, y a medium; see cbuffer PtFrame
 };
 
-// Seven float4/uint4 rows, matching PtShaders.hpp. Catches field additions on one side only.
-static_assert(sizeof(FrameCB) == 112, "cbuffer PtFrame in PtShaders.hpp mirrors this byte for byte");
+// Eight float4/uint4 rows, matching pt_pathtrace.hlsl. Catches field additions on one side only.
+static_assert(sizeof(FrameCB) == 128, "cbuffer PtFrame in PtShaders.hpp mirrors this byte for byte");
 static_assert(sizeof(FrameCB) % 16 == 0, "must be a legal constant-buffer size");
 
 } // namespace
@@ -332,6 +333,12 @@ u32 PathTracer::addSurface(const PtSurface& s) {
 u32 PathTracer::addScene(const u32* surfaceIds, u32 count) {
     Scene s;
     s.surfaces.assign(surfaceIds, surfaceIds + count);
+    for (u32 id : s.surfaces) {
+        if (id >= surfaces_.size() || !(surfaces_[id].ior > 0.0f)) continue;
+        s.hasDielectric = true;
+        const PtSurface& m = surfaces_[id];
+        if (m.sigmaT[0] > 0.0f || m.sigmaT[1] > 0.0f || m.sigmaT[2] > 0.0f) s.hasMedium = true;
+    }
     if (res_) {
         // TLAS reused per slot, not shared between scenes. Grows by doubling.
         const usize slot = scenes_.size();
@@ -398,6 +405,9 @@ bool PathTracer::prepare() {
         inst.normalTex     = surfaces_[i].normalTex;
         inst.normalScale   = surfaces_[i].normalScale;
         std::memcpy(inst.emissive, surfaces_[i].emissive, sizeof(inst.emissive));
+        std::memcpy(inst.sigmaT, surfaces_[i].sigmaT, sizeof(inst.sigmaT));
+        std::memcpy(inst.scatterAlbedo, surfaces_[i].scatterAlbedo, sizeof(inst.scatterAlbedo));
+        inst.scatterG = surfaces_[i].scatterG;
         // Shared rows: geometry is the same, per-surface data is transforms/albedo/ior/base-colour index.
         inst.firstVertex = row.firstVertex;
         inst.firstIndex  = row.firstIndex;
@@ -632,6 +642,14 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     return true;
 }
 
+void PathTracer::invalidateGeometry() {
+    // Drops the caches only; the next prepare() reallocates the table (geoMeshes_ no longer matches)
+    // and rebuilds each BLAS. The old buffers are freed by that prepare().
+    blasCache_.clear();
+    geoMeshes_.clear();
+    geoVerts_ = geoIndices_ = 0;
+}
+
 void PathTracer::resetScene() {
     if (res_) {
         // instanceBuf_ is per snapshot (one record per surface); verts_/indices_ belong to
@@ -687,6 +705,12 @@ void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const P
     cb.trace[2] = d.legacyEnvironment ? 1.0f : 0.0f;
     // trace[3]: scene light count; the list itself is t5.
     cb.trace[3] = static_cast<f32>(lights_.size());
+    // media[0]: the sun's shadow ray walks through dielectrics only when the scene has any, so a scene
+    // without one runs the original any-hit occlusion test and replays bit for bit.
+    if (t.scene < scenes_.size()) {
+        cb.media[0] = scenes_[t.scene].hasDielectric ? 1u : 0u;
+        cb.media[1] = scenes_[t.scene].hasMedium ? 1u : 0u;
+    }
     if (lightsDirty_) {
         lightSlot_ = (lightSlot_ + 1) % kLightRing;
         if (!lights_.empty())

@@ -108,6 +108,8 @@ void PtSceneView::shutdown() {
     haveCam_ = false;
     sceneKey_ = 0;
     sceneReady_ = false;
+    builtIncludeDynamic_ = false;
+    builtDynamicRevision_ = 0;
     sampleCursor_ = 0;
     loggedUnavailable_ = loggedFirstFrame_ = dropCapLogged_ = convergedLogged_ = false;
     dev_ = nullptr;
@@ -129,7 +131,14 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
     // non-zero means this mesh's vertices are written by compute (skinned, or any future per-frame
     // vertex pass), which changes every frame -- including it would mean drawsKey() below never
     // settles and the accumulator would never progress past sample 0.
-    if (dev_ && dev_->meshVertexBuffer(mesh) != 0) return;
+    if (dev_ && dev_->meshVertexBuffer(mesh) != 0) {
+        // Opt-in (setIncludeDynamicMeshes): a host-promised frozen compute-written mesh, usable only if the
+        // backend can hand its geometry over as buffers.
+        if (!includeDynamic_) return;
+        rhi::BufferHandle vb = 0, ib = 0;
+        u32 vc = 0, ic = 0;
+        if (!dev_->meshGeometry(mesh, &vb, &ib, &vc, &ic) || !vb || !ib || vc == 0 || ic == 0) return;
+    }
     if (draws_.size() >= kMaxInstances) return;   // rebuildScene() reports the cap once; nothing to add here
 
     Draw d;
@@ -179,6 +188,15 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
         d.emissive[0] = rm.emissive[0];
         d.emissive[1] = rm.emissive[1];
         d.emissive[2] = rm.emissive[2];
+        if (blended) {
+            // The volume only matters to a surface the tracer treats as a dielectric.
+            for (u32 c = 0; c < 3; ++c) {
+                d.sigmaT[c] = rm.sigmaT[c] > 0.0f ? rm.sigmaT[c] : 0.0f;
+                d.scatterAlbedo[c] = rm.scatterAlbedo[c] < 0.0f ? 0.0f
+                                   : (rm.scatterAlbedo[c] > 1.0f ? 1.0f : rm.scatterAlbedo[c]);
+            }
+            d.scatterG = rm.scatterG;
+        }
     } else {
         d.albedo[0] = baseColor[0];
         d.albedo[1] = baseColor[1];
@@ -192,9 +210,8 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
     // every reflection of it solid). A path tracer is the opposite case -- Fresnel-weighted
     // reflection and refraction is the one thing this integrator can model CORRECTLY for a
     // dielectric, and dropping the draw would mean tracing a scene with the glass silently missing.
-    // See the class comment's MATERIALS point for why the IOR is a fixed constant and not the real
-    // material's own value.
-    d.ior = blended ? kDefaultGlassIor : 0.0f;
+    // The IOR is the resolved material's own when it supplies one, else kDefaultGlassIor.
+    d.ior = blended ? (rm.ior >= 1.0f ? rm.ior : kDefaultGlassIor) : 0.0f;
     draws_.push_back(d);
 }
 
@@ -235,6 +252,17 @@ u64 PtSceneView::drawsKey() const {
         // case a texture swap in the editor produces, and a gloss/metalness edit that changes no
         // texture at all -- and an emissiveFactor edit, for the same reason.
         {
+            // The medium behind a blended surface: editing the water's colour, density or scattering
+            // must restart the image like any other material edit.
+            const f32 medium[7] = {d.sigmaT[0], d.sigmaT[1], d.sigmaT[2],
+                                   d.scatterAlbedo[0], d.scatterAlbedo[1], d.scatterAlbedo[2],
+                                   d.scatterG};
+            for (u32 i = 0; i < 7; ++i) {
+                u32 bits = 0;
+                std::memcpy(&bits, &medium[i], sizeof(bits));
+                key ^= static_cast<u64>(bits);
+                key *= 1099511628211ull;
+            }
             key ^= static_cast<u64>(d.baseColorTex);  key *= 1099511628211ull;
             key ^= static_cast<u64>(d.metalRoughTex); key *= 1099511628211ull;
             key ^= static_cast<u64>(d.normalTex);     key *= 1099511628211ull;
@@ -248,7 +276,27 @@ u64 PtSceneView::drawsKey() const {
             }
         }
     }
+    // A frozen dynamic mesh's geometry is only as current as the host's revision, so a new one must
+    // read as a different scene. Folded in only while the opt-in is on, leaving every other key as before.
+    if (includeDynamic_) {
+        key ^= dynamicRevision_;
+        key *= 1099511628211ull;
+        key ^= 0x9e3779b97f4a7c15ull;
+        key *= 1099511628211ull;
+    }
     return key;
+}
+
+void PtSceneView::setIncludeDynamicMeshes(bool include, u64 revision) {
+    if (!include) revision = 0;
+    if (include == includeDynamic_ && revision == dynamicRevision_) return;   // idempotent
+    includeDynamic_ = include;
+    dynamicRevision_ = revision;
+    // The draw list a frame behind was filtered under the old setting; the key alone would not move
+    // when only the toggle flips and no dynamic mesh is present yet, so re-arm explicitly.
+    sceneReady_ = false;
+    sampleCursor_ = 0;
+    convergedLogged_ = false;
 }
 
 bool PtSceneView::deriveCamera(PtCamera& out) const {
@@ -330,6 +378,13 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
     pt_.destroyTarget(target_);
     pt_.resetScene();
     sceneReady_ = false;
+    // Geometry the PathTracer cached (BLASes, the flat table) may predate a frozen dynamic mesh's
+    // current revision, or have been built without the dynamic meshes at all.
+    if (builtIncludeDynamic_ != includeDynamic_ || builtDynamicRevision_ != dynamicRevision_) {
+        pt_.invalidateGeometry();
+        builtIncludeDynamic_ = includeDynamic_;
+        builtDynamicRevision_ = dynamicRevision_;
+    }
 
     std::vector<u32> ids;
     ids.reserve(drawsPrev_.size());
@@ -342,6 +397,9 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
         std::memcpy(s.albedo, d.albedo, sizeof(s.albedo));
         s.ior = d.ior;
         std::memcpy(s.emissive, d.emissive, sizeof(s.emissive));
+        std::memcpy(s.sigmaT, d.sigmaT, sizeof(s.sigmaT));
+        std::memcpy(s.scatterAlbedo, d.scatterAlbedo, sizeof(s.scatterAlbedo));
+        s.scatterG = d.scatterG;
         // RESIDENCY IS RESOLVED HERE, not in submitDraw: this runs once per re-arm rather than once
         // per draw per frame, and residentTexture() is the call that may build the table and compile
         // the textured pipeline on first use. A handle the tracer cannot make resident comes back

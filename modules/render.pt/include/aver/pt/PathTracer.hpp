@@ -2,7 +2,9 @@
 // A brute-force path tracer: cosine-weighted hemisphere sampling, N bounces, progressive
 // accumulation into a linear float buffer. Every surface is Lambertian EXCEPT one flagged dielectric
 // (PtSurface::ior > 0), which gets a smooth Fresnel-weighted reflect/refract BSDF instead -- see
-// ptScatterDielectric in PtShaders.hpp and PtFurnaceTest.cpp's dielectric energy-conservation checks.
+// ptScatterDielectric in pt_pathtrace.hlsl and PtFurnaceTest.cpp's dielectric energy-conservation checks.
+// A dielectric may carry a homogeneous medium (PtSurface::sigmaT): paths refracting into it are
+// attenuated, and scatter with sun next-event estimation when scatterAlbedo > 0.
 //
 // It is a COMPUTE pass over an RWStructuredBuffer<float4> rather than a texture, for two reasons
 // that are both about being checkable. Format has no RGBA32F, and a structured buffer needs no
@@ -68,6 +70,17 @@ struct PtSurface {
 
     // Linear radiance this surface emits (a lamp bulb's emissiveFactor); {0,0,0} = no glow.
     f32 emissive[3] = {0, 0, 0};
+
+    // THE HOMOGENEOUS MEDIUM BEHIND A DIELECTRIC SURFACE (read only when ior > 0). sigmaT is the
+    // extinction per channel in cm^-1 (Beer-Lambert: exp(-sigmaT * distance)); all zero = clear. A
+    // path that refracts into the surface travels inside this medium until it refracts out, so a
+    // single open plane works as a pool or sea whose water lies "behind" it. scatterAlbedo =
+    // sigma_s / sigma_t per channel in [0,1] (0 = pure absorber, 1 = pure scatterer); scatterG is the
+    // Henyey-Greenstein anisotropy in (-1,1), > 0 forward. Scattering adds sun in-scatter (next-event
+    // estimated) and random-walk transport; with sigmaT == 0 the integrator is unchanged bit for bit.
+    f32 sigmaT[3] = {0, 0, 0};
+    f32 scatterAlbedo[3] = {0, 0, 0};
+    f32 scatterG = 0.0f;
 };
 
 // A scene light for next-event estimation: point, spot or rectangular, optionally shaped by an IES
@@ -137,6 +150,13 @@ public:
     bool init(rhi::IDevice& dev);
     void shutdown();
     bool available() const { return pipeline_ != 0; }
+
+    // Forgets every cached BLAS and the flat geometry table, so the NEXT prepare() re-reads each
+    // mesh's geometry and builds its BLAS afresh. For a host whose mesh geometry changed in place
+    // (a compute-written mesh it promised was frozen, see PtSceneView::setIncludeDynamicMeshes).
+    // A BLAS the RHI shares from another owner (IResourceFactory::blasForMesh) is picked up as
+    // that owner left it. Superseded BLASes are released with their mesh, so call this rarely.
+    void invalidateGeometry();
 
     // Makes `h` resident in the tracer's own bindless base-colour table and returns its index, or
     // kUnboundTexture if this device has no bindless support, the table could not be created, or it
@@ -218,8 +238,8 @@ public:
                          u64 dstOffset);
 
 private:
-    // MIRRORS the HLSL PtInstance. 64 + 4 + 4 + 12 + 4; a structured buffer packs tightly with
-    // natural alignment, so this is 88 bytes on both sides -- and the stride handed to
+    // MIRRORS the HLSL PtInstance. A structured buffer packs tightly with natural alignment, so
+    // this is 152 bytes on both sides -- and the stride handed to
     // setSrvBuffer must agree with it or every instance after the first reads its neighbour.
     // THE LAST FOUR BYTES USED TO BE A SPARE `u32 pad`. Reinterpreted as a float IOR instead to
     // avoid adding a new field. See PtSurface::ior for why 0.0 doubling as "not a dielectric"
@@ -241,12 +261,20 @@ private:
         f32 normalScale = 1.0f;
         // PtSurface::emissive, appended like normalScale; read by both shader variants.
         f32 emissive[3] = {0, 0, 0};
+        // PtSurface::sigmaT / scatterAlbedo / scatterG, appended like emissive.
+        f32 sigmaT[3] = {0, 0, 0};
+        f32 scatterAlbedo[3] = {0, 0, 0};
+        f32 scatterG = 0.0f;
     };
-    static_assert(sizeof(Instance) == 124, "PtInstance is the HLSL PtInstance ABI");
+    static_assert(sizeof(Instance) == 152, "PtInstance is the HLSL PtInstance ABI");
 
     struct Scene {
         rhi::TlasHandle  tlas = 0;
         std::vector<u32> surfaces;
+        // What the surfaces hold, for the integrator: a dielectric turns on the sun's shadow-ray walk,
+        // a medium (sigmaT > 0 on a dielectric) is informational. Both false = the original code path.
+        bool hasDielectric = false;
+        bool hasMedium = false;
     };
 
     rhi::IDevice*          dev_ = nullptr;

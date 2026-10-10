@@ -2809,6 +2809,18 @@ void SandboxApp::syncPtSceneView(rhi::IDevice* dev) {
                 out.emissive[0] = mc->emissiveFactor[0];
                 out.emissive[1] = mc->emissiveFactor[1];
                 out.emissive[2] = mc->emissiveFactor[2];
+                // The glass/water volume as plain numbers (the tracer links no pbr::): the material's own
+                // IOR, and sigmaT = -ln(attenuationColor) / attenuationDistance per channel, the same
+                // extinction averVolumeTransmittance exponentiates. scatterColor is already linear.
+                out.ior = mc->ior;
+                if (mc->attenuationDistance > 0.0f) {
+                    for (int c = 0; c < 3; ++c) {
+                        const float att = mc->attenuationColor[c] > 1e-4f ? mc->attenuationColor[c] : 1e-4f;
+                        out.sigmaT[c] = -std::log(att) / mc->attenuationDistance;
+                        out.scatterAlbedo[c] = mc->scatterColor[c];
+                    }
+                    out.scatterG = mc->scatterAnisotropy;
+                }
                 // The tracer samples textures now, so outAlbedo means something DIFFERENT per branch.
                 // WITH a texture: return the FACTOR (already linear) plus the handle -- multiplies
                 // factor x texel, matching voxi.hlsl's textured hit. averageBaseColor here instead

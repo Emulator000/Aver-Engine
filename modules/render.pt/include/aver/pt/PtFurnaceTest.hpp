@@ -45,6 +45,18 @@
 // been shown FAILING proves nothing, so they are shipped and run on every invocation: if
 // open/xPI does not read PI*L, the oracle itself is broken and says so.
 //
+// THREE MEDIUM CONFIGURATIONS check the participating-media integrator, on a slab between two
+// index-matched (ior 1) planes so the interface itself reflects nothing and only the medium is measured:
+//
+//   medium/scatter-grey/albedo-1       a grey, purely scattering slab under uniform illumination. Every
+//                            weight is exactly 1, so it must read L times the escaped fraction -- the
+//                            cave identity, with the walls replaced by a random walk.
+//   medium/scatter-chromatic/albedo-1  the same with a different sigma per channel. Reads L per channel
+//                            (to a few percent: the weights are no longer 1, so there IS noise), which is
+//                            what pins the hero-channel MIS weights.
+//   medium/absorb-only/analytic        an absorber must read L * exp(-sigma * pathLength), averaged over
+//                            the probe cone -- Beer-Lambert from first principles, per channel.
+//
 // A SEVENTH AND EIGHTH configuration check DETERMINISM: the first block of samples is traced again
 // at the end of the run, into a second accumulator, and the two must be BIT-IDENTICAL. That is what
 // a seed drawn from a frame counter or a wall clock would fail, and nothing in an image would show.
@@ -100,6 +112,9 @@ private:
         kOpenSpecDielectric,       // roughness 1.0, metallic 0
         kOpenSpecMetalRough,       // roughness 1.0, metallic 1
         kOpenSpecMetalSmooth,      // roughness 0.3, metallic 1
+        kMediumScatterGrey,        // see the class comment
+        kMediumScatterChromatic,
+        kMediumAbsorb,
         kCaveShallow,
         kCaveDeep,
         kSeedFirst,     // the first sample block, traced on the FIRST accumulation frame
@@ -116,6 +131,9 @@ private:
         PtDefect defect = PtDefect::None;
         // 0 = every accumulation step; otherwise the single step this run dispatches on, plus one.
         u32      onlyStep = 0;
+        // False for a configuration whose channels are legitimately different (a chromatic medium); the
+        // grey-environment "came back non-grey" swizzle check is skipped for it.
+        bool     grey = true;
     };
 
     // What came back out of one accumulator.

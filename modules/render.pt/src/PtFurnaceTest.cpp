@@ -18,6 +18,35 @@ constexpr f64 kPi = 3.14159265358979323846;
 constexpr f32 kGlassIor   = 1.5f;
 constexpr f32 kDiamondIor = 2.42f;
 
+// The medium slab: two index-matched (ior 1) planes, z = 0 and z = kSlabDepth, the top facing up and the
+// bottom facing down so a ray inside meets each from the back. ior 1 makes the interface a no-op
+// (Schlick's reflectance at the probe's near-normal angles is below 1e-10), leaving only the medium.
+constexpr f32 kSlabDepth = 200.0f;
+constexpr f32 kMatchedIor = 1.0f;
+// Bounce budget of the scattering slabs: a random walk across an optical depth of a few needs tens of
+// events, and the identity wants the truncated fraction negligible (checked, not assumed).
+constexpr u32 kMediumBounces = 128;
+// The extinctions (cm^-1) of the three media; times kSlabDepth these are the optical depths.
+constexpr f32 kSigmaGrey[3]   = {0.01f, 0.01f, 0.01f};      // tau 2
+constexpr f32 kSigmaChroma[3] = {0.006f, 0.010f, 0.016f};   // tau 1.2 / 2 / 3.2
+constexpr f32 kSigmaAbsorb[3] = {0.002f, 0.004f, 0.008f};   // tau 0.4 / 0.8 / 1.6
+
+// Mean over a camera's square image of exp(-sigma * (depth / cos(theta))): the exact expectation of a
+// path crossing a slab of `depth` along each primary ray. dir.z = 1 / sqrt(1 + t^2 (x^2 + y^2)) for a
+// camera looking straight down the axis with aspect 1, and the sample jitter makes (x, y) uniform on [-1,1]^2.
+f64 meanSlabTransmittance(f64 sigma, f64 depth, f64 tanHalfFov) {
+    constexpr int N = 256;
+    f64 acc = 0.0;
+    for (int j = 0; j < N; ++j) {
+        const f64 y = -1.0 + 2.0 * (j + 0.5) / N;
+        for (int i = 0; i < N; ++i) {
+            const f64 x = -1.0 + 2.0 * (i + 0.5) / N;
+            acc += std::exp(-sigma * depth * std::sqrt(1.0 + tanHalfFov * tanHalfFov * (x * x + y * y)));
+        }
+    }
+    return acc / (static_cast<f64>(N) * N);
+}
+
 // The flat quad the single-bounce configurations stand on. Large enough that no primary ray from
 // the probe camera comes near an edge, so "every path bounces once and leaves" is a property of the
 // geometry rather than of where the camera happens to point.
@@ -93,6 +122,9 @@ bool PtFurnaceTest::init(rhi::IDevice& dev) {
     configs_[kOpenSpecDielectric]  = {"open/spec-r1.0-m0/correct",   5, 0, 4, PtDefect::None, 0};
     configs_[kOpenSpecMetalRough]  = {"open/spec-r1.0-m1/correct",   6, 0, 4, PtDefect::None, 0};
     configs_[kOpenSpecMetalSmooth] = {"open/spec-r0.3-m1/correct",   7, 0, 4, PtDefect::None, 0};
+    configs_[kMediumScatterGrey]      = {"medium/scatter-grey/albedo-1",       8, 0, kMediumBounces, PtDefect::None, 0};
+    configs_[kMediumScatterChromatic] = {"medium/scatter-chromatic/albedo-1",  9, 0, kMediumBounces, PtDefect::None, 0, false};
+    configs_[kMediumAbsorb]           = {"medium/absorb-only/analytic",       10, 0, 8, PtDefect::None, 0, false};
     configs_[kCaveShallow]    = {"cave/4-bounce/correct",   2, 1,  4, PtDefect::None,     0};
     configs_[kCaveDeep]       = {"cave/32-bounce/correct",  2, 1, 32, PtDefect::None,     0};
     // THE DETERMINISM PAIR RUNS IN THE CAVE, NOT ON THE QUAD, AND THAT IS THE SECOND ATTEMPT.
@@ -169,6 +201,12 @@ bool PtFurnaceTest::buildGeometry() {
                makeQuad(*dev_, wxp, -1.0f, 0.0f, 0.0f),
                makeQuad(*dev_, wym,  0.0f, 1.0f, 0.0f),
                makeQuad(*dev_, wyp,  0.0f,-1.0f, 0.0f)};
+    const f32 slabTop[4][3] = {{-kQuadHalf, -kQuadHalf, kSlabDepth}, { kQuadHalf, -kQuadHalf, kSlabDepth},
+                               { kQuadHalf,  kQuadHalf, kSlabDepth}, {-kQuadHalf,  kQuadHalf, kSlabDepth}};
+    const rhi::MeshHandle slabTopMesh = makeQuad(*dev_, slabTop, 0.0f, 0.0f, 1.0f);
+    const rhi::MeshHandle slabBotMesh = makeQuad(*dev_, q, 0.0f, 0.0f, -1.0f);
+    meshes_.push_back(slabTopMesh);
+    meshes_.push_back(slabBotMesh);
     for (rhi::MeshHandle m : meshes_) if (!m) {
         AVER_ERROR("[PT] furnace: the device would not take the test geometry");
         return false;
@@ -207,6 +245,20 @@ bool PtFurnaceTest::buildGeometry() {
     const u32 specMetalSmooth = pt_.addSurface(s);
     s.roughness = -1.0f; s.metallic = 0.0f;   // leave the shared PtSurface as it was found
 
+    // THE MEDIUM SLABS: both planes carry the medium (the path enters through one and leaves through
+    // the other, and each must know it has a medium to clear). Albedo 1 = pure scatterer, 0 = absorber.
+    auto addSlab = [&](const f32 sigma[3], f32 omega, u32 out[2]) {
+        PtSurface m;
+        m.ior = kMatchedIor;
+        for (u32 k = 0; k < 3; ++k) { m.sigmaT[k] = sigma[k]; m.scatterAlbedo[k] = omega; }
+        m.mesh = slabTopMesh; out[0] = pt_.addSurface(m);
+        m.mesh = slabBotMesh; out[1] = pt_.addSurface(m);
+    };
+    u32 slabGrey[2], slabChroma[2], slabAbsorb[2];
+    addSlab(kSigmaGrey, 1.0f, slabGrey);
+    addSlab(kSigmaChroma, 1.0f, slabChroma);
+    addSlab(kSigmaAbsorb, 0.0f, slabAbsorb);
+
     // FIVE ACCELERATION STRUCTURES, not one scene with everything spread out. "The quad is far
     // enough from the cave that a bounce off it never reaches" is a probability argument, and the
     // single-bounce claim below must not rest on one: in scenes 0, 3 and 4 there is literally
@@ -219,6 +271,9 @@ bool PtFurnaceTest::buildGeometry() {
     pt_.addScene(&specDielectric, 1);    // scene 5
     pt_.addScene(&specMetalRough, 1);    // scene 6
     pt_.addScene(&specMetalSmooth, 1);   // scene 7
+    pt_.addScene(slabGrey, 2);           // scene 8
+    pt_.addScene(slabChroma, 2);         // scene 9
+    pt_.addScene(slabAbsorb, 2);         // scene 10
     return pt_.prepare();
 }
 
@@ -360,7 +415,7 @@ void PtFurnaceTest::evaluate() {
                   "mean bounces {:.4f}  paths {:.0f}",
                   configs_[r].label, x.mean(0), L, L > 0.0 ? x.mean(0) / L : 0.0,
                   x.escapeFraction(), x.meanBounces(), x.traced);
-        if (x.channelSpread() > 1e-6) {
+        if (configs_[r].grey && x.channelSpread() > 1e-6) {
             ++failures_;
             AVER_ERROR("[PT]   '{}' came back non-grey: channels {:.6f}/{:.6f}/{:.6f}. A grey "
                        "environment cannot produce that, so this is a swizzle, not an energy error",
@@ -512,6 +567,61 @@ void PtFurnaceTest::evaluate() {
           "while the roughness-1 case fails is the signature of missing multiple-scattering "
           "compensation rather than an error in the lobe itself -- which is why both are here.");
 
+    // ---- 6c. participating media: a random walk, a transmittance, and the weights between them ----
+    //
+    // THE SCATTERING SLAB. Pure scattering loses no energy, so a path either leaves the slab (and
+    // reads the uniform environment) or runs out of bounces / wanders off the plane (and reads
+    // nothing) -- the cave identity again, which needs no baseline. For a GREY medium every weight is
+    // exactly 1, so it holds to float rounding; the escaped fraction is demanded near 1 so that the
+    // test measures the medium rather than the truncation.
+    const Result& scatterGrey = results_[kMediumScatterGrey];
+    if (!(scatterGrey.escapeFraction() > 0.999)) {
+        ++failures_;
+        AVER_ERROR("[PT] furnace INCONCLUSIVE: only {:.5f} of the grey scattering slab's paths left it "
+                   "within {} events, so the identity below would mostly measure the truncation",
+                   scatterGrey.escapeFraction(), kMediumBounces);
+    }
+    check("medium/scatter-grey/albedo-1", scatterGrey.mean(0), L * scatterGrey.escapeFraction(), 1e-4,
+          "A purely scattering medium conserves energy: every path that leaves it reads the uniform "
+          "environment, so the mean is L times the escaped fraction. A different value is a scatter "
+          "weight that is not 1 (distance pdf, albedo, or the phase/pdf ratio), or a path that is "
+          "lost or duplicated at the interface.");
+
+    // THE CHROMATIC SCATTERING SLAB: the same claim with a different sigma per channel, which is
+    // where the hero-channel MIS weights earn their keep -- a wrong pdf average shows as a channel
+    // reading high and another low while grey stays fine. These weights vary, so the mean carries
+    // real Monte Carlo noise (a fraction of a percent at 131072 paths): 2.5% is a wide margin against
+    // it and still far inside what a wrong weight produces.
+    const Result& scatterChroma = results_[kMediumScatterChromatic];
+    if (!(scatterChroma.escapeFraction() > 0.999)) {
+        ++failures_;
+        AVER_ERROR("[PT] furnace INCONCLUSIVE: only {:.5f} of the chromatic scattering slab's paths "
+                   "left it within {} events", scatterChroma.escapeFraction(), kMediumBounces);
+    }
+    for (u32 ch = 0; ch < 3; ++ch) {
+        const char* names[3] = {"medium/scatter-chromatic R", "medium/scatter-chromatic G",
+                                "medium/scatter-chromatic B"};
+        check(names[ch], scatterChroma.mean(ch), L * scatterChroma.escapeFraction(), 2.5e-2,
+              "An albedo-1 chromatic medium must still return the environment in EVERY channel. A "
+              "channel off from the others means the per-channel weight f_c / pdf_avg is wrong "
+              "(the distance sampled from one channel but weighted as if from another).");
+    }
+
+    // THE ABSORBING SLAB: no random numbers, so the only noise is the sub-pixel jitter. The expected
+    // value is exp(-sigma * length) averaged over the cone, with the first rayBias of depth already
+    // consumed by the offset that steps the refracted ray off the top plane.
+    const PtDispatch defaults{};
+    const f64 depthEff = static_cast<f64>(kSlabDepth) - static_cast<f64>(defaults.rayBias);
+    for (u32 ch = 0; ch < 3; ++ch) {
+        const char* names[3] = {"medium/absorb-only R", "medium/absorb-only G", "medium/absorb-only B"};
+        const f64 expected = L * meanSlabTransmittance(kSigmaAbsorb[ch], depthEff,
+                                                       static_cast<f64>(cameras_[0].tanHalfFov));
+        check(names[ch], results_[kMediumAbsorb].mean(ch), expected, 1e-3,
+              "An absorbing slab must transmit exactly exp(-sigma * path length) of the environment, "
+              "channel by channel. High means the medium was not entered (or was left early), low "
+              "means it was applied twice or over too long a segment.");
+    }
+
     // ---- 7. more than one bounce, where the answer is L times what escaped ----
     // The identity is exact and needs NO baseline: both sides come out of the same paths. A path
     // that ran out of bounces contributes nothing, so a finite bounce count reads low BY EXACTLY
@@ -587,7 +697,8 @@ void PtFurnaceTest::evaluate() {
     if (passed_)
         AVER_INFO("[PT] FURNACE PASS: the integrator reads L to 1e-4 in an albedo-1 furnace, L/2 at "
                   "albedo 0.5, L times the escaped fraction inside an enclosure, and L again from a "
-                  "non-absorbing dielectric at two different IORs -- and the three deliberately "
+                  "non-absorbing dielectric at two different IORs, a scattering slab reads L times its "
+                  "escaped fraction, an absorbing one exp(-sigma d) -- and the three deliberately "
                   "broken estimators beside them read PI*L, 2L and L*(F0^2+(1-F0)^2), so the oracle "
                   "is known to be able to see all three");
     else

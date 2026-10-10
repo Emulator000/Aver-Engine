@@ -43,7 +43,9 @@
 //     predicate VoxiRenderer::buildAccelerationStructures already applies (VoxiRenderer.cpp, gated on
 //     IDevice::meshVertexBuffer). Skinned characters, particles, and anything else that writes its
 //     own vertices every frame are silently absent: including them would mean the scene "changes"
-//     every frame and the accumulator would never progress past sample 0.
+//     every frame and the accumulator would never progress past sample 0. The one opt-in exception is
+//     setIncludeDynamicMeshes(): a host that KNOWS a compute-written mesh is frozen (a water surface
+//     that stops animating for the reference render) can ask for it to be traced, keyed on a revision.
 //   - MATERIALS. PtSurface carries one flat linear albedo, produced by the host's AlbedoResolver
 //     when it recognises the draw's binding, and by the legacy per-draw base colour otherwise (which
 //     is also what every draw gets when no resolver is installed at all). A resolver can also hand
@@ -51,14 +53,13 @@
 //     the emissiveFactor -- as a flat factor only, no emissive texture.
 //
 //     A BLENDED DRAW (submitDraw's `blended` flag, see IRenderFeature's own contract) is now
-//     ACCEPTED rather than dropped, and marked a smooth, non-absorbing DIELECTRIC -- see
-//     PtSurface::ior and PtShaders.hpp's ptScatterDielectric. ITS IOR IS A SINGLE FIXED CONSTANT
-//     (kDefaultGlassIor), NOT THE REAL MATERIAL'S, and that is a stated approximation, not an
-//     oversight: this module links only Core and the GENERIC RHI (see CMakeLists.txt) and so cannot
-//     read pbr::MaterialConstants::ior out of drawConstants any more than it can read baseColorFactor
-//     without AlbedoResolver's help. A future IorResolver mirroring AlbedoResolver's own shape would
-//     let the host vary it per material; until one exists, every pane of glass in a traced scene
-//     reads as ordinary soda-lime glass regardless of what its author actually set.
+//     ACCEPTED rather than dropped, and marked a smooth DIELECTRIC -- see PtSurface::ior and
+//     pt_pathtrace.hlsl's ptScatterDielectric. The resolver hands over the material's own IOR
+//     (ResolvedMaterial::ior; kDefaultGlassIor when it gives none) and its volume: sigmaT from the
+//     attenuation pair, plus the scattering albedo and anisotropy. A path refracting into such a
+//     surface travels through that homogeneous medium (Beer-Lambert, and sun in-scatter plus a random
+//     walk when it scatters) until it refracts out, so one open plane is enough for a pool or a sea.
+//     The sun's shadow ray walks through dielectric interfaces instead of treating them as opaque.
 //   - PERFORMANCE. No denoiser, no importance sampling of lights, no spectral anything, not
 //     real-time. It is a progressive, still-camera-only reference; see kAccumWidth/kAccumHeight/
 //     kMaxBounces/kSamplesPerStep/kMaxSamples below for the bounded numbers it stays inside.
@@ -119,6 +120,16 @@ public:
         // NO EMISSIVE TEXTURE, unlike the three above: a fourth bindless fetch per hit for a term
         // almost no surface carries. Add one here, as baseColorTex was, if a textured emitter needs it.
         f32 emissive[3] = {0, 0, 0};
+        // The material's index of refraction, used when the draw is blended; < 1 = not supplied, which
+        // falls back to kDefaultGlassIor.
+        f32 ior = 0.0f;
+        // The homogeneous medium behind a blended surface, as plain numbers (this module has no pbr::
+        // dependency): sigmaT = -ln(attenuationColor) / attenuationDistance in cm^-1 (all zero = clear),
+        // scatterAlbedo = sigma_s / sigma_t per channel in [0,1] (all zero = pure absorber), scatterG the
+        // Henyey-Greenstein anisotropy. Ignored on an opaque draw.
+        f32 sigmaT[3] = {0, 0, 0};
+        f32 scatterAlbedo[3] = {0, 0, 0};
+        f32 scatterG = 0.0f;
     };
     using AlbedoResolver = std::function<bool(rhi::BindingSetHandle set, const void* constants,
                                               u32 bytes, ResolvedMaterial& out)>;
@@ -130,6 +141,17 @@ public:
     u32  lightTexture(u64 id, u32 width, u32 height, bool ies, const void* pixels) {
         return pt_.lightTexture(id, width, height, ies, pixels);
     }
+
+    // OPT-IN: also trace meshes whose vertices are written by compute (IDevice::meshVertexBuffer != 0),
+    // which are otherwise skipped. THE HOST PROMISES that geometry is FROZEN at `revision`: it will not
+    // change until the host calls this again with a different revision, and it is final (compute pass
+    // done) by the time the frame after the call runs prePass(). A changed `revision`, or toggling
+    // `include`, re-arms the scene and re-reads every cached BLAS and the flat geometry table; the
+    // revision is hashed into the scene key, so equal values cost nothing. A dynamic mesh the backend
+    // cannot expose as buffers (IDevice::meshGeometry) is skipped. Call from the same thread as the
+    // frame (onUpdate), any frequency; `revision` is ignored while `include` is false.
+    void setIncludeDynamicMeshes(bool include, u64 revision);
+    bool includesDynamicMeshes() const { return includeDynamic_; }
 
     const char* name() const override { return "Aver.PathTracer.SceneView"; }
 
@@ -186,10 +208,14 @@ private:
         rhi::TextureHandle baseColorTex = 0;
         rhi::TextureHandle metalRoughTex = 0;
         rhi::TextureHandle normalTex = 0;
-        // 0.0 = opaque Lambertian (every draw the backend never marked `blended`); kDefaultGlassIor
-        // for a blended one. See PtSurface::ior for why one field carries both the kind and the
-        // value, and this class's own MATERIALS comment for why the value is a fixed constant.
+        // 0.0 = opaque Lambertian (every draw the backend never marked `blended`); the material's own
+        // IOR (kDefaultGlassIor when it supplies none) for a blended one. See PtSurface::ior for why
+        // one field carries both the kind and the value.
         f32 ior = 0.0f;
+        // ResolvedMaterial's medium, kept for blended draws only (zero otherwise).
+        f32 sigmaT[3] = {0, 0, 0};
+        f32 scatterAlbedo[3] = {0, 0, 0};
+        f32 scatterG = 0.0f;
         // ResolvedMaterial::emissive when a resolver answered; {0,0,0} on the legacy baseColor path.
         f32 emissive[3] = {0, 0, 0};
     };
@@ -238,6 +264,13 @@ private:
 
     // Empty unless the host installed one; see setAlbedoResolver.
     AlbedoResolver resolveAlbedo_;
+
+    // setIncludeDynamicMeshes state. builtDynamic* is what the scene on screen was last built with;
+    // a difference makes rebuildScene() drop the PathTracer's geometry caches first.
+    bool includeDynamic_ = false;
+    u64  dynamicRevision_ = 0;
+    bool builtIncludeDynamic_ = false;
+    u64  builtDynamicRevision_ = 0;
 
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
@@ -409,10 +442,8 @@ private:
     // instance with no limit.
     static constexpr u32 kMaxInstances = 4096;
 
-    // THE FIXED IOR EVERY BLENDED DRAW GETS, ordinary soda-lime glass -- see the class comment's
-    // MATERIALS point for why this is one constant rather than the real material's own value: this
-    // module has no path to pbr::MaterialConstants::ior without linking render.pbr, the same reason
-    // AlbedoResolver exists as a callback instead of this module reading baseColorFactor itself.
+    // THE IOR A BLENDED DRAW GETS WHEN ITS RESOLVER SUPPLIES NONE (no resolver, or an un-authored
+    // draw): ordinary soda-lime glass. An authored material carries its own through ResolvedMaterial.
     static constexpr f32 kDefaultGlassIor = 1.5f;
 
     // THE LADDER the Path Tracing quality combo drives. Four rungs, 16:9, each roughly double the

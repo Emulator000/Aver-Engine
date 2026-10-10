@@ -9,14 +9,16 @@ RaytracingAccelerationStructure gPtScene : register(t0);
 
 // MIRRORS rhi::MeshVertex byte for byte; the stride is handed to setSrvBuffer and nothing checks it.
 struct PtVertex   { float3 pos; float3 nrm; float2 uv; };
-// MIRRORS pt::PtInstance: 64+4+4+12+4+4+4+4+4+4+4+12 = 124 bytes, naturally aligned -- every field
-// lands on a 4-byte boundary, so there is no padding to disagree about.
+// MIRRORS pt::PtInstance: 64+4+4+12+4+4+4+4+4+4+4+12+12+12+4 = 152 bytes, naturally aligned -- every
+// field lands on a 4-byte boundary, so there is no padding to disagree about.
 // `ior` is 0.0 for Lambertian, >0 (a real IOR) for a smooth dielectric -- see PtSurface::ior
 // (PathTracer.hpp) for why one float carries both the kind and the value. `baseColorTex` is declared
 // in BOTH shader variants (only the textured one samples it) so the instance BUFFER layout matches
 // either way -- omitting it in the untextured build would read every later instance at the wrong
 // offset; `emissive` is a flat emissiveFactor read in both variants like `albedo` (no emissive texture).
-struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; uint baseColorTex; float roughness; float metallic; uint metalRoughTex; uint normalTex; float normalScale; float3 emissive; };
+// `sigmaT` (cm^-1), `scatterAlbedo` and `scatterG` describe the homogeneous medium BEHIND a dielectric
+// surface; sigmaT == 0 = clear.
+struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; uint baseColorTex; float roughness; float metallic; uint metalRoughTex; uint normalTex; float normalScale; float3 emissive; float3 sigmaT; float3 scatterAlbedo; float scatterG; };
 
 StructuredBuffer<PtVertex>   gPtVerts     : register(t1);
 StructuredBuffer<uint>       gPtIndices   : register(t2);
@@ -70,6 +72,8 @@ cbuffer PtFrame : register(b4) {
                          // w first bounce eligible for Russian roulette (0 = never)
     float4 gPtTrace;     // x ray bias in cm, y tMax in cm, z legacy-environment bit (R5, see
                          // ptEnvironment below; >= 0.5 = old unmatched, < 0.5 = default), w spare
+    uint4  gPtMedia;     // x the scene holds a dielectric (sun shadow rays walk through interfaces),
+                         // y it holds a medium (sigmaT > 0 somewhere); 0 = the old code path exactly
 };
 
 // THE DELIBERATE DEFECTS, shipped rather than commented out: a check that has never been shown
@@ -270,6 +274,109 @@ float3 ptDirectBrdfCos(float3 nWS, float3 albedo, float3 V, float3 L, float ndl,
     return brdf * ndl;
 }
 
+// ---- dielectric interfaces and homogeneous media -------------------------------------------------
+
+// Normal-incidence Fresnel reflectance of an air|ior interface.
+float ptSchlickR0(float ior) {
+    const float r = (1.0 - ior) / (1.0 + ior);
+    return r * r;
+}
+
+// Henyey-Greenstein phase function, normalised over the sphere (1/sr). cosTheta is the angle between
+// the propagation directions of the incident and the scattered light; g > 0 favours forward scatter.
+float ptHenyeyGreenstein(float g, float cosTheta) {
+    const float g2 = g * g;
+    const float d  = 1.0 + g2 - 2.0 * g * cosTheta;
+    return (1.0 - g2) / (4.0 * PI * max(d * sqrt(d), 1e-9));
+}
+
+// Draws a direction whose cosine against `axis` follows ptHenyeyGreenstein (inverted CDF), so the
+// phase/pdf ratio is exactly 1. `axis` is the direction the camera path was travelling: the new
+// direction points back toward where the light came from, and cos = dot(new, axis) is the HG angle.
+float3 ptSampleHenyeyGreenstein(float3 axis, float g, float u1, float u2) {
+    float cosT;
+    if (abs(g) < 1e-3) {
+        cosT = 1.0 - 2.0 * u1;
+    } else {
+        const float sq = (1.0 - g * g) / (1.0 + g - 2.0 * g * u1);
+        cosT = (1.0 + g * g - sq * sq) / (2.0 * g);
+    }
+    cosT = clamp(cosT, -1.0, 1.0);
+    const float sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
+    const float phi  = 6.28318530718 * u2;
+    float3 t, b;
+    ptBasis(axis, t, b);
+    return t * (sinT * cos(phi)) + b * (sinT * sin(phi)) + axis * cosT;
+}
+
+// The sun's transmittance along a straight shadow ray that may cross dielectric interfaces: an opaque
+// hit blocks (0); a dielectric one costs (1 - F) and toggles the medium; a span inside a medium costs
+// Beer-Lambert. CONSUMES NO RANDOM NUMBERS. `sigmaStart` is the medium `org` sits in (0 = air).
+//
+// The sun's bend at the interface is ignored (the ray stays straight, as rtShadowEx's does), so F is
+// the AIR-side Fresnel at the sun's own angle: the transmission air->water at theta_i equals
+// water->air at theta_t, and a straight ray inside water would otherwise hit false total internal
+// reflection for any sun lower than ~41 degrees. At most 8 crossings; a stack deeper than that reads
+// as blocked.
+float3 ptSunTransmittance(float3 org, float3 L, float bias, float tMax, float3 sigmaStart) {
+    float3 T   = float3(1, 1, 1);
+    float3 sig = sigmaStart;
+    float3 p   = org;
+    float  remaining = tMax;
+    [loop] for (uint k = 0u; k < 8u; ++k) {
+        RayDesc r;
+        r.Origin    = p;
+        r.Direction = L;
+        r.TMin      = bias;
+        r.TMax      = remaining;
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+        q.TraceRayInline(gPtScene, RAY_FLAG_NONE, 0xFF, r);
+        q.Proceed();
+        if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+            if (any(sig > 0.0)) T *= exp(-sig * remaining);
+            return T;
+        }
+        const float t = q.CommittedRayT();
+        const PtInstance inst = gPtInstances[q.CommittedInstanceID()];
+        if (!(inst.ior > 0.0)) return float3(0, 0, 0);   // an opaque occluder
+        if (any(sig > 0.0)) T *= exp(-sig * t);
+
+        const uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
+        const uint i0 = inst.firstVertex + gPtIndices[tri + 0];
+        const uint i1 = inst.firstVertex + gPtIndices[tri + 1];
+        const uint i2 = inst.firstVertex + gPtIndices[tri + 2];
+        const float2 bary = q.CommittedTriangleBarycentrics();
+        const float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+        const float3 nObj = normalize(gPtVerts[i0].nrm * w.x + gPtVerts[i1].nrm * w.y + gPtVerts[i2].nrm * w.z);
+        const float3 nGeom = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
+        const float  nl = dot(nGeom, L);
+        const float  x  = 1.0 - saturate(abs(nl));
+        const float  r0 = ptSchlickR0(inst.ior);
+        T *= 1.0 - (r0 + (1.0 - r0) * x * x * x * x * x);
+        // Front face (nl < 0) = the ray goes INTO the dielectric; a surface with no medium leaves
+        // whatever medium the ray is in alone (a clear pane inside water).
+        if (any(inst.sigmaT > 0.0)) sig = (nl < 0.0) ? inst.sigmaT : float3(0, 0, 0);
+
+        p += L * t;
+        remaining -= t;
+        if (!(remaining > bias)) return T;
+    }
+    return float3(0, 0, 0);
+}
+
+// The sun's single-scatter contribution at a point inside a medium: phase * sun irradiance * the
+// transmittance up to the light. `dirIn` is the direction the camera path was travelling; the HG
+// angle is between the sun's travel direction (-L) and the scattered one toward the eye (-dirIn),
+// so cos = dot(L, dirIn). Zero when the sun is off (the furnace), skipping the shadow walk.
+float3 ptMediumSunNEE(float3 p, float3 dirIn, float g, float bias, float tMax, float3 sigma) {
+    const float3 sunRad = averSunRadiance();
+    if (!any(sunRad > 0.0)) return float3(0, 0, 0);
+    const float3 L = normalize(gLightDir.xyz);
+    const float3 vis = ptSunTransmittance(p, L, bias, tMax, sigma);
+    if (!any(vis > 0.0)) return float3(0, 0, 0);
+    return sunRad * vis * ptHenyeyGreenstein(g, dot(L, dirIn));
+}
+
 // Direct light from the sun, by NEXT-EVENT ESTIMATION rather than hoping a bounce finds it.
 //
 // THE PROBLEM: averSunRadiance() (RHIShaders.cpp) has zero angular size, so no BRDF-sampled ray
@@ -289,8 +396,14 @@ float3 ptDirectBrdfCos(float3 nWS, float3 albedo, float3 V, float3 L, float ndl,
 // LAMBERTIAN surface reflects; a dielectric has no diffuse lobe for it. `V`/`rough`/`metal` are read
 // only when rough >= 0 -- without one, this is the identical Lambertian line the function always
 // ended with, so PtFurnaceTest still measures exactly what it measured before.
+//
+// DIELECTRICS (blended draws) ARE NOT OCCLUDERS: when the scene holds any (gPtMedia.x), the shadow ray
+// is a walk (ptSunTransmittance) that crosses each dielectric interface for (1 - F) and attenuates
+// by Beer-Lambert over spans inside a medium. `mediumSigma` is the medium the shaded point sits in
+// (zero = open air). With no dielectric in the scene the original any-hit occlusion test runs
+// untouched, so such scenes replay bit-for-bit.
 float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float tMax,
-                   float3 V, float rough, float metal) {
+                   float3 V, float rough, float metal, float3 mediumSigma) {
     float3 L = normalize(gLightDir.xyz);   // "direction TO light" -- see PerFrame in the prelude
     float ndl = dot(nWS, L);
     if (!(ndl > 0.0)) return float3(0, 0, 0);   // the light is behind this surface; no ray to fire
@@ -301,16 +414,23 @@ float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float t
     r.TMin      = bias;
     r.TMax      = tMax;
 
-    // ACCEPT_FIRST_HIT_AND_END_SEARCH: an OCCLUSION test, not closest-hit -- the first committed
-    // candidate already means the sun is blocked, so there is nothing to gain by looking further.
-    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
-    q.TraceRayInline(gPtScene, RAY_FLAG_NONE, 0xFF, r);
-    q.Proceed();
-    if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) return float3(0, 0, 0);   // occluded
+    float3 vis = float3(1, 1, 1);
+    if (gPtMedia.x != 0u) {
+        vis = ptSunTransmittance(r.Origin, L, bias, tMax, mediumSigma);
+        if (!any(vis > 0.0)) return float3(0, 0, 0);
+    } else {
+        // ACCEPT_FIRST_HIT_AND_END_SEARCH: an OCCLUSION test, not closest-hit -- the first committed
+        // candidate already means the sun is blocked, so there is nothing to gain by looking further.
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
+        q.TraceRayInline(gPtScene, RAY_FLAG_NONE, 0xFF, r);
+        q.Proceed();
+        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) return float3(0, 0, 0);   // occluded
+    }
 
     // BRDF times cosine times light radiance. NO PDF DIVISION: this direction was CHOSEN (the sun's),
     // not drawn, so there's no density here to divide out.
-    return ptDirectBrdfCos(nWS, albedo, V, L, ndl, rough, metal) * averSunRadiance();
+    const float3 sun = ptDirectBrdfCos(nWS, albedo, V, L, ndl, rough, metal) * averSunRadiance();
+    return gPtMedia.x != 0u ? sun * vis : sun;
 }
 
 // Direct light from the scene lights, by next-event estimation: one light picked in proportion to its
@@ -377,9 +497,11 @@ float3 ptDirectLights(float3 hitPos, float3 nWS, float3 albedo, float bias, floa
 // nWS to face against the incoming ray (fine for Lambertian), collapsing front/back into one output --
 // but refraction needs that distinction to pick n1/n2 vs n2/n1. Read from the SAME comparison, so a
 // diffuse caller that ignores it still gets the identical nWS.
+//
+// `sigT`/`scAlb`/`scG` are the hit surface's medium (see PtInstance); zero on a miss.
 bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out float3 albedo,
             out float ior, out bool entering, out float rough, out float metal,
-            out float3 emissive) {
+            out float3 emissive, out float3 sigT, out float3 scAlb, out float scG) {
     hitPos   = org;
     nWS      = float3(0, 0, 1);
     albedo   = float3(0, 0, 0);
@@ -390,6 +512,9 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
     rough    = -1.0;
     metal    = 0.0;
     emissive = float3(0, 0, 0);
+    sigT     = float3(0, 0, 0);
+    scAlb    = float3(0, 0, 0);
+    scG      = 0.0;
 
     RayDesc r;
     r.Origin    = org;
@@ -431,6 +556,9 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
     rough  = inst.roughness;
     metal  = inst.metallic;
     emissive = inst.emissive;   // a factor, not a texture -- read the same way in both shader variants
+    sigT   = inst.sigmaT;
+    scAlb  = inst.scatterAlbedo;
+    scG    = inst.scatterG;
 #ifdef AVER_PT_BINDLESS
     // ONE UV FOR THE WHOLE MATERIAL, computed once whether one map is bound or three.
     const float2 uv = gPtVerts[i0].uv * w.x + gPtVerts[i1].uv * w.y + gPtVerts[i2].uv * w.z;
@@ -524,8 +652,11 @@ float3 ptScatter(float3 albedo, float cosTheta, uint defect) {
 // dielectric (window glass, not tinted); a tinted-glass material would need an absorption term folded
 // into the transmitted branch's weight -- not modelled today, and pretending otherwise is the kind of
 // undocumented approximation this codebase has been burned by before.
+//
+// `refracted` says which branch was taken: the caller moves the path into or out of a medium only on
+// a transmission, never on a reflection.
 void ptScatterDielectric(float3 dir, float3 nWS, bool entering, float ior, uint defect,
-                         inout uint rng, out float3 outDir, out float3 weight) {
+                         inout uint rng, out float3 outDir, out float3 weight, out bool refracted) {
     const float n1 = entering ? 1.0 : ior;
     const float n2 = entering ? ior : 1.0;
     const float eta = n1 / n2;
@@ -561,6 +692,7 @@ void ptScatterDielectric(float3 dir, float3 nWS, bool entering, float ior, uint 
     // ONE RAY PER HIT, chosen with probability `reflectance`, not both terms summed: summing needs
     // two rays to stay unbiased; the stochastic choice gets the same expected value from one.
     const float xi = ptRand(rng);
+    refracted = !(xi < reflectance);
     if (xi < reflectance) {
         outDir = reflect(dir, nWS);
         weight = (defect == PT_DEFECT_DIELECTRIC_NO_PDF_CANCEL)
@@ -572,6 +704,36 @@ void ptScatterDielectric(float3 dir, float3 nWS, bool entering, float ior, uint 
                      ? float3(1.0 - reflectance, 1.0 - reflectance, 1.0 - reflectance)
                      : float3(1, 1, 1);
     }
+}
+
+// ---- RUSSIAN ROULETTE ---------------------------------------------------------------------------
+//
+// Kills a path with probability (1-p), dividing survivors by p. UNBIASED for any p in (0,1]: a
+// survivor carries exactly the expected contribution of the ones that didn't, so only variance
+// moves -- a legitimate optimisation, not an approximation with an error budget. p IS THE
+// THROUGHPUT'S largest channel: a near-full-energy path almost certainly survives, a few-percent one
+// almost certainly stops (it would otherwise pay a closest-hit traversal AND a shadow ray per bounce
+// for little contribution).
+//
+// NOT BEFORE `rrFrom`: rouletting early bounces would kill primary paths (nearly all the image's
+// energy) for little saved traversal -- a path killed at b=0 saves at most `bounce` iterations the
+// early exits often skip anyway. DRAWN FROM THE SAME `rng` STREAM as every other decision -- a hard
+// requirement for PtFurnaceTest's bit-identical replay; a separate stream, or anything keyed on a
+// frame counter, would break that quietly.
+//
+// CLAMPED AT 1: a specular weight can exceed one channel-wise; p above 1 would DIVIDE survivors'
+// throughput down, silently darkening the bright paths this must not touch.
+// Returns false when the path ends here.
+bool ptRoulette(inout float3 throughput, inout uint rng, uint b, uint rrFrom) {
+    if (rrFrom != 0u && b >= rrFrom) {
+        const float p = saturate(max(throughput.x, max(throughput.y, throughput.z)));
+        // A path with no energy left contributes nothing either way, so it stops unconditionally
+        // (and keeps the division below off zero).
+        if (!(p > 0.0)) return false;
+        if (ptRand(rng) >= p) return false;
+        throughput /= p;
+    }
+    return true;
 }
 
 // ---- the integrator ----------------------------------------------------------------------------
@@ -606,12 +768,65 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
         float3 radiance   = float3(0, 0, 0);
         uint   depth = 0;
 
+        // THE ONE MEDIUM THE PATH IS INSIDE: set when it refracts INTO a dielectric whose material has
+        // sigmaT > 0, cleared when it refracts out. Single-plane pools work too (the "inside" is just
+        // whatever lies behind the surface). All zero = open air, and then nothing below runs.
+        float3 medSigma  = float3(0, 0, 0);   // extinction, cm^-1
+        float3 medAlbedo = float3(0, 0, 0);   // sigma_s / sigma_t
+        float  medG      = 0.0;               // Henyey-Greenstein anisotropy
+
         // <= bounce, not <: the last iteration may still MISS and collect the environment, just not
         // scatter again -- off by one here would make a "1 bounce" tracer read 0 instead of L.
         [loop] for (uint b = 0; b <= bounce; ++b) {
-            float3 hitPos, nWS, albedo, emissive;
-            float ior; bool entering; float rough, metal;
-            if (!ptTrace(org, dir, hitPos, nWS, albedo, ior, entering, rough, metal, emissive)) {
+            float3 hitPos, nWS, albedo, emissive, sigT, scAlb;
+            float ior, scG; bool entering; float rough, metal;
+            const bool hit = ptTrace(org, dir, hitPos, nWS, albedo, ior, entering, rough, metal,
+                                     emissive, sigT, scAlb, scG);
+
+            // ---- THE SEGMENT INSIDE A MEDIUM, before whatever it ends at ----
+            //
+            // Absorbing only: deterministic Beer-Lambert, no random numbers. Scattering: ONE distance
+            // is sampled per segment, from a channel picked uniformly (the "hero"), and every channel
+            // is weighted by f_c / pdf_avg with pdf_avg the MEAN of the three channels' densities --
+            // single-sample MIS with the balance heuristic, which is unbiased for any chromatic
+            // sigmaT and keeps every weight <= 3 * albedo (a plain max-channel majorant has
+            // unbounded variance when one channel is several times thinner than another).
+            //   scatter at s < t:  f_c = albedo_c sigma_c exp(-sigma_c s)    pdf_avg = mean_c sigma_c exp(-sigma_c s)
+            //   reach the surface: f_c = exp(-sigma_c t)                     pdf_avg = mean_c exp(-sigma_c t)
+            // Escaping to the sky while inside a medium contributes nothing.
+            if (any(medSigma > 0.0)) {
+                const float tSeg = hit ? length(hitPos - org) : gPtTrace.y;
+                if (!any(medAlbedo > 0.0)) {
+                    if (!hit) break;
+                    throughput *= exp(-medSigma * tSeg);
+                } else {
+                    const float uHero = ptRand(rng);
+                    const float uDist = ptRand(rng);
+                    const uint  ch = min((uint)(uHero * 3.0), 2u);
+                    const float sH = ch == 0u ? medSigma.x : (ch == 1u ? medSigma.y : medSigma.z);
+                    const float sFree = sH > 0.0 ? -log(max(1.0 - uDist, 1e-30)) / sH : 3.0e38;
+                    if (sFree < tSeg) {
+                        const float3 e = exp(-medSigma * sFree);
+                        const float pdf = max(dot(medSigma * e, float3(1, 1, 1)) * (1.0 / 3.0), 1e-30);
+                        throughput *= medAlbedo * medSigma * e / pdf;
+                        const float3 pS = org + dir * sFree;
+                        radiance += throughput * ptMediumSunNEE(pS, dir, medG, bias, gPtTrace.y, medSigma);
+                        if (b == bounce) break;
+                        const float uA = ptRand(rng);
+                        const float uB = ptRand(rng);
+                        if (!ptRoulette(throughput, rng, b, rrFrom)) break;
+                        dir   = ptSampleHenyeyGreenstein(dir, medG, uA, uB);
+                        org   = pS;
+                        depth = b + 1;
+                        continue;
+                    }
+                    if (!hit) break;
+                    const float3 e = exp(-medSigma * tSeg);
+                    throughput *= e / max(dot(e, float3(1, 1, 1)) * (1.0 / 3.0), 1e-30);
+                }
+            }
+
+            if (!hit) {
                 // gPtTrace.z (R5/F6): >= 0.5 = legacy bit, restoring skyColor() on every miss
                 // unconditionally (byte-identical to the pre-fix line); < 0.5 (default) matches the
                 // raster: b==0 keeps skyColor()'s uncalibrated dome; b>0 is an INDIRECT miss, off ANY
@@ -652,14 +867,12 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
             // empirically) nothing: averSunRadiance() (RHIShaders.cpp) is exactly 0 whenever the
             // furnace is on and the sun is off.
             //
-            // KNOWN, UNFIXED (OPEN): ptDirectSun's shadow ray treats glass as fully opaque --
-            // RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH stops at the first triangle hit, dielectric or
-            // not -- so a surface seen only through glass renders fully sun-shadowed instead of
-            // dimmed by however much the pane transmits -- separable follow-up work.
+            // The sun's shadow ray walks THROUGH dielectric interfaces (ptSunTransmittance), so a surface
+            // seen through glass or water is dimmed by what the pane transmits instead of reading shadowed.
             if (!dielectric) {
                 // -dir is the view vector this hit's BRDF is evaluated against.
                 radiance += throughput * ptDirectSun(hitPos, nWS, albedo, bias, gPtTrace.y,
-                                                     -dir, rough, metal);
+                                                     -dir, rough, metal, medSigma);
                 radiance += throughput * ptDirectLights(hitPos, nWS, albedo, bias, gPtTrace.y,
                                                         -dir, rough, metal, rng);
             }
@@ -675,7 +888,15 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
             if (dielectric) {
                 // Always produces a valid direction (reflection or refraction, TIR folded in), so
                 // there's no failure case here to break for, unlike the Lambertian cosTheta guard below.
-                ptScatterDielectric(dir, nWS, entering, ior, defect, rng, d, weight);
+                bool refracted;
+                ptScatterDielectric(dir, nWS, entering, ior, defect, rng, d, weight, refracted);
+                // Only a TRANSMISSION through a surface that carries a medium changes which one the
+                // path is in; a reflection, or a clear pane, leaves it alone.
+                if (refracted && any(sigT > 0.0)) {
+                    medSigma  = entering ? sigT  : float3(0, 0, 0);
+                    medAlbedo = entering ? scAlb : float3(0, 0, 0);
+                    medG      = entering ? scG   : 0.0;
+                }
             } else if (ptHasSpecular(rough)) {
                 // TWO LOBES, ONE SAMPLE: drawing both would double the ray count for an estimator
                 // already unbiased with one, so a single uniform picks the lobe and the weight
@@ -712,32 +933,8 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
 
             throughput *= weight;
 
-            // ---- RUSSIAN ROULETTE ---------------------------------------------------------------
-            //
-            // Kills a path with probability (1-p), dividing survivors by p. UNBIASED for any p in
-            // (0,1]: a survivor carries exactly the expected contribution of the ones that didn't, so
-            // only variance moves -- a legitimate optimisation, not an approximation with an error
-            // budget. p IS THE THROUGHPUT'S largest channel: a near-full-energy path almost certainly
-            // survives, a few-percent one almost certainly stops (it would otherwise pay a
-            // closest-hit traversal AND a shadow ray per bounce for little contribution).
-            //
-            // NOT BEFORE `rrFrom`: rouletting early bounces would kill primary paths (nearly all the
-            // image's energy) for little saved traversal -- a path killed at b=0 saves at most
-            // `bounce` iterations the early exits above often skip anyway. DRAWN FROM THE SAME `rng`
-            // STREAM as every other decision -- a hard requirement for PtFurnaceTest's bit-identical
-            // replay; a separate stream, or anything keyed on a frame counter, would break that
-            // quietly.
-            //
-            // CLAMPED AT 1: a specular weight can exceed one channel-wise; p above 1 would DIVIDE
-            // survivors' throughput down, silently darkening the bright paths this must not touch.
-            if (rrFrom != 0u && b >= rrFrom) {
-                const float p = saturate(max(throughput.x, max(throughput.y, throughput.z)));
-                // A path with no energy left contributes nothing either way, so it stops
-                // unconditionally (and keeps the division below off zero).
-                if (!(p > 0.0)) break;
-                if (ptRand(rng) >= p) break;
-                throughput /= p;
-            }
+            // Russian roulette: see ptRoulette.
+            if (!ptRoulette(throughput, rng, b, rrFrom)) break;
 
             // THE BIAS OFFSET FOLLOWS THE NEW RAY, not unconditionally the facing normal. Diffuse and
             // specular-REFLECTION bounces both continue on the nWS side (dot(d,nWS)>0), bit-identical
