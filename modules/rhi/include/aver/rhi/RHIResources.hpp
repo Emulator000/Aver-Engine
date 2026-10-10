@@ -473,6 +473,14 @@ public:
         (void)geometries; (void)count;
         return 0;
     }
+    // Compactable twins: once built, IRenderContext::compactBlases moves them into the smaller copy the
+    // driver reports. Only for structures no one names by address past their next TLAS build.
+    virtual BlasHandle createBlasCompactable(MeshHandle mesh) { return createBlas(mesh); }
+    virtual BlasHandle createBlasMultiCompactable(const BlasGeometry* geometries, u32 count) {
+        return createBlasMulti(geometries, count);
+    }
+    // Bumped whenever a BLAS moves to new memory: a TLAS built before then must be rebuilt before its next trace.
+    virtual u64 blasMoves() const { return 0; }
 
     // Static instance prefix: instances packed once, occupying TLAS slots [0, count).
     virtual bool setTlasStaticInstances(TlasHandle tlas, const TlasInstance* instances, u32 count) {
@@ -629,6 +637,9 @@ public:
         buildTlas(tlas, instances, count);
         return false;
     }
+    // Moves up to maxCount compactable BLASes whose builds have finished into their compacted copies and
+    // returns how many moved. Every TLAS naming one must be rebuilt before it is traced again.
+    virtual u32 compactBlases(u32 maxCount) { (void)maxCount; return 0; }
 
     // Transitions a texture between states.
     virtual void textureBarrier(TextureHandle t, ResourceState from, ResourceState to,

@@ -726,6 +726,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "The sun's lighting skips NRD2 and is added clean, its shadow penumbra averaged over a depth-weighted 5x5 (crisper sunlit normal maps and contact detail); 0 = the sun is denoised with the rest (A/B)",
         []{ return vBool(Renderer::get().settings().nrd2SunClean); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2SunClean = on; }); }});
+    t.push_back({"voxi.rtCompactBlas", VarType::Bool, false,
+        "Static ray-tracing BLASes move into their compacted copies once built (less VRAM, D3D12); 0 = new ones stay full size",
+        []{ return vBool(Renderer::get().settings().rtCompactBlas); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->rtCompactBlas = on; }); }});
     t.push_back({"voxi.nrd2ObjectStop", VarType::Bool, false,
         "NRD2 mixes no lighting across objects (the primary visibility's, shared with NeuRAA): crisper silhouettes and contact edges; 0 = depth and normal stops only (A/B)",
         []{ return vBool(Renderer::get().settings().nrd2ObjectStop); },

@@ -278,6 +278,9 @@ struct Settings {
     // ON: tlas_ and compute-skinned mesh BLAS are created updatable and refit in place instead of fully rebuilt.
     // Periodic full rebuilds every kDynamicBlasRefitsPerRebuild / kTlasRefitsPerRebuild refits.
     bool rtRefitAccel = true;
+    // Static draw and chunk BLASes move into their compacted copies a frame or two after their build
+    // (docs/rendering/VRAM.md "BLAS compaction"). D3D12 only; off = new ones stay full size.
+    bool rtCompactBlas = true;
 
     // ---- path tracing -----------------------------------------------------------------------
     // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS: ray tracing = discrete rays, one hit, direct lighting.

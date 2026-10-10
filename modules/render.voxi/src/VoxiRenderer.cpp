@@ -1593,6 +1593,8 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             } else {
                 ++rtAccelSkipped_;
             }
+            // A still scene compacts too; not while the late scene pass owes the TLAS its refit.
+            if (!rtRefitDeferred_ && compactBuiltBlases(ctx)) refitOrRebuildTlas(ctx);
             rtActive_ = true;
             cb_.shadowParams[2] = 1.0f;
             updateRtParamsPerFrame();
@@ -1722,7 +1724,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                         g.mesh = d.mesh;
                         g.firstIndex = ch->firstIndex[c];
                         g.indexCount = ch->indexCount[c];
-                        ch->blas[c] = timedCreate([&] { return res_->createBlasMulti(&g, 1); });
+                        ch->blas[c] = timedCreate([&] { return res_->createBlasMultiCompactable(&g, 1); });
                         if (!ch->blas[c]) continue;
                         ++firstBuilds;
                         blasBytesThisFrame += res_->blasMemoryBytes(ch->blas[c]);
@@ -1747,7 +1749,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
             // createBlas returns 0 for destroyed mesh. Updatable only for compute-written mesh with rtRefitAccel on.
             const bool dynamic = settings_.rtRefitAccel && dev_->meshVertexBuffer(d.mesh) != 0;
             const rhi::BlasHandle nb = timedCreate([&] {
-                return dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlas(d.mesh);
+                return dynamic ? res_->createBlasUpdatable(d.mesh) : res_->createBlasCompactable(d.mesh);
             });
             if (nb) {
                 ++firstBuilds;
@@ -1857,6 +1859,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // Refits TLAS in place if rtRefitAccel allows, else full build.
     {
         rhi::ScopedGpuStat tlasStat(ctx, "Voxi TLAS");
+        compactBuiltBlases(ctx);
         refitOrRebuildTlas(ctx);
     }
     hm.mark("tlas");
@@ -2293,6 +2296,15 @@ void VoxiRenderer::refitOrRebuildDynamicBlas(rhi::IRenderContext& ctx, rhi::Blas
         refits = 0;
         ++rtDynamicBlasRebuilds_;
     }
+}
+
+// Moves finished static BLASes into their compacted copies. Callers rebuild tlas_ straight after: it names
+// them by address (refitTlas sees the new addresses and does a full build).
+u32 VoxiRenderer::compactBuiltBlases(rhi::IRenderContext& ctx) {
+    if (!settings_.rtCompactBlas) return 0;
+    const u32 moved = ctx.compactBlases(kBlasCompactsPerFrame);
+    if (moved) ++blasRevision_;   // VRAM report resamples
+    return moved;
 }
 
 // Same shape for tlas_: see RHIResources.hpp's refitTlas contract.

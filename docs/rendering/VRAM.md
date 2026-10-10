@@ -29,8 +29,28 @@ geometry table 1.5-2 GB, NRD2's stabiliser ~180 MiB; about 10-12 GB local of 15.
 - **The geometry table's next size** is allocated on a worker once the table is 90% full (was 75%) and released
   when unused for ~30 s (it is up to 1.5x the table; at 75% on a level that stopped growing it was held for good).
 - The log now has `[Voxi] VRAM, ray-traced geometry table (MiB): N (P% used)[, next size held M]`.
-- **Not done:** BLAS compaction (`ALLOW_COMPACTION` + postbuild size + compacting copy; typically 40-60% of BLAS
-  memory), and packing the geometry table's vertices (32 to 16-20 bytes).
+- **Not done:** packing the geometry table's vertices (32 to 16-20 bytes). BLAS compaction: next section.
+
+## BLAS compaction (D3D12, 2026-10-11)
+
+Voxi's static draw BLASes and terrain/large-mesh chunks are made with `createBlasCompactable` /
+`createBlasMultiCompactable` (`ALLOW_COMPACTION`). Each build writes its compacted size to a slot of a small UAV
+buffer (postbuild info); the next `compactBlases` copies the slots to a readback buffer, and the first one after
+that frame's fence copies each structure (`COPY_MODE_COMPACT`) into new memory of that size, retiring the old
+behind the fence. A structure moves only if it saves at least an eighth; at most 64 per frame, and at most one
+over 4 MiB (that one is a committed resource made on the main thread).
+
+A move changes the BLAS's address, so it only happens right before Voxi rebuilds `tlas_` in the same call: in
+the main accel build, and in the unchanged-gate branch (a still scene compacts too), never while the late scene
+pass owes the TLAS its refit. `refitTlas` sees the new addresses and does a full build. Not compacted: foliage
+prototypes (the TLAS static prefix bakes their addresses), updatable (skinned/compute) BLASes, and BLASes other
+features make. The path tracer shares Voxi's BLASes (`blasForMesh`), so `IResourceFactory::blasMoves()` counts
+moves and `PtSceneView` rebuilds its TLASes when it changes. A compacted BLAS that is rebuilt goes back to its
+full prebuild size first (also a move).
+
+Vulkan: not implemented (the defaults are full-size creates and a no-op). Console `voxi.rtCompactBlas 0` stops
+new compactions. Fixed on the way: a pooled BLAS range freed while a frame was recording waited on a fence that
+was never resolved, so the range never went back to the pool.
 
 ## BLAS build scratch freed after build (D3D12)
 
@@ -46,7 +66,7 @@ The GI accumulator is freed after 60 quiet GI ticks (was 240). NeonDistrict_Day 
 
 All three went in together and the build crashed the driver on startup, so none is known-bad individually. Re-introduce one at a time:
 
-- BLAS compaction into a shared arena (moves BLAS addresses; TLAS owners rebuild on a generation counter). Most complex and most likely crash source.
+- BLAS compaction into a shared arena (moves BLAS addresses; TLAS owners rebuild on a generation counter). Most complex and most likely crash source. Redone differently on 2026-10-11 (above): moves only right before the TLAS rebuild that uses them.
 - GI injection in two z slabs (accumulator half as deep). Touches `PSVoxel`/`CSClear`/`CSResolve`.
 - Mesh vertex sharing for LODs, depth proxies and split parts (Upload heap, not local VRAM).
 

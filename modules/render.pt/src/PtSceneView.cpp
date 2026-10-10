@@ -633,6 +633,7 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     // ---- 1. does the STATIC scene need a full re-arm? ----
     const u64 key = drawsKey();
     const bool needRearm = !sceneReady_ || key != sceneKey_;
+    if (!needRearm) pt_.refreshMovedBlases(ctx);   // same scene, BLASes compacted elsewhere
     if (needRearm) {
         sceneKey_ = key;
         if (!rebuildScene(ctx)) {

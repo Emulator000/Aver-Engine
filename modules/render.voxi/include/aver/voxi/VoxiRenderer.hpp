@@ -345,6 +345,8 @@ private:
     static constexpr u32 kDynamicBlasRefitsPerRebuild = 30;
     void refitOrRebuildDynamicBlas(rhi::IRenderContext& ctx, rhi::BlasHandle blas, rhi::MeshHandle mesh);
     bool refitOrRebuildTlas(rhi::IRenderContext& ctx);
+    u32 compactBuiltBlases(rhi::IRenderContext& ctx);
+    static constexpr u32 kBlasCompactsPerFrame = 64;
     u32 tlasRefitStreak_ = 0;
     static constexpr u32 kTlasRefitsPerRebuild = 30;
     u64 rtDynamicBlasRefits_ = 0, rtDynamicBlasRebuilds_ = 0;

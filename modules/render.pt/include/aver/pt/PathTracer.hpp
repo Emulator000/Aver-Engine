@@ -178,6 +178,8 @@ public:
     // an open command list, after prepare().
     bool buildScenes(rhi::IRenderContext& ctx);
     bool scenesBuilt() const { return built_; }
+    // Rebuilds the scenes' TLASes when a BLAS they share moved (IResourceFactory::blasMoves, compaction).
+    void refreshMovedBlases(rhi::IRenderContext& ctx);
 
     bool createTarget(u32 scene, u32 width, u32 height, PtTarget& out);
     void destroyTarget(PtTarget& t);
@@ -329,6 +331,8 @@ private:
     u32  totalVerts_ = 0, totalIndices_ = 0;
     bool prepared_ = false;
     bool built_ = false;
+    u64 blasMoves_ = 0;   // res_->blasMoves() when the TLASes were last built
+    bool buildTlases(rhi::IRenderContext& ctx);
 };
 
 } // namespace aver::pt

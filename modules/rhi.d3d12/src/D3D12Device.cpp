@@ -1815,6 +1815,10 @@ struct RhiBlas {
     u32 asPool = ~0u;
     u64 asOffset = 0, asBytes = 0;
     D3D12_GPU_VIRTUAL_ADDRESS asVa() const { return as->GetGPUVirtualAddress() + asOffset; }
+    bool compactable = false;   // built with ALLOW_COMPACTION (IRenderContext::compactBlases)
+    bool compacted = false;     // lives in its compacted copy: a rebuild needs buildBytes again
+    u64 buildBytes = 0;         // the prebuild query's size
+    u32 buildSerial = 0;        // per build; a compacted size from an older build is dropped
 };
 
 // One instance as it was packed into a TLAS's last build or refit.
@@ -1950,6 +1954,11 @@ public:
     BlasHandle       createBlasUpdatable(MeshHandle mesh) override;
     TlasHandle       createTlasUpdatable(u32 maxInstances) override;
     BlasHandle       createBlasMulti(const BlasGeometry* geometries, u32 count) override;
+    BlasHandle       createBlasCompactable(MeshHandle mesh) override { return createBlasImpl(mesh, false, true); }
+    BlasHandle       createBlasMultiCompactable(const BlasGeometry* geometries, u32 count) override {
+        return createBlasMultiImpl(geometries, count, true);
+    }
+    u64              blasMoves() const override { return blasMoves_; }
     bool             setTlasStaticInstances(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     BufferHandle     tlasStaticInstanceBuffer(TlasHandle tlas) const override;
     u64              blasMemoryBytes(BlasHandle h) const override;
@@ -1993,7 +2002,8 @@ public:
 private:
     bool asSlotLogged_ = false;
 
-    BlasHandle createBlasImpl(MeshHandle mesh, bool allowUpdate);
+    BlasHandle createBlasImpl(MeshHandle mesh, bool allowUpdate, bool compactable = false);
+    BlasHandle createBlasMultiImpl(const BlasGeometry* geometries, u32 count, bool compactable);
     TlasHandle createTlasImpl(u32 maxInstances, bool allowUpdate);
 
     // Fills a freshly created texture from TextureDesc::initialData.
@@ -2066,6 +2076,25 @@ private:
     std::vector<AsPoolFree> asPoolPending_;   // freed ranges, still behind the fence
     static constexpr u64 kAsPoolBytes = 64ull << 20, kAsPoolMaxBlas = 4ull << 20;
     bool allocBlasMemory(RhiBlas& b, u64 bytes);
+    void freeBlasMemory(RhiBlas& b);   // behind the fence
+    // ---- BLAS compaction (D3D12RenderContext::compactBlases) ----
+    // A compactable build writes its compacted size into a slot of compactSizes_; the next compactBlases copies
+    // the slots to compactReadback_, and the one after that fence moves the structure into a copy of that size.
+    static constexpr u32 kCompactSlots = 4096;
+    ComPtr<ID3D12Resource> compactSizes_, compactReadback_;   // UNORDERED_ACCESS; COPY_DEST, mapped
+    const u64* compactMapped_ = nullptr;
+    bool compactFailed_ = false;
+    std::vector<u32> compactFreeSlots_;
+    struct CompactPending { BlasHandle blas; u32 slot, serial; u64 fence; };   // fence 0: not copied back yet
+    std::vector<CompactPending> compactPending_;
+    u64 blasMoves_ = 0;
+    u64 compactedCount_ = 0, compactedFrom_ = 0, compactedTo_ = 0;   // totals, logged once per burst
+    bool compactBurst_ = false;
+    // Where buildBlas asks for b's compacted size; false when it is not compactable or no slot is free.
+    bool compactSizeTarget(BlasHandle h, const RhiBlas& b, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC& out);
+    u32 compactReadyBlases(u32 maxCount);
+    // A compacted structure about to be rebuilt goes back to its full size.
+    bool regrowBlas(RhiBlas& b);
     // Retired objects past their fence are released on releaser_: freeing a large one (an old geometry
     // table, a TLAS) was 50-400 ms of whichever main-thread call collected it.
     std::thread releaser_;
@@ -2117,6 +2146,7 @@ public:
     void buildTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
     bool refitBlas(BlasHandle blas) override;
     bool refitTlas(TlasHandle tlas, const TlasInstance* instances, u32 count) override;
+    u32 compactBlases(u32 maxCount) override { return res_->compactReadyBlases(maxCount); }
     void textureBarrier(TextureHandle t, ResourceState from, ResourceState to, u32 subresource) override;
     void bufferBarrier(BufferHandle b, ResourceState from, ResourceState to) override;
     void uavBarrierTexture(TextureHandle t) override;
@@ -6703,6 +6733,8 @@ void D3D12ResourceFactory::resolvePendingRetires(u64 fence) {
     for (RetiredObject& r : retired_)          if (r.fence == kPendingFrameFence) r.fence = fence;
     for (RetiredRange& r : pendingRanges_)     if (r.fence == kPendingFrameFence) r.fence = fence;
     for (RetiredRange& r : stagePendingRanges_) if (r.fence == kPendingFrameFence) r.fence = fence;
+    for (AsPoolFree& r : asPoolPending_)        if (r.fence == kPendingFrameFence) r.fence = fence;
+    for (CompactPending& p : compactPending_)   if (p.fence == kPendingFrameFence) p.fence = fence;
 }
 
 // Queues an object for release once the GPU has passed the current frame.
@@ -7694,7 +7726,7 @@ BindingSetHandle D3D12ResourceFactory::createBindingSet(const BindingSetDesc& d)
 namespace {
 // Shared by prebuild query, build, and update; all three must agree on Flags/NumDescs/geometry.
 D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m, D3D12_RAYTRACING_GEOMETRY_DESC& geo,
-                                                                 bool allowUpdate) {
+                                                                 bool allowUpdate, bool compactable = false) {
     geo = {};
     geo.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
     geo.Flags = D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
@@ -7711,6 +7743,7 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m
     in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
     if (allowUpdate) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+    if (compactable) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
     in.NumDescs = 1;
     in.pGeometryDescs = &geo;
     return in;
@@ -7719,7 +7752,7 @@ D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS blasInputs(const GpuMesh& m
 // One geometry per part, OPAQUE only where requested. False if a part's mesh is gone.
 bool blasMultiInputs(const std::vector<GpuMesh>& meshes, const std::vector<BlasGeometry>& parts,
                      std::vector<D3D12_RAYTRACING_GEOMETRY_DESC>& geos,
-                     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& in) {
+                     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS& in, bool compactable = false) {
     geos.assign(parts.size(), D3D12_RAYTRACING_GEOMETRY_DESC{});
     for (usize i = 0; i < parts.size(); ++i) {
         const MeshHandle h = parts[i].mesh;
@@ -7742,6 +7775,7 @@ bool blasMultiInputs(const std::vector<GpuMesh>& meshes, const std::vector<BlasG
     in.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
     in.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     in.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+    if (compactable) in.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
     in.NumDescs = static_cast<UINT>(geos.size());
     in.pGeometryDescs = geos.data();
     return true;
@@ -7791,7 +7825,7 @@ BlasHandle D3D12ResourceFactory::createBlas(MeshHandle mesh) { return createBlas
 // Same, but with ALLOW_UPDATE and scratch for an update too.
 BlasHandle D3D12ResourceFactory::createBlasUpdatable(MeshHandle mesh) { return createBlasImpl(mesh, true); }
 
-BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdate) {
+BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdate, bool compactable) {
     collect();
     if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] createBlas without ray-tracing support"); return 0; }
     if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.D3D12] createBlas with an invalid mesh handle"); return 0; }
@@ -7801,13 +7835,16 @@ BlasHandle D3D12ResourceFactory::createBlasImpl(MeshHandle mesh, bool allowUpdat
     if (m.indexCount == 0) { AVER_ERROR("[RHI.D3D12] createBlas for a mesh with no indices"); return 0; }
 
     D3D12_RAYTRACING_GEOMETRY_DESC geo{};
-    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = blasInputs(m, geo, allowUpdate);
+    compactable = compactable && !allowUpdate;
+    const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = blasInputs(m, geo, allowUpdate, compactable);
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
 
     RhiBlas b;
     b.mesh = mesh;
     b.allowUpdate = allowUpdate;
+    b.compactable = compactable;
+    b.buildBytes = info.ResultDataMaxSizeInBytes;
     allocBlasMemory(b, info.ResultDataMaxSizeInBytes);
     // An updatable structure's scratch must cover whichever of a build or an update asks for more --
     // it is reused for both, and D3D12 sizes the two independently.
@@ -7854,8 +7891,130 @@ bool D3D12ResourceFactory::allocBlasMemory(RhiBlas& b, u64 bytes) {
     return b.as != nullptr;
 }
 
+void D3D12ResourceFactory::freeBlasMemory(RhiBlas& b) {
+    if (b.asPool != ~0u) asPoolPending_.push_back({b.asPool, b.asOffset, b.asBytes, retireFence()});
+    else retire(b.as);
+    b.asPool = ~0u;
+    b.as.Reset();
+}
+
+bool D3D12ResourceFactory::regrowBlas(RhiBlas& b) {
+    RhiBlas nb;
+    if (!allocBlasMemory(nb, b.buildBytes)) return false;
+    freeBlasMemory(b);
+    b.as = std::move(nb.as);
+    b.asPool = nb.asPool;
+    b.asOffset = nb.asOffset;
+    b.asBytes = nb.asBytes;
+    b.compacted = false;
+    ++blasMoves_;
+    return true;
+}
+
+bool D3D12ResourceFactory::compactSizeTarget(BlasHandle h, const RhiBlas& b,
+                                             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC& out) {
+    if (!b.compactable || compactFailed_) return false;
+    if (!compactSizes_) {
+        compactSizes_ = makeAsBuffer(dev_->device_.Get(), kCompactSlots * sizeof(u64), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const auto rb = heapProps(D3D12_HEAP_TYPE_READBACK);
+        const auto rd = bufferDesc(kCompactSlots * sizeof(u64));
+        void* mapped = nullptr;
+        if (!compactSizes_ ||
+            FAILED(dev_->device_->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                          nullptr, IID_PPV_ARGS(&compactReadback_))) ||
+            FAILED(compactReadback_->Map(0, nullptr, &mapped))) {
+            AVER_WARN("[RHI.D3D12] BLAS compaction off: its size buffers could not be made");
+            compactSizes_.Reset();
+            compactReadback_.Reset();
+            compactFailed_ = true;
+            return false;
+        }
+        setDebugName(compactSizes_.Get(), "rhi BLAS compacted sizes");
+        compactMapped_ = static_cast<const u64*>(mapped);
+        for (u32 s = kCompactSlots; s-- > 0;) compactFreeSlots_.push_back(s);
+    }
+    if (compactFreeSlots_.empty()) return false;   // this build stays full size
+    const u32 slot = compactFreeSlots_.back();
+    compactFreeSlots_.pop_back();
+    compactPending_.push_back({h, slot, b.buildSerial, 0});
+    out.DestBuffer = compactSizes_->GetGPUVirtualAddress() + u64(slot) * sizeof(u64);
+    out.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+    return true;
+}
+
+u32 D3D12ResourceFactory::compactReadyBlases(u32 maxCount) {
+    if ((compactPending_.empty() && !compactBurst_) || !dev_->cmdList4_ || !dev_->fence_ || !compactMapped_) return 0;
+    const u64 done = dev_->fence_->GetCompletedValue();
+    u32 moved = 0;
+    bool bigMoved = false;   // a non-pooled copy is a committed resource made here: one per call
+    bool uncopied = false;
+    for (usize i = 0; i < compactPending_.size();) {
+        const CompactPending p = compactPending_[i];
+        if (p.fence == 0) { uncopied = true; ++i; continue; }
+        if (p.fence > done || moved >= maxCount) { ++i; continue; }
+        const u64 size = compactMapped_[p.slot];
+        if (size > kAsPoolMaxBlas && bigMoved) { ++i; continue; }   // the next call's
+        compactPending_[i] = compactPending_.back();
+        compactPending_.pop_back();
+        compactFreeSlots_.push_back(p.slot);
+        RhiBlas* b = blas(p.blas);
+        // Worth a move only if it saves at least an eighth.
+        if (!b || !b->as || !b->built || b->compacted || b->buildSerial != p.serial || size == 0 ||
+            size + size / 8 >= b->asBytes)
+            continue;
+        RhiBlas nb;
+        if (!allocBlasMemory(nb, size)) continue;
+        bigMoved = bigMoved || nb.asPool == ~0u;
+        D3D12_RESOURCE_BARRIER bars[2]{};
+        bars[0].Type = bars[1].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        bars[0].UAV.pResource = b->as.Get();
+        bars[1].UAV.pResource = nb.as.Get();
+        dev_->cmdList_->ResourceBarrier(2, bars);
+        dev_->cmdList4_->CopyRaytracingAccelerationStructure(nb.asVa(), b->asVa(),
+                                                             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+        dev_->cmdList_->ResourceBarrier(1, &bars[1]);   // before the TLAS build that names it
+        freeBlasMemory(*b);
+        ++compactedCount_;
+        compactedFrom_ += b->asBytes;
+        compactedTo_ += nb.asBytes;
+        b->as = std::move(nb.as);
+        b->asPool = nb.asPool;
+        b->asOffset = nb.asOffset;
+        b->asBytes = nb.asBytes;
+        b->compacted = true;
+        ++blasMoves_;
+        ++moved;
+    }
+    if (moved) compactBurst_ = true;
+    else if (compactBurst_) {
+        compactBurst_ = false;
+        AVER_INFO("[RHI.D3D12] BLAS compaction: {} compacted so far, {:.0f} -> {:.0f} MiB", compactedCount_,
+                  static_cast<f64>(compactedFrom_) / (1024.0 * 1024.0), static_cast<f64>(compactedTo_) / (1024.0 * 1024.0));
+    }
+    // The sizes of builds recorded so far go back to the CPU behind this frame's fence.
+    if (uncopied) {
+        D3D12_RESOURCE_BARRIER bar{};
+        bar.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        bar.Transition.pResource = compactSizes_.Get();
+        bar.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        bar.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        bar.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        dev_->cmdList_->ResourceBarrier(1, &bar);
+        dev_->cmdList_->CopyBufferRegion(compactReadback_.Get(), 0, compactSizes_.Get(), 0, kCompactSlots * sizeof(u64));
+        std::swap(bar.Transition.StateBefore, bar.Transition.StateAfter);
+        dev_->cmdList_->ResourceBarrier(1, &bar);
+        const u64 fence = retireFence();
+        for (CompactPending& p : compactPending_) if (p.fence == 0) p.fence = fence;
+    }
+    return moved;
+}
+
 // Acceleration structure over multiple meshes; sized by prebuild query.
 BlasHandle D3D12ResourceFactory::createBlasMulti(const BlasGeometry* geometries, u32 count) {
+    return createBlasMultiImpl(geometries, count, false);
+}
+
+BlasHandle D3D12ResourceFactory::createBlasMultiImpl(const BlasGeometry* geometries, u32 count, bool compactable) {
     collect();
     if (!dev_->device5_) { AVER_WARN("[RHI.D3D12] createBlasMulti without ray-tracing support"); return 0; }
     if (!geometries || count == 0) { AVER_ERROR("[RHI.D3D12] createBlasMulti with no geometry"); return 0; }
@@ -7863,13 +8022,15 @@ BlasHandle D3D12ResourceFactory::createBlasMulti(const BlasGeometry* geometries,
     b.geometries.assign(geometries, geometries + count);
     std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in{};
-    if (!blasMultiInputs(dev_->meshes_, b.geometries, geos, in)) {
+    if (!blasMultiInputs(dev_->meshes_, b.geometries, geos, in, compactable)) {
         AVER_ERROR("[RHI.D3D12] createBlasMulti: a geometry names an invalid, destroyed or index-less mesh");
         return 0;
     }
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
     dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
     b.mesh = geometries[0].mesh;
+    b.compactable = compactable;
+    b.buildBytes = info.ResultDataMaxSizeInBytes;
     allocBlasMemory(b, info.ResultDataMaxSizeInBytes);
     b.scratchBytes = info.ScratchDataSizeInBytes;
     if (!b.as) { AVER_ERROR("[RHI.D3D12] createBlasMulti allocation failed"); return 0; }
@@ -8109,11 +8270,8 @@ void D3D12ResourceFactory::destroyBlas(BlasHandle h) {
     if (h == 0 || h > blases_.size()) return;
     RhiBlas& b = blases_[h - 1];
     if (!b.as && !b.scratch) return;
-    if (b.asPool != ~0u) asPoolPending_.push_back({b.asPool, b.asOffset, b.asBytes, retireFence()});
-    else retire(b.as);
-    b.asPool = ~0u;
+    freeBlasMemory(b);
     retire(b.scratch);
-    b.as.Reset();
     b.scratch.Reset();
     b.mesh = 0;
     b.built = false;
@@ -9083,17 +9241,21 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
         if (!b->scratch) { AVER_ERROR("[RHI.D3D12] buildBlas: no build scratch for BLAS {}", h); return; }
         scratch = b->scratch.Get();
     }
+    if (b->compacted && !res_->regrowBlas(*b)) { AVER_ERROR("[RHI.D3D12] buildBlas: no memory to rebuild BLAS {}", h); return; }
+    ++b->buildSerial;
+    D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC post{};
+    const bool sizeWanted = res_->compactSizeTarget(h, *b, post);
     if (!b->geometries.empty()) {
         // createBlasMulti: every geometry at once, into the allocation its prebuild query sized.
         std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geos;
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-        if (!blasMultiInputs(dev_->meshes_, b->geometries, geos, bd.Inputs)) {
+        if (!blasMultiInputs(dev_->meshes_, b->geometries, geos, bd.Inputs, b->compactable)) {
             AVER_ERROR("[RHI.D3D12] buildBlas: multi-geometry BLAS {} names a mesh that is gone", h);
             return;
         }
         bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
         bd.DestAccelerationStructureData = b->asVa();
-        dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+        dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, sizeWanted ? 1 : 0, sizeWanted ? &post : nullptr);
         D3D12_RESOURCE_BARRIER bar{};
         bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         bar.UAV.pResource = b->as.Get();
@@ -9105,10 +9267,10 @@ void D3D12RenderContext::buildBlas(BlasHandle h) {
 
     D3D12_RAYTRACING_GEOMETRY_DESC geo{};
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bd{};
-    bd.Inputs = blasInputs(m, geo, b->allowUpdate);
+    bd.Inputs = blasInputs(m, geo, b->allowUpdate, b->compactable);
     bd.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
     bd.DestAccelerationStructureData = b->asVa();
-    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, 0, nullptr);
+    dev_->cmdList4_->BuildRaytracingAccelerationStructure(&bd, sizeWanted ? 1 : 0, sizeWanted ? &post : nullptr);
     D3D12_RESOURCE_BARRIER bar{};
     bar.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     bar.UAV.pResource = b->as.Get();
@@ -9135,13 +9297,13 @@ bool D3D12RenderContext::refitBlas(BlasHandle h) {
         // Buffers sized at creation; a genuine count change risks GPU corruption. Refit is for compute-skinned meshes (position only).
         if (b->built && countsChanged) {
             D3D12_RAYTRACING_GEOMETRY_DESC geo{};
-            const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = blasInputs(m, geo, b->allowUpdate);
+            const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS in = blasInputs(m, geo, b->allowUpdate, b->compactable);
             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
             dev_->device5_->GetRaytracingAccelerationStructurePrebuildInfo(&in, &info);
             const u64 scratchBytes = b->allowUpdate
                 ? std::max(info.ScratchDataSizeInBytes, info.UpdateScratchDataSizeInBytes)
                 : info.ScratchDataSizeInBytes;
-            if (info.ResultDataMaxSizeInBytes > b->asBytes || scratchBytes > b->scratchBytes) {
+            if (info.ResultDataMaxSizeInBytes > std::max(b->asBytes, b->buildBytes) || scratchBytes > b->scratchBytes) {
                 AVER_ERROR("[RHI.D3D12] refitBlas: mesh {} moved from {}v/{}i to {}v/{}i, past what its BLAS "
                            "was allocated for at creation -- rebuilding it in place would write past that "
                            "allocation, so this refit is refused; the caller must destroy and recreate the BLAS",

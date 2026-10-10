@@ -516,6 +516,21 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
         ctx.bufferBarrier(indices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
     }
 
+    if (!buildTlases(ctx)) { ctx.popMarker(); return false; }
+    ctx.popMarker();
+
+    built_ = true;
+    AVER_INFO("[PT] {} surfaces, {} scenes, {} vertices and {} indices in the flat table",
+              surfaces_.size(), scenes_.size(), totalVerts_, totalIndices_);
+    return true;
+}
+
+void PathTracer::refreshMovedBlases(rhi::IRenderContext& ctx) {
+    if (built_ && res_->blasMoves() != blasMoves_) buildTlases(ctx);
+}
+
+bool PathTracer::buildTlases(rhi::IRenderContext& ctx) {
+    blasMoves_ = res_->blasMoves();
     for (const Scene& s : scenes_) {
         std::vector<rhi::TlasInstance> inst;
         inst.reserve(s.surfaces.size());
@@ -531,14 +546,9 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
             i.instanceId = id & rhi::kMaxTlasInstanceId;
             inst.push_back(i);
         }
-        if (inst.empty()) { ctx.popMarker(); return false; }
+        if (inst.empty()) return false;
         ctx.buildTlas(s.tlas, inst.data(), static_cast<u32>(inst.size()));
     }
-    ctx.popMarker();
-
-    built_ = true;
-    AVER_INFO("[PT] {} surfaces, {} scenes, {} vertices and {} indices in the flat table",
-              surfaces_.size(), scenes_.size(), totalVerts_, totalIndices_);
     return true;
 }
 
