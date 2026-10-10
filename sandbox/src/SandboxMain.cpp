@@ -72,8 +72,8 @@ Application* createApplication(int argc, char** argv) {
         aver::crash::shutdown();
         std::exit(rc);
     }
-    // --sequence-play [--sequence-capture <dir>] [--sequence-every N] [--sequence-warmup N]: taken out of
-    // argv here, so the flag chain below never reads the directory as a bare path.
+    // --sequence-play [--sequence-capture <dir>] [--sequence-every N] [--sequence-warmup N] and
+    // --render-queue <job.ocrender> (docs/RENDER_QUEUE.md): taken out of argv here, so the flag chain below never reads the directory as a bare path.
     SandboxApp::SequenceRunArgs seqRun;
     for (int i = 1; i < argc;) {
         int used = 0;
@@ -81,6 +81,7 @@ Application* createApplication(int argc, char** argv) {
         else if (i + 1 < argc && !std::strcmp(argv[i], "--sequence-capture")) { seqRun.play = true; seqRun.dir = argv[i + 1]; used = 2; }
         else if (i + 1 < argc && !std::strcmp(argv[i], "--sequence-every"))   { seqRun.every = std::atoi(argv[i + 1]); used = 2; }
         else if (i + 1 < argc && !std::strcmp(argv[i], "--sequence-warmup"))  { seqRun.warmup = std::atoi(argv[i + 1]); used = 2; }
+        else if (i + 1 < argc && !std::strcmp(argv[i], "--render-queue"))     { seqRun.play = true; seqRun.job = argv[i + 1]; used = 2; }
         if (!used) { ++i; continue; }
         for (int j = i; j + used < argc; ++j) argv[j] = argv[j + used];
         argc -= used;

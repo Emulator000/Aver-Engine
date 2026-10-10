@@ -437,6 +437,12 @@ add_executable(LightFormatTest src/LightFormatTest.cpp)
 target_link_libraries(LightFormatTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(LightFormatTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# ExrWriteTest -- the render queue's file side: the OpenEXR writer (header bytes, half/float round
+# trips, truncation) and the .ocrender job (round trip, defaults, clamping, refusals). No device.
+add_executable(ExrWriteTest src/ExrWriteTest.cpp)
+target_link_libraries(ExrWriteTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ExrWriteTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # CubeLutTest -- .cube 3D LUT parsing (data order, DOMAIN resampling, refusals with a reason) and the
 # .ocworld POSTVOLUME record (round trip, byte stability, tolerance, defaults). No device.
 add_executable(CubeLutTest src/CubeLutTest.cpp)

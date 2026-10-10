@@ -8,6 +8,10 @@ aver_add_module(Aver.Formats
     src/GiCache.cpp
     src/GltfImport.cpp
     src/Json.cpp
+    # OpenEXR (uncompressed scanline) output and the .ocrender Movie Render Queue job: the render queue
+    # file side, with no device, no scene and no third-party code. docs/RENDER_QUEUE.md.
+    src/ExrWrite.cpp
+    src/RenderJob.cpp
     # --material-map: rules and matching for unbound submeshes (AverAssetC and tests share it).
     src/MaterialMap.cpp
     # IES (LM-63) photometric profiles for lights: a text parser and a table bake, no device.

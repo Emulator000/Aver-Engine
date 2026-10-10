@@ -108,6 +108,11 @@ public:
     // Poses the sequence for frame n (time = n / fps). False once n is past the last frame.
     bool runFrame(i64 n);
     f64  runFps() const { return 1.0 / game::seqStepSeconds(model_); }
+    // The render queue's accessors: poses the sequence at an arbitrary time (clamped to [0, length]),
+    // for sub-frame samples and for output rates other than the sequence's own.
+    f64  runLength() const { return model_.length; }
+    const std::string& sequenceName() const { return model_.name; }
+    void runAt(f64 seconds);
 
     // ---- UI ----
     void drawModePanel(SequenceHost& host);

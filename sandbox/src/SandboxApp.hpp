@@ -145,6 +145,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // dependency either.
 #include "InputSchemeEditor.hpp"
 #include "SoftBodyPanel.hpp"
+#include "RenderQueueOutput.hpp"
+#include "RenderQueuePanel.hpp"
 #include "PostVolumeTools.hpp"
 #if AVER_MODULE_VOXI
 #include "SceneLightFeed.hpp"
@@ -1649,8 +1651,13 @@ public:
         std::string dir;      // numbered PNGs go here; empty = play without capturing
         int every = 1;        // capture every Nth frame
         int warmup = 120;     // frames to wait after the level is ready before frame 0
+        std::string job;      // --render-queue <file.ocrender>: a Movie Render Queue job instead of the plain capture
     };
     void setSequenceRun(const SequenceRunArgs& a);
+    // The Movie Render Queue (SandboxSequenceRun.cpp, docs/RENDER_QUEUE.md): starts a job in the running
+    // editor, relative paths taken from baseDir. False with `why` when one cannot start now.
+    bool startRenderJob(const fmt::RenderJob& job, const std::string& baseDir, std::string& why);
+    void cancelRenderJob();
     void setOpenMap(std::string p);
     void armBrowser(bool on);   // shows the start screen
     void setSingleInstanceEligible(bool b);
@@ -2859,6 +2866,16 @@ private:
     void serviceSequenceCapture(Engine& e);
     bool sequenceRunActive() const { return seqRun_.phase != SequenceRunState::Phase::Off && seqRun_.phase != SequenceRunState::Phase::Done; }
     int  sequenceRunExit() const;
+    // Render queue jobs: the per-frame driver and capture reader, the screen takeover (buildUI draws
+    // nothing and the scene fills a window sized to the output) and the Window > Render Queue panel's host.
+    void renderJobStep(Engine& e);
+    void serviceRenderCapture(Engine& e);
+    bool renderJobEnter(Engine& e);
+    void renderJobFinish(Engine& e, bool ok);
+    void renderJobRewind(i64 frame, i32 sub);
+    bool renderJobOwnsScreen() const { return seqRun_.owns; }
+    void applyRenderJobViewport();
+    editor::RenderQueueHost renderQueueHost();
     // The Animate mode's camera path as a line mesh, rebuilt when the sequence or the playhead moves.
     void drawSequencePath(Engine& e);
 #endif
@@ -3950,7 +3967,33 @@ private:
         u64 pendingEngineFrame = 0;
         u32 tries = 0, written = 0, missed = 0;
         bool failed = false;
+        // ---- a Movie Render Queue job (renderJobStep); isJob false = the plain capture above ----
+        bool isJob = false;
+        bool owns = false;               // the screen is the render: buildUI draws nothing
+        bool exitWhenDone = true;        // the command line ends the process; the panel returns to the editor
+        bool planned = false, levelRequested = false, cancelRequested = false;
+        bool rewind = false;             // a capture was lost: pose the same sample again
+        bool warnedPt = false;
+        fmt::RenderJob job;
+        std::string jobDir;              // relative output paths start here
+        std::string loadError;
+        std::string status;              // the last job's one-line result, for the panel
+        bool statusIsError = false;
+        i32 sub = 0;                     // temporal sample of `frame` being shown
+        u32 hold = 0;                    // engine frames the current pose has been on screen
+        bool sampleRequested = false;    // the current sample's capture is in flight or read
+        i32 pendingSub = 0;
+        u32 capW = 0, capH = 0;          // the size the pending capture must come back as
+        f32 capX = 0, capY = 0;
+        u32 retries = 0;
+        i64 samplesDone = 0, samplesTotal = 0;
+        EditorMode prevMode = EditorMode::Select;
+        bool prevChrome = false;
+        std::vector<u8> savedWindow;     // the window placement to restore (Windows)
     } seqRun_;
+    editor::RenderRun renderRun_;
+    editor::RenderQueuePanelState renderQueue_;
+    bool showRenderQueue_ = false;
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
     // Vehicles as physics cars while Play runs. Built in capturePlayWorld, ended in stopPlay.

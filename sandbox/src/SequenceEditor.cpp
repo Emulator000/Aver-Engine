@@ -352,6 +352,12 @@ bool SequenceEditor::runFrame(i64 n) {
     return true;
 }
 
+void SequenceEditor::runAt(f64 seconds) {
+    // Just under the end: at length a looping sequence wraps back to 0.
+    player_.setTime(std::clamp(seconds, 0.0, std::max(0.0, model_.length - 1e-6)));
+    evalDirty_ = true;
+}
+
 // ---- model -------------------------------------------------------------------------------------
 
 // The player gets a copy of the model with each target rewritten to an index into a dense entity

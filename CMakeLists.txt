@@ -226,6 +226,9 @@ option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pas
 option(AVER_MODULE_PARTICLES "Particle system: CPU-simulated billboard particles, depth-tested against the scene" ON)
 option(AVER_MODULE_FLUIDS "Fluids: the analytic Gerstner surface, the underwater fog override, and soft-body fluid volumes" ON)
 option(AVER_MODULE_RENDER_SOFTBODY "Draw meshes whose vertices come from a simulated soft body" ON)
+# Media: H.264 MP4 output for the render queue (Windows Media Foundation; a stub elsewhere). Core-only
+# and independent of every feature switch, so ON everywhere; OFF only to prove the editor builds without it.
+option(AVER_MODULE_MEDIA "Video encoding (Media Foundation H.264 MP4) for the Movie Render Queue" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -299,6 +302,10 @@ endif()
 # so it sits here with the other leaf modules.
 if(AVER_MODULE_UPGRADE)
   add_subdirectory(modules/upgrade)
+endif()
+# Media: video file output for the render queue. Core only, so it sits with the other leaf modules.
+if(AVER_MODULE_MEDIA)
+  add_subdirectory(modules/media)
 endif()
 # Landscape, above formats because it reads .ocland through it and below anything that draws. The
 # renderer half is a separate target and is not built yet, which is why this needs no RHI.
@@ -556,6 +563,10 @@ if(AVER_BUILD_TESTS)
   endif()
   add_subdirectory(tests/pcg)
   add_subdirectory(tests/formats)
+  # The render queue's video encoder; skips (exit 77) on a machine without an H.264 encoder.
+  if(TARGET Aver.Media)
+    add_subdirectory(tests/media)
+  endif()
   # Unconditional, like the module: Aver.UI depends on nothing optional, so there is no combination
   # of switches in which it exists and its test does not.
   add_subdirectory(tests/ui)

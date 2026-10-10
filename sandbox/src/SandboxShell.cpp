@@ -1843,6 +1843,15 @@ void SandboxApp::buildUI(Engine& e) {
 #if AVER_WITH_IMGUI
     if (!e.device()->uiActive()) return;
     ++frameNo_;   // the Content Browser's directory-cache freshness clock
+#if AVER_MODULE_SCENE
+    // A render queue job owns the screen: no panels, only the scene in a rect the size of the output.
+    // The post chain then writes the backbuffer, not the texture the (undrawn) Level panel shows.
+    if (renderJobOwnsScreen()) {
+        e.device()->setViewportToTexture(false);
+        applyRenderJobViewport();
+        return;
+    }
+#endif
 
     if (browserActive_) {
         // Test hook: AVER_TEST_BROWSER_OPEN=<.ocproject> opens it through this browser path after 120 frames.
@@ -2029,6 +2038,10 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("window.details");
             ImGui::MenuItem("Soft Body (plastic)", nullptr, &showSoftBody_);
             uiReg_.track("window.softBody");
+#if AVER_MODULE_SCENE
+            ImGui::MenuItem("Render Queue", nullptr, &showRenderQueue_);
+            uiReg_.track("window.renderQueue");
+#endif
             if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
             uiReg_.track("window.contentBrowser");
             if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);

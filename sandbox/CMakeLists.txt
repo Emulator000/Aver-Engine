@@ -34,6 +34,9 @@ add_executable(Sandbox WIN32
   src/AnimEditor.cpp
   src/SequenceEditor.cpp
   src/SandboxSequenceRun.cpp
+  # Movie Render Queue: the frame plan and PNG / EXR / MP4 output, and the Window > Render Queue panel.
+  src/RenderQueueOutput.cpp
+  src/RenderQueuePanel.cpp
   src/SkinDrawTest.cpp
   src/SkinSceneTest.cpp
   src/ReflTest.cpp
@@ -453,6 +456,11 @@ endif()
 # not an accidental always-off, in a build with the module disabled.
 if(TARGET Aver.Upgrade)
   target_link_libraries(Sandbox PRIVATE Aver.Upgrade)
+endif()
+# The render queue's MP4 output (Media Foundation). Brings AVER_MODULE_MEDIA=1 through the link
+# interface; without it the queue still renders PNG and EXR.
+if(TARGET Aver.Media)
+  target_link_libraries(Sandbox PRIVATE Aver.Media)
 endif()
 if(TARGET Aver.Trifactor)
   target_link_libraries(Sandbox PRIVATE Aver.Trifactor)

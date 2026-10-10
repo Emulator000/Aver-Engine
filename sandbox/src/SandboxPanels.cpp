@@ -873,6 +873,12 @@ void SandboxApp::buildPanels(Engine& e) {
     // branch edits the WATER record, and applying it to the live surface needs a device.
     if (showDetails_)  buildDetailsPanel(e);
     if (showSoftBody_) editor::softBodyPanelDraw(softBody_, &showSoftBody_);
+#if AVER_MODULE_SCENE
+    if (showRenderQueue_) {
+        editor::RenderQueueHost host = renderQueueHost();
+        editor::renderQueuePanelDraw(renderQueue_, host, &showRenderQueue_);
+    }
+#endif
 }
 
 #endif
