@@ -318,6 +318,7 @@ bool GameWater::attachDisplaced(rhi::IDevice& device, const fmt::OcWaterPlacemen
 
     // The grid is rebuilt only when its shape changed: the editor re-applies the record on every
     // Details edit, and a material or height tweak must not recreate a 66k-vertex mesh.
+    ++surfaceRevision_;
     if (surfaceActive_ && surface_.drawHandle() && sameGrid(d, surface_.desc())) {
         surface_.setLevelCm(d.levelCm);
     } else if (!surface_.configure(d)) {
@@ -367,7 +368,7 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
     // without this call its waves stay frozen at t = 0. Outside the simulated-fluid guard because
     // the analytic surface exists in every fluids build; both hosts reach it from their frame tick.
     if (waterAttached_) waterRenderer_.tick(dt);
-    if (surfaceActive_) surface_.tick(dt);
+    if (surfaceActive_ && !frozen_) surface_.tick(dt);
 
 #if AVER_FLUIDS_SIMULATED
     // The one place a fluid volume is ever spawned: applyLevel only latches what a level asked
@@ -497,7 +498,14 @@ void GameWater::drawDisplaced(rhi::IDevice& device, GameContent& content, pbr::M
     // Re-centred before the draw: the matrix below and this frame's compute pass (prePass) both read
     // the origin this sets, so the geometry and its transform cannot disagree.
     f32 camPos[3];
-    if (device.camera(nullptr, nullptr, camPos)) surface_.place(camPos);
+    if (!frozen_ && device.camera(nullptr, nullptr, camPos)) {
+        const f32 before[3] = {surface_.desc().levelCm, 0.0f, 0.0f};
+        f32 was[3], now[3];
+        surface_.drawOriginCm(was);
+        surface_.place(camPos);
+        surface_.drawOriginCm(now);
+        if (was[0] != now[0] || was[1] != now[1] || before[0] != now[2]) ++surfaceRevision_;
+    }
 
     const SurfaceLook look = bindSurfaceLook(device, content, materials, surfaceMaterial_, "the level water");
 

@@ -2086,6 +2086,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
 #if AVER_MODULE_FLUIDS
     // After physics step, before any prePass (not gated on Play).
+    // The path-traced reference traces the displaced water only while it holds still.
+    water_.setFrozen(ptSceneView_ != nullptr);
+    if (ptSceneView_)
+        ptSceneView_->setIncludeDynamicMeshes(water_.displacedSurfaceActive(), water_.displacedSurfaceRevision());
     water_.update(*e.device(), t.dt);
     hm.mark("water");
 #endif

@@ -110,6 +110,13 @@ public:
 
     // Whether a surface (analytic or displaced) is currently live.
     bool attached() const { return waterAttached_ || surfaceActive_; }
+
+    // Holds the displaced surface still (no wave clock, no re-centring) so a path-traced reference can
+    // trace it: PtSceneView::setIncludeDynamicMeshes needs geometry that only changes with a revision.
+    void setFrozen(bool frozen) { frozen_ = frozen; }
+    bool displacedSurfaceActive() const { return surfaceActive_ && surface_.drawHandle() != 0; }
+    // Changes whenever the displaced surface's geometry may have changed while frozen (rebuilt, moved).
+    u64 displacedSurfaceRevision() const { return surfaceRevision_; }
     // The live surface's authored height, or 0 when nothing is attached.
     f32 waterLevelCm() const {
         return surfaceActive_ ? surface_.levelCm() : (waterAttached_ ? waterRenderer_.waterLevelCm() : 0.0f);
@@ -155,6 +162,8 @@ private:
     bool surfaceInited_ = false;     // surface_.init succeeded
     bool surfaceAttached_ = false;   // registered as a render feature
     bool surfaceActive_ = false;     // configured for the current level; draw() draws it
+    bool frozen_ = false;
+    mutable u64 surfaceRevision_ = 1;
     std::string surfaceMaterial_;    // the record's .ocmat name, resolved at draw time
 
 #if AVER_FLUIDS_SIMULATED
