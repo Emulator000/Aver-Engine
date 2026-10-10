@@ -864,12 +864,16 @@ VulkanDevice::~VulkanDevice() {
     meshGeomLayout_ = VK_NULL_HANDLE;
     if (postDescriptorPool_) api_.DestroyDescriptorPool(device_, postDescriptorPool_, nullptr);
     if (postSetLayout_) api_.DestroyDescriptorSetLayout(device_, postSetLayout_, nullptr);
+    if (postLutSetLayout_) api_.DestroyDescriptorSetLayout(device_, postLutSetLayout_, nullptr);
     if (postPipelineLayout_) api_.DestroyPipelineLayout(device_, postPipelineLayout_, nullptr);
     for (VkPipeline* pso : {&bloomPrefilterPso_, &bloomDownPso_, &bloomUpPso_, &histogramPso_, &exposurePso_,
                             &localGridPso_, &localBlurPso_})
         if (*pso) api_.DestroyPipeline(device_, *pso, nullptr);
     for (int b = 0; b < 2; ++b) for (int a = 0; a < 2; ++a)
+    {
         if (compositePso_[b][a]) api_.DestroyPipeline(device_, compositePso_[b][a], nullptr);
+        if (compositeLutPso_[b][a]) api_.DestroyPipeline(device_, compositeLutPso_[b][a], nullptr);
+    }
     for (u32 i = 0; i < kFrameCount; ++i) {
         if (postRing_[i].buffer) destroyBufferCommitted(*this, postRing_[i].buffer, postRing_[i].memory);
     }
@@ -3353,6 +3357,8 @@ const VkRegisterBind kPostBinds[] = {
         // u2/u3: local exposure's raw and blurred grids, at 7/8 not 6/7 since binding 6 is already the immutable sampler (s0).
         {'u', 2, 0, kVkSetConstants, 7},
         {'u', 3, 0, kVkSetConstants, 8},
+        // t5: the grading LUT (AVER_POST_LUT only), in its own set 3 so it can be rewritten per frame.
+        {'t', 5, 0, kVkSetConstants + 1, 0},
     };
 constexpr u32 kPostBindCount = static_cast<u32>(sizeof(kPostBinds) / sizeof(kPostBinds[0]));
 }
@@ -3403,11 +3409,17 @@ bool VulkanDevice::createPostPipelines() {
         ci.bindingCount = 9; ci.pBindings = binds;
         if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &postSetLayout_), "post set layout")) return false;
     }
+    if (!postLutSetLayout_) {
+        VkDescriptorSetLayoutBinding lb = {0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_ALL, nullptr};
+        VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        lci.bindingCount = 1; lci.pBindings = &lb;
+        if (!vkOk(api_.CreateDescriptorSetLayout(device_, &lci, nullptr, &postLutSetLayout_), "post lut set layout")) return false;
+    }
     if (!postPipelineLayout_) {
         if (!emptySetLayout_) emptySetLayout_ = makeEmptySetLayout(api_, device_);
-        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {emptySetLayout_, emptySetLayout_, postSetLayout_};
+        VkDescriptorSetLayout sets[kVkSetConstants + 2] = {emptySetLayout_, emptySetLayout_, postSetLayout_, postLutSetLayout_};
         VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        lci.setLayoutCount = kVkSetConstants + 1; lci.pSetLayouts = sets;
+        lci.setLayoutCount = kVkSetConstants + 2; lci.pSetLayouts = sets;
         if (!vkOk(api_.CreatePipelineLayout(device_, &lci, nullptr, &postPipelineLayout_), "post pipeline layout"))
             return false;
     }
@@ -3419,13 +3431,14 @@ bool VulkanDevice::createPostPipelines() {
             // got bound anyway -- latent (behind `#if 0`, never compiled) until AMD's access violation.
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kFrameCount * kPostSlotCount},
             // SAMPLED_IMAGE and SAMPLER separately, matching the layout above -- an immutable sampler still consumes a pool slot; immutable means the set can't rewrite it, not that it's free.
-            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kFrameCount * kPostSlotCount * 2},
+            // + one per frame for the grading LUT's set (post layout set 3).
+            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kFrameCount * kPostSlotCount * 2 + kFrameCount},
             {VK_DESCRIPTOR_TYPE_SAMPLER, kFrameCount * kPostSlotCount},
             // FIVE storage buffers per set, not three: t2 (gPostExpRead) + u0/u1 (histogram, exposure) + u2/u3 (local exposure's raw and blurred grids, new).
             {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrameCount * kPostSlotCount * 5},
         };
         VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        pci.maxSets = kFrameCount * kPostSlotCount; pci.poolSizeCount = 4; pci.pPoolSizes = sizes;
+        pci.maxSets = kFrameCount * kPostSlotCount + kFrameCount; pci.poolSizeCount = 4; pci.pPoolSizes = sizes;
         if (!vkOk(api_.CreateDescriptorPool(device_, &pci, nullptr, &postDescriptorPool_), "post descriptor pool")) return false;
     }
 
@@ -3558,6 +3571,7 @@ void VulkanDevice::releasePostTargets() {
     blendBackdropW_ = blendBackdropH_ = 0;
     if (postDescriptorPool_) api_.ResetDescriptorPool(device_, postDescriptorPool_, 0);   // safe: waitForGpu() always precedes this (resize/setSampleCount)
     postSets_.clear();
+    for (VkDescriptorSet& s : postLutSets_) s = VK_NULL_HANDLE;
     bloomMips_ = bloomW_ = bloomH_ = 0;
     // Exposure readout: fixed 8 bytes/slot, independent of scene resolution like histBuf_/expBuf_, but
     // dropped and rebuilt here anyway (see expReadback_'s comment for why this pair owns its lifetime). A pending copy a resize interrupted names a slot no longer valid, so the flag goes with the buffer -- safe for the same reason the pool reset above is.
@@ -3600,9 +3614,12 @@ bool VulkanDevice::createPostTargets() {
         rendering.colorAttachmentCount = 1; rendering.pColorAttachmentFormats = &rtFormat;
 
         bool ok = true;
+        // [lut]: the second half is the grading-LUT permutation (AVER_POST_LUT), bound only when a LUT is set.
+        for (int lut = 0; lut < 2 && ok; ++lut)
         for (int bloom = 0; bloom < 2 && ok; ++bloom) {
             for (int autoExp = 0; autoExp < 2 && ok; ++autoExp) {
                 std::string defs;
+                if (lut) defs += "AVER_POST_LUT=1;";
                 if (bloom) defs += "AVER_POST_BLOOM=1;";
                 if (autoExp) defs += "AVER_POST_AUTOEXPOSURE=1;";
                 std::vector<u32> psSpv;
@@ -3627,7 +3644,8 @@ bool VulkanDevice::createPostTargets() {
                 gp.pVertexInputState = &emptyVin; gp.pInputAssemblyState = &ia; gp.pViewportState = &vp;
                 gp.pRasterizationState = &rs; gp.pMultisampleState = &ms; gp.pColorBlendState = &cb; gp.pDynamicState = &dyn;
                 gp.layout = postPipelineLayout_;
-                ok = vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &compositePso_[bloom][autoExp]), "composite pso");
+                ok = vkOk(api_.CreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr,
+                                                       lut ? &compositeLutPso_[bloom][autoExp] : &compositePso_[bloom][autoExp]), "composite pso");
                 api_.DestroyShaderModule(device_, psMod, nullptr);
             }
         }
@@ -3764,6 +3782,14 @@ bool VulkanDevice::createPostTargets() {
     dai.descriptorPool = postDescriptorPool_;
     dai.descriptorSetCount = totalSlots; dai.pSetLayouts = layouts.data();
     if (!vkOk(api_.AllocateDescriptorSets(device_, &dai, postSets_.data()), "post descriptor sets")) return false;
+    {
+        // The grading LUT's per-frame sets: allocated empty here, written by runPostChain the frames a LUT is set.
+        VkDescriptorSetLayout lutLayouts[kFrameCount];
+        for (u32 i = 0; i < kFrameCount; ++i) { lutLayouts[i] = postLutSetLayout_; postLutSets_[i] = VK_NULL_HANDLE; }
+        VkDescriptorSetAllocateInfo lai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        lai.descriptorPool = postDescriptorPool_; lai.descriptorSetCount = kFrameCount; lai.pSetLayouts = lutLayouts;
+        if (!vkOk(api_.AllocateDescriptorSets(device_, &lai, postLutSets_), "post lut descriptor sets")) return false;
+    }
 
     auto writeSlot = [&](u32 fi, u32 slot, VkImageView t0, VkImageView t1, bool expAtT2) {
         VkDescriptorSet set = postSets_[fi * kPostSlotCount + slot];
@@ -3875,6 +3901,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
             frameSeconds_ = static_cast<f32>(dt < 1e-4 ? 1e-4 : (dt > 0.25 ? 0.25 : dt));
         }
         lastFrameTick_ = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        ++lensFrame_;
     }
 
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
@@ -3907,7 +3934,8 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         }
     }
 
-    const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
+    // The lens flare reads the bloom pyramid, so it builds one even at zero bloom intensity.
+    const bool bloom = (post_.bloomIntensity > 0.0f || post_.lensFlare > 0.0f) && bloomTex_;
     // Frozen in the wireframe view -- D3D12Device::runPostChain's twin says why.
     const bool autoExp = post_.autoExposure && caps_.computeShaders && !wireframeFrame_;
     // Independent of autoExp: both strengths can be nonzero with auto-exposure off (a fixed
@@ -3985,7 +4013,8 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     // vx/vy: destination top-left offset, 0 for passes that fill their whole target (bloom's pyramid, the histogram). Only the
     // composite passes it non-zero, confining the RENDER AREA itself (not just the viewport) to the
     // docked sub-rect -- matters more than D3D12's scissor alone since loadOp/storeOp apply to the whole renderArea and LOAD_OP_DONT_CARE would let outside pixels be discarded too.
-    auto fullscreen = [&](VkPipeline pso, u32 slot, u32 w, u32 h, VkImageView rtv, u32 vx = 0, u32 vy = 0) {
+    auto fullscreen = [&](VkPipeline pso, u32 slot, u32 w, u32 h, VkImageView rtv, u32 vx = 0, u32 vy = 0,
+                          VkDescriptorSet lutSet = VK_NULL_HANDLE) {
         VkRenderingAttachmentInfo att{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         att.imageView = rtv; att.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -3999,6 +4028,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         api_.CmdSetScissor(cmd, 0, 1, &sc);
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso);
         bindSetFor(VK_PIPELINE_BIND_POINT_GRAPHICS, slot);
+        if (lutSet) api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, postPipelineLayout_, kVkSetConstants + 1, 1, &lutSet, 0, nullptr);
         api_.CmdDraw(cmd, 3, 1, 0, 0);
         popRenderScope(cmd, postScope);
     };
@@ -4207,6 +4237,25 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     // built at. Mirrors D3D12Device.cpp's fill.
     fillCommon(width_, height_, sceneWidth_, sceneHeight_);
 
+    // LENS EFFECTS AND GRADING. Vulkan has no G-buffer yet, so DOF and motion blur are off here (depthFx false);
+    // the rest is the shared shader. The grading LUT takes the permutation that declares t5 plus set 3.
+    RhiTexture* lutT = (post_.gradingLut && rhiFactory_) ? rhiFactory_->texture(post_.gradingLut) : nullptr;
+    u32 lutSize = 0;
+    if (lutT && lutT->image && lutT->srvView && lutT->desc.dim == TextureDim::Tex3D && lutT->desc.width >= 2 &&
+        lutT->desc.width == lutT->desc.height && lutT->desc.width == lutT->desc.depth &&
+        compositeLutPso_[bloom ? 1 : 0][autoExp ? 1 : 0] && postLutSets_[frameIndex_])
+        lutSize = lutT->desc.width;
+    fillPostLens(cb, post_, srUpscaled ? width_ : sceneWidth_, srUpscaled ? height_ : sceneHeight_, false, lutSize, lensFrame_);
+    VkDescriptorSet lutSet = VK_NULL_HANDLE;
+    if (lutSize) {
+        VkDescriptorImageInfo li{VK_NULL_HANDLE, lutT->srvView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet lw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        lw.dstSet = postLutSets_[frameIndex_]; lw.dstBinding = 0; lw.descriptorCount = 1;
+        lw.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; lw.pImageInfo = &li;
+        api_.UpdateDescriptorSets(device_, 1, &lw, 0, nullptr);
+        lutSet = postLutSets_[frameIndex_];
+    }
+
     // The composite's own destination rect, confined to the docked sub-rect gPostRegion (fillCommon,
     // normalised source space) scaled back up into PRESENT-space pixels since the destination
     // (viewport texture or swapchain image) is present-sized. Full canvas (0,0,width_,height_) when
@@ -4249,9 +4298,9 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
                                             VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
     pipelineBarrier(api_, cmd, &toRt, 1);
-    fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0],
+    fullscreen(lutSize ? compositeLutPso_[bloom ? 1 : 0][autoExp ? 1 : 0] : compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0],
               srUpscaled ? kPostSlotCompositeUpscaled : kPostSlotComposite,
-              compositeW, compositeH, dstView, compositeX, compositeY);
+              compositeW, compositeH, dstView, compositeX, compositeY, lutSet);
 
     // Back to SHADER_READ so the UI can sample it in the overlay pass that follows -- only for the texture; the swapchain image's own transition to PRESENT is endFrame's business.
     if (vpTex) {

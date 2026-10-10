@@ -328,6 +328,14 @@ Successfully processed 2 of 7 assigned chunks. Total comment reduction achieved:
 
 - **AverSR upscaler before tonemap**: The composite fuses resize+exposure+bloom+ACES+gamma into one pass an upscaler can't simply replace, so the upscaler resamples scene RADIANCE and hands the composite an already present-sized image. Its own resample degenerates to 1:1, untouched. On the upscaler path, t0 is already present-sized; local exposure still reads at its grid's size (always the scene's).
 
+- **Lens table (root parameter 3, t3..t6)**: View Z, velocity, grading LUT and the DOF buffer, a four-descriptor table bound to EVERY post draw and dispatch (Tier 1 wants every descriptor in a bound table populated, so unused slots are nulls with a real shape). Passes that do not use it bind a shared idle table of nulls (kPostLensIdleBase); the DOF passes and the composite bind per-frame copies (kPostLensFrameBase) rewritten each frame, one set per frame in flight, because the LUT handle and the DOF targets can change and the other frame may still be reading its own. Variant 0 (the gather) has t6 = the prep buffer, variant 1 (prep, composite) has t6 = the gathered buffer, so a pass never has its render target in its own table. The G-buffer targets rest as render targets and are moved to shader resource for the lens passes and back after the composite.
+
+- **DOF targets are factory textures**: Post.DofPrep / Post.DofGather, made the first time DOF runs and remade when the composite source's half size changes; destroyTexture retires them behind the fence, which a raw resource reset mid-frame would not. DOF failing to build its PSOs or targets is not fatal: it logs once and the rest of the chain runs.
+
+- **setGBufferEnabled ORs in motionBlur / dofEnabled**: The app calls it each frame with its own wants (denoiser, TAA, frame interpolation); the post lens passes need view Z and velocity too, so the device keeps the G-buffer on while either effect is requested rather than every host learning about it.
+
+- **Post constant ring 16 -> 32 KB**: PostCB is 272 bytes after the lens rows, 512 once rounded to the 256-byte CBV alignment; a frame records about twenty passes.
+
 - **Upscaler pipeline restoration**: The upscaler binds its own descriptor heap and root signature. The composite (recorded straight after) assumes the post chain's—both must be restored, or it draws with whatever the upscaler happened to leave bound. The root arguments were discarded by code outside this file, exactly why the cache is cleared at the binds rather than at a list of callers.
 
 - **Upscaler logging**: Logged ONCE, reporting what actually happened. This feature spent its whole life "constructed and correct and never called", and logging on the SETTING would have said it was working the entire time.

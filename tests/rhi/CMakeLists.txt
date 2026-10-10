@@ -144,3 +144,8 @@ if(AVER_RHI_D3D12)
     COMMENT "Deploying the AverIncProbe include fixture")
   set_target_properties(ShaderIncludeResolveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# PostLensTest: lens effects and grading pack to identity at their defaults (no device).
+add_executable(PostLensTest src/PostLensTest.cpp)
+target_link_libraries(PostLensTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(PostLensTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -84,7 +84,14 @@ constexpr u32 kMaxBloomMips = 6;
 // Post heap descriptor triples: prefilter, histogram, composite, downsample/upsample. +1 for CompositeUpscaled (AverSR).
 constexpr u32 kPostTripleCount = 4 + (kMaxBloomMips - 1) * 2;
 // + the histogram/exposure/local-exposure-grid/local-exposure-grid-blur UAVs (u0-u3).
-constexpr u32 kPostDescriptorCount = kPostTripleCount * 3 + 4;
+// + the LENS TABLE (t3..t6: G-buffer view Z, velocity, grading LUT, DOF buffer): one idle copy of nulls for
+// every pass that does not use it, then per frame in flight two variants rewritten each frame (the LUT and the
+// DOF targets can change). Variant 0 is the DOF gather's (t6 = the prep buffer), 1 the prep's and composite's
+// (t6 = the gathered buffer).
+constexpr u32 kPostLensAuxCount = 4;
+constexpr u32 kPostLensIdleBase = kPostTripleCount * 3 + 4;
+constexpr u32 kPostLensFrameBase = kPostLensIdleBase + kPostLensAuxCount;
+constexpr u32 kPostDescriptorCount = kPostLensFrameBase + kFrameCount * 2 * kPostLensAuxCount;
 // Which triple is which. The bloom ones are ranges based at these.
 constexpr u32 kPostTriplePrefilter = 0;
 constexpr u32 kPostTripleHistogram = 1;
@@ -391,7 +398,7 @@ const std::string& sceneShaderSource() {
 
 // PerFrameCB and PostCB in aver/rhi/FrameConstants.hpp (shared with Vulkan backend). See that header.
 // Per-frame upload ring for the block above.
-constexpr u32 kPostConstantRingBytes = 16 * 1024;
+constexpr u32 kPostConstantRingBytes = 32 * 1024;   // ~20 passes a frame at 512 B (PostCB is 272 B, rounded to 256)
 
 // MeshVertex layout for D3D12 IA pipelines. Uses offsetof (not literals) to catch field-order changes.
 constexpr D3D12_INPUT_ELEMENT_DESC kMeshInputLayout[] = {
@@ -1205,6 +1212,10 @@ private:
     // ---- the camera post chain (rhi::PostSettings) ----
     bool createPostPipelines();          // root signature, PSOs and constant ring: once, at init
     bool createPostTargets();            // resolve target, bloom pyramid and descriptors: per resize
+    // Writes the four lens-table SRVs (view Z, velocity, grading LUT, DOF buffer) at `h`; a null resource
+    // writes a null descriptor so the table is always fully populated.
+    void writeLensAux(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource* viewZ, ID3D12Resource* vel,
+                      ID3D12Resource* lut, ID3D12Resource* dof);
     void releasePostTargets();
     // bbIdx names backbuffer's RTV (renderTargets_[bbIdx]).
     void runPostChain(ID3D12Resource* backbuffer, u32 bbIdx, bool generated = false);
@@ -1537,6 +1548,12 @@ private:
     ComPtr<ID3D12PipelineState> compositePso_[2][2];
     ComPtr<ID3D12PipelineState> histogramPso_, exposurePso_;
     ComPtr<ID3D12PipelineState> localGridPso_, localBlurPso_;
+    // Lens effects: the half-resolution DOF pair (prep, gather), the two RGBA16F targets they write (made
+    // when DOF first runs, remade when the composite source's size changes), and the grain's frame seed.
+    ComPtr<ID3D12PipelineState> dofPrepPso_, dofGatherPso_;
+    TextureHandle lensDofA_ = 0, lensDofB_ = 0;
+    u32 lensDofW_ = 0, lensDofH_ = 0;
+    u32 lensFrame_ = 0;
     ComPtr<ID3D12Resource> postCBs_[kFrameCount];
     u8* postCBPtr_[kFrameCount] = {nullptr, nullptr};
     u32 postCBUsed_ = 0;
@@ -2486,6 +2503,8 @@ TextureHandle D3D12Device::sceneDepthTexture() {
 
 // Turns the G-buffer feature on/off. Applied immediately when swapchain exists.
 void D3D12Device::setGBufferEnabled(bool on) {
+    // Motion blur and DOF read the G-buffer's velocity and view Z (post.hlsl), so asking for either keeps it on.
+    on = on || post_.motionBlur > 0.0f || post_.dofEnabled;
     if (on == gbufferEnabled_) return;
     gbufferEnabled_ = on;
     gbufMsaaWarned_ = false;
@@ -4713,7 +4732,13 @@ bool D3D12Device::createPostPipelines() {
     uavRange.NumDescriptors = 4;
     uavRange.BaseShaderRegister = 0;
 
-    D3D12_ROOT_PARAMETER params[3] = {};
+    // t3..t6: the lens table (view Z, velocity, grading LUT, DOF buffer) -- see kPostLensIdleBase.
+    D3D12_DESCRIPTOR_RANGE lensRange{};
+    lensRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    lensRange.NumDescriptors = kPostLensAuxCount;
+    lensRange.BaseShaderRegister = 3;
+
+    D3D12_ROOT_PARAMETER params[4] = {};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -4722,6 +4747,9 @@ bool D3D12Device::createPostPipelines() {
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[2].DescriptorTable.NumDescriptorRanges = 1;
     params[2].DescriptorTable.pDescriptorRanges = &uavRange;
+    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    params[3].DescriptorTable.NumDescriptorRanges = 1;
+    params[3].DescriptorTable.pDescriptorRanges = &lensRange;
     for (auto& p : params) p.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_STATIC_SAMPLER_DESC samp{};
@@ -4731,7 +4759,7 @@ bool D3D12Device::createPostPipelines() {
     samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters = 3;
+    rsd.NumParameters = 4;
     rsd.pParameters = params;
     rsd.NumStaticSamplers = 1;
     rsd.pStaticSamplers = &samp;
@@ -4777,13 +4805,20 @@ bool D3D12Device::createPostPipelines() {
 
     for (int bloom = 0; bloom < 2; ++bloom) {
         for (int autoExp = 0; autoExp < 2; ++autoExp) {
-            std::string defs;
+            // The lens table is always declared here: every pass binds it (nulls when unused) and the
+            // shader branches on constants, so the default path is one compare per effect.
+            std::string defs = "AVER_POST_DEPTHFX=1;AVER_POST_LUT=1;";
             if (bloom)   defs += "AVER_POST_BLOOM=1;";
             if (autoExp) defs += "AVER_POST_AUTOEXPOSURE=1;";
-            if (!makeGfx("PSComposite", kBackbufferFormat, false,
-                         defs.empty() ? nullptr : defs.c_str(), compositePso_[bloom][autoExp]))
+            if (!makeGfx("PSComposite", kBackbufferFormat, false, defs.c_str(), compositePso_[bloom][autoExp]))
                 return false;
         }
+    }
+    // DOF's two half-res passes. Not fatal: without them DOF is skipped and the rest of the chain runs.
+    if (!makeGfx("PSDofPrep",   kSceneColorFormat, false, "AVER_POST_DEPTHFX=1;", dofPrepPso_) ||
+        !makeGfx("PSDofGather", kSceneColorFormat, false, "AVER_POST_DEPTHFX=1;", dofGatherPso_)) {
+        dofPrepPso_.Reset(); dofGatherPso_.Reset();
+        AVER_WARN("[RHI.D3D12] the depth-of-field passes failed to build; DOF stays off");
     }
 
     auto makeCompute = [&](const char* entry, ComPtr<ID3D12PipelineState>& out) {
@@ -4861,7 +4896,10 @@ void D3D12Device::releasePostTargets() {
         if (sceneColorTex_) { f->destroyTexture(sceneColorTex_); sceneColorTex_ = 0; }
         if (presentHdrTex_) { f->destroyTexture(presentHdrTex_); presentHdrTex_ = 0; }
         if (blendBackdropTex_) { f->destroyTexture(blendBackdropTex_); blendBackdropTex_ = 0; }
+        if (lensDofA_) { f->destroyTexture(lensDofA_); lensDofA_ = 0; }
+        if (lensDofB_) { f->destroyTexture(lensDofB_); lensDofB_ = 0; }
     }
+    lensDofW_ = lensDofH_ = 0;
     sceneColorTexW_ = sceneColorTexH_ = presentHdrTexW_ = presentHdrTexH_ = 0;
     blendBackdropW_ = blendBackdropH_ = 0;
     bloomMips_ = bloomW_ = bloomH_ = 0;
@@ -5009,6 +5047,13 @@ bool D3D12Device::createPostTargets() {
         writeTriple(kPostTripleUpBase   + (m - 1), bloomTex_.Get(), m,     bloomTex_.Get(), m,     false);
     }
 
+    {
+        // The idle lens table: nulls, bound by every pass that does not use the lens inputs.
+        D3D12_CPU_DESCRIPTOR_HANDLE idle = postSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+        idle.ptr += static_cast<SIZE_T>(kPostLensIdleBase) * postSrvSize_;
+        writeLensAux(idle, nullptr, nullptr, nullptr, nullptr);
+    }
+
     D3D12_CPU_DESCRIPTOR_HANDLE uav = postSrvHeap_->GetCPUDescriptorHandleForHeapStart();
     uav.ptr += static_cast<SIZE_T>(kPostTripleCount) * 3 * postSrvSize_;
     D3D12_UNORDERED_ACCESS_VIEW_DESC ud{};
@@ -5067,6 +5112,27 @@ bool D3D12Device::createPostTargets() {
     return true;
 }
 
+void D3D12Device::writeLensAux(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource* viewZ, ID3D12Resource* vel,
+                               ID3D12Resource* lut, ID3D12Resource* dof) {
+    auto put = [&](ID3D12Resource* r, DXGI_FORMAT fmt, D3D12_SRV_DIMENSION dim) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Format = fmt;
+        sv.ViewDimension = dim;
+        if (dim == D3D12_SRV_DIMENSION_TEXTURE3D) sv.Texture3D.MipLevels = 1;
+        else                                      sv.Texture2D.MipLevels = 1;
+        device_->CreateShaderResourceView(r, &sv, h);   // r == nullptr: a null descriptor of this shape
+        h.ptr += postSrvSize_;
+    };
+    DXGI_FORMAT lutFmt = lut ? lut->GetDesc().Format : DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (lutFmt == DXGI_FORMAT_R8G8B8A8_TYPELESS) lutFmt = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (lutFmt == DXGI_FORMAT_R16G16B16A16_TYPELESS) lutFmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    put(viewZ, kGBufViewZFormat, D3D12_SRV_DIMENSION_TEXTURE2D);
+    put(vel, kGBufVelocityFormat, D3D12_SRV_DIMENSION_TEXTURE2D);
+    put(lut, lutFmt, D3D12_SRV_DIMENSION_TEXTURE3D);
+    put(dof, kSceneColorFormat, D3D12_SRV_DIMENSION_TEXTURE2D);
+}
+
 // Suballocates one pass's constants from this frame's post ring.
 D3D12_GPU_VIRTUAL_ADDRESS D3D12Device::postConstants(const void* data, u32 bytes) {
     const u32 f = frameIndex_ < kFrameCount ? frameIndex_ : 0;
@@ -5094,6 +5160,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
             frameSeconds_ = static_cast<f32>(dt < 1e-4 ? 1e-4 : (dt > 0.25 ? 0.25 : dt));
         }
         lastFrameTick_ = now.QuadPart;
+        ++lensFrame_;
     }
 
     const bool msaa = sampleCount_ > 1;
@@ -5105,7 +5172,8 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         return;
     }
 
-    const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
+    // The lens flare reads the bloom pyramid, so it builds one even at zero bloom intensity.
+    const bool bloom = (post_.bloomIntensity > 0.0f || post_.lensFlare > 0.0f) && bloomTex_;
     // Frozen in wireframe view (scene target is only clear colour).
     const bool autoExp = post_.autoExposure && caps_.computeShaders && !wireframeFrame_;
     ID3D12Resource* scene = msaa ? sceneResolved_.Get() : msaaColor_.Get();
@@ -5162,6 +5230,14 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
 
     D3D12_GPU_DESCRIPTOR_HANDLE uavTable = postSrvHeap_->GetGPUDescriptorHandleForHeapStart();
     uavTable.ptr += static_cast<UINT64>(kPostTripleCount) * 3 * postSrvSize_;
+    // The lens table every pass binds (root parameter 3): idle nulls until the lens block below swaps it.
+    const D3D12_GPU_DESCRIPTOR_HANDLE heapStartGpu = postSrvHeap_->GetGPUDescriptorHandleForHeapStart();
+    auto lensTableAt = [&](u32 index) {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = heapStartGpu;
+        h.ptr += static_cast<UINT64>(index) * postSrvSize_;
+        return h;
+    };
+    D3D12_GPU_DESCRIPTOR_HANDLE auxTable = lensTableAt(kPostLensIdleBase);
 
     PostCB cb{};
     auto fillCommon = [&](u32 dstW, u32 dstH, u32 srcW, u32 srcH) {
@@ -5219,6 +5295,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         cmdList_->SetGraphicsRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetGraphicsRootDescriptorTable(1, postTriple(triple));
         cmdList_->SetGraphicsRootDescriptorTable(2, uavTable);
+        cmdList_->SetGraphicsRootDescriptorTable(3, auxTable);
         cmdList_->DrawInstanced(3, 1, 0, 0);
     };
 
@@ -5252,6 +5329,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->SetComputeRootDescriptorTable(3, auxTable);
         cmdList_->Dispatch((hw + 15) / 16, (hh + 15) / 16, 1);
 
         D3D12_RESOURCE_BARRIER uavB{};
@@ -5263,6 +5341,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->SetComputeRootDescriptorTable(3, auxTable);
         cmdList_->Dispatch(1, 1, 1);
 
         cmdList_->SetGraphicsRootSignature(postRootSig_.Get());
@@ -5282,6 +5361,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         // kPostTripleHistogram: t0/t1/t2 all scene (CSHistogram's same triple).
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->SetComputeRootDescriptorTable(3, auxTable);
         cmdList_->Dispatch(localGridW_, localGridH_, 1);
 
         // CSLocalGrid's write must land before CSLocalBlur reads it.
@@ -5294,6 +5374,7 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         cmdList_->SetComputeRootConstantBufferView(0, postConstants(&cb, sizeof cb));
         cmdList_->SetComputeRootDescriptorTable(1, postTriple(kPostTripleHistogram));
         cmdList_->SetComputeRootDescriptorTable(2, uavTable);
+        cmdList_->SetComputeRootDescriptorTable(3, auxTable);
         cmdList_->Dispatch((localGridW_ + 7) / 8, (localGridH_ + 7) / 8, 1);
 
         // CSLocalBlur's write must land before PSComposite reads it.
@@ -5438,11 +5519,113 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         }
     }
 
+    // ---- lens effects: constants, the lens table, DOF ----
+    // Everything here is skipped at the PostSettings defaults: the constants stay zero (every shader branch
+    // off), the table stays idle and no pass records.
+    const u32 compositeTriple = srUpscaled ? kPostTripleCompositeUpscaled : kPostTripleComposite;
+    const u32 lensSrcW = srUpscaled ? width_ : sceneWidth_;
+    const u32 lensSrcH = srUpscaled ? height_ : sceneHeight_;
+    // DOF and motion blur need THIS frame's single-sample view Z and velocity; the generated image of frame
+    // interpolation has neither. The G-buffer targets rest as render targets.
+    const bool depthFx = (post_.motionBlur > 0.0f || (post_.dofEnabled && dofPrepPso_ && dofGatherPso_)) &&
+                         !generated && !fgGeneratedPost_ && !wireframeFrame_ && rhiFactory_ &&
+                         gBufferWritten() && gbufWrittenFrame_ && gbufVelocity_ && gbufViewZ_;
+    RhiTexture* lutT = nullptr;
+    u32 lutSize = 0;
+    if (post_.gradingLut && rhiFactory_) {
+        lutT = rhiFactory_->texture(post_.gradingLut);
+        if (lutT && lutT->res && lutT->desc.dim == TextureDim::Tex3D && lutT->desc.width >= 2 &&
+            lutT->desc.width == lutT->desc.height && lutT->desc.width == lutT->desc.depth)
+            lutSize = lutT->desc.width;
+        else
+            lutT = nullptr;
+    }
+    fillPostLens(cb, post_, lensSrcW, lensSrcH, depthFx, lutSize, lensFrame_);
+
+    bool dofRuns = false;
+    RhiTexture* dofA = nullptr;
+    RhiTexture* dofB = nullptr;
+    if (cb.lens2[1] > 0.0f) {
+        const u32 hw = lensSrcW / 2 > 1 ? lensSrcW / 2 : 1;
+        const u32 hh = lensSrcH / 2 > 1 ? lensSrcH / 2 : 1;
+        if (lensDofA_ && (lensDofW_ != hw || lensDofH_ != hh)) {
+            rhiFactory_->destroyTexture(lensDofA_); lensDofA_ = 0;
+            rhiFactory_->destroyTexture(lensDofB_); lensDofB_ = 0;
+        }
+        if (!lensDofA_) {
+            TextureDesc td;
+            td.width = hw; td.height = hh;
+            td.format = fromDxgiFormat(kSceneColorFormat);
+            td.bind = ResourceBind::RenderTarget | ResourceBind::ShaderResource;
+            td.initialState = ResourceState::ShaderResource;
+            td.hasClearValue = true;
+            td.debugName = "Post.DofPrep";
+            lensDofA_ = rhiFactory_->createTexture(td);
+            td.debugName = "Post.DofGather";
+            lensDofB_ = rhiFactory_->createTexture(td);
+            lensDofW_ = hw; lensDofH_ = hh;
+        }
+        dofA = lensDofA_ ? rhiFactory_->texture(lensDofA_) : nullptr;
+        dofB = lensDofB_ ? rhiFactory_->texture(lensDofB_) : nullptr;
+        dofRuns = dofPrepPso_ && dofGatherPso_ && dofA && dofA->res && dofA->rtvHeap && dofB && dofB->res && dofB->rtvHeap;
+        if (!dofRuns) {
+            static bool said = false;
+            if (!said) { AVER_WARN("[RHI.D3D12] the depth-of-field targets could not be created; DOF stays off"); said = true; }
+            cb.lens2[1] = 0.0f;
+        }
+    }
+
+    ID3D12Resource* viewZRes = depthFx ? gbufViewZ_.Get() : nullptr;
+    ID3D12Resource* velRes   = depthFx ? gbufVelocity_.Get() : nullptr;
+    if (depthFx) {
+        D3D12_RESOURCE_BARRIER b[2] = {
+            transition(gbufVelocity_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            transition(gbufViewZ_.Get(),    D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+        };
+        cmdList_->ResourceBarrier(2, b);
+    }
+    // Written fresh each frame into this frame's own slots (the other frame in flight may still read its).
+    const u32 lensF = frameIndex_ < kFrameCount ? frameIndex_ : 0;
+    auto lensCpu = [&](u32 variant) {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = postSrvHeap_->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(kPostLensFrameBase + (lensF * 2 + variant) * kPostLensAuxCount) * postSrvSize_;
+        return h;
+    };
+    const D3D12_GPU_DESCRIPTOR_HANDLE lensGather    = lensTableAt(kPostLensFrameBase + (lensF * 2 + 0) * kPostLensAuxCount);
+    const D3D12_GPU_DESCRIPTOR_HANDLE lensComposite = lensTableAt(kPostLensFrameBase + (lensF * 2 + 1) * kPostLensAuxCount);
+    const bool lensTable = depthFx || lutT;
+    if (lensTable) {
+        ID3D12Resource* lutRes = lutT ? lutT->res.Get() : nullptr;
+        writeLensAux(lensCpu(1), viewZRes, velRes, lutRes, dofRuns ? dofB->res.Get() : nullptr);
+        if (dofRuns) writeLensAux(lensCpu(0), viewZRes, velRes, lutRes, dofA->res.Get());
+        auxTable = lensComposite;
+    }
+    if (dofRuns) {
+        // Prep: composite source -> A (colour + signed half-res CoC). t6 is B, resting as a shader resource.
+        auto toRt = transition(dofA->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmdList_->ResourceBarrier(1, &toRt);
+        fillCommon(lensDofW_, lensDofH_, sceneWidth_, sceneHeight_);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvA = dofA->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        fullscreen(dofPrepPso_.Get(), compositeTriple, lensDofW_, lensDofH_, &rtvA);
+
+        // Gather: A -> B. t6 is A.
+        D3D12_RESOURCE_BARRIER g[2] = {
+            transition(dofA->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+            transition(dofB->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        };
+        cmdList_->ResourceBarrier(2, g);
+        auxTable = lensGather;
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvB = dofB->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        fullscreen(dofGatherPso_.Get(), compositeTriple, lensDofW_, lensDofH_, &rtvB);
+        auto gatherDone = transition(dofB->res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmdList_->ResourceBarrier(1, &gatherDone);
+        auxTable = lensComposite;
+    }
+
     // ---- composite ----
     // Dst is present-space; src is scene target (1:1 at renderScale_==1.0).
     // ON AverSR PATH, t0 is already present-sized; local exposure reads scene's grid size.
     fillCommon(width_, height_, sceneWidth_, sceneHeight_);
-    const u32 compositeTriple = srUpscaled ? kPostTripleCompositeUpscaled : kPostTripleComposite;
 
     // Composite confined to gPostRegion's docked sub-rect scaled into PRESENT-space.
     // Full canvas at (0,0,1,1) identity when undocked, matching pre-existing behaviour.
@@ -5491,6 +5674,13 @@ void D3D12Device::runPostChain(ID3D12Resource* bb, u32 bbIdx, bool generated) {
         auto expBack = transition(expBuf_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cmdList_->ResourceBarrier(1, &expBack);
+    }
+    if (depthFx) {
+        D3D12_RESOURCE_BARRIER b[2] = {
+            transition(gbufVelocity_.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+            transition(gbufViewZ_.Get(),    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
+        };
+        cmdList_->ResourceBarrier(2, b);
     }
     auto sceneBack = msaa
         ? transition(scene, kSceneRead, D3D12_RESOURCE_STATE_RESOLVE_DEST)

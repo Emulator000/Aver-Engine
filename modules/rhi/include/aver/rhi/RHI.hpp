@@ -183,12 +183,33 @@ struct PostSettings {
     // Local exposure. [0,1]: fraction of deviation from middle grey removed. Both ride PostCB.clampRadiance.
     f32  localExposureShadows    = 0.0f;
     f32  localExposureHighlights = 0.0f;
+
+    // ---- Lens effects (post.hlsl PSComposite; docs/rendering/POST_LENS_GRADING.md) ----
+    // Every field at its default records nothing and costs nothing: the effect is skipped, so the
+    // frame is bit-identical to a build without it.
+    f32  vignette = 0;              // 0..1 corner darkening
+    f32  grain = 0;                 // 0..1 film grain strength
+    f32  chromaticAberration = 0;   // 0..1, edge offset in % of width (max 1%)
+    f32  lensFlare = 0;             // 0..1 ghost/halo strength from the bloom pyramid
+    f32  motionBlur = 0;            // 0..1 shutter fraction (uses the velocity buffer)
+    // Physical circle of confusion from the G-buffer view Z (cm): focus distance in cm, f-stop and
+    // focal length in mm on a 36 mm sensor. Motion blur and DOF both read the G-buffer, which the
+    // backend keeps on while either is requested; without one (Vulkan today) they are skipped.
+    bool dofEnabled = false; f32 dofFocusCm = 1000; f32 dofFStop = 4; f32 dofFocalMm = 35;
+
+    // ---- Colour grading, linear and BEFORE the tonemap (identity at the defaults) ----
+    f32  saturation = 1, contrast = 1;
+    f32  lift[3] = {0, 0, 0}, gamma[3] = {1, 1, 1}, gain[3] = {1, 1, 1};   // ASC-CDL-style
+    f32  whiteBalanceK = 6500; f32 whiteBalanceTint = 0;   // 6500 K / 0 is neutral; tint + = magenta
+    // 3D LUT (Tex3D, RGBA8 or RGBA16F, N^3, x=R y=G z=B), applied AFTER the tonemap in display
+    // space. Create it with initialState ShaderResource; 0 = none.
+    TextureHandle gradingLut = 0; f32 gradingLutIntensity = 1;
 };
 
 // Field by field, not memcmp: the bool leaves padding whose bytes a copy need not preserve. The size
 // check is the reminder -- a new PostSettings field changes it, and must be added here too.
 inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
-    static_assert(sizeof(PostSettings) == 76, "a PostSettings field was added: compare it below too");
+    static_assert(sizeof(PostSettings) == 172, "a PostSettings field was added: compare it below too");
     return a.exposure == b.exposure && a.bloomIntensity == b.bloomIntensity &&
            a.bloomThreshold == b.bloomThreshold && a.bloomKnee == b.bloomKnee &&
            a.autoExposure == b.autoExposure && a.exposureMin == b.exposureMin &&
@@ -200,7 +221,17 @@ inline bool postSettingsEqual(const PostSettings& a, const PostSettings& b) {
            a.histogramHighPercent == b.histogramHighPercent && a.tonemap == b.tonemap &&
            a.maxRadiance == b.maxRadiance &&
            a.localExposureShadows == b.localExposureShadows &&
-           a.localExposureHighlights == b.localExposureHighlights;
+           a.localExposureHighlights == b.localExposureHighlights &&
+           a.vignette == b.vignette && a.grain == b.grain &&
+           a.chromaticAberration == b.chromaticAberration && a.lensFlare == b.lensFlare &&
+           a.motionBlur == b.motionBlur && a.dofEnabled == b.dofEnabled &&
+           a.dofFocusCm == b.dofFocusCm && a.dofFStop == b.dofFStop && a.dofFocalMm == b.dofFocalMm &&
+           a.saturation == b.saturation && a.contrast == b.contrast &&
+           a.lift[0] == b.lift[0] && a.lift[1] == b.lift[1] && a.lift[2] == b.lift[2] &&
+           a.gamma[0] == b.gamma[0] && a.gamma[1] == b.gamma[1] && a.gamma[2] == b.gamma[2] &&
+           a.gain[0] == b.gain[0] && a.gain[1] == b.gain[1] && a.gain[2] == b.gain[2] &&
+           a.whiteBalanceK == b.whiteBalanceK && a.whiteBalanceTint == b.whiteBalanceTint &&
+           a.gradingLut == b.gradingLut && a.gradingLutIntensity == b.gradingLutIntensity;
 }
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct

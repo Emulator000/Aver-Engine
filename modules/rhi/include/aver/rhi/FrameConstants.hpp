@@ -1,5 +1,9 @@
 #pragma once
 #include "aver/core/Types.hpp"
+#include "aver/rhi/RHI.hpp"
+
+#include <algorithm>
+#include <cmath>
 
 // The constant blocks BOTH backends upload, defined once.
 //
@@ -162,7 +166,101 @@ struct PostCB {
     // either side called "unused", and mirrors `gPostEye` in shaders/post.hlsl -- a field added here
     // must be added there too, at the same position.
     f32 eye[4];
+    // LENS EFFECTS AND GRADING (PostSettings' lens block), eight rows appended for the same reason
+    // `eye` was; `gPostLens`..`gPostDof` in shaders/post.hlsl mirror them. fillPostLens() below fills
+    // them for both backends, so the packing lives once.
+    f32 lens[4];    // x vignette, y grain, z chromatic aberration, w lens flare
+    f32 lens2[4];   // x motion-blur shutter (0 = off), y DOF on, z grain frame seed, w unused
+    f32 grade[4];   // x saturation, y contrast, z stage bitmask (1 WB, 2 CDL, 4 contrast, 8 saturation), w LUT size (0 = none)
+    f32 wb[4];      // rgb white-balance multiplier, w LUT intensity
+    f32 lift[4];    // rgb lift
+    f32 gamma[4];   // rgb 1/gamma
+    f32 gain[4];    // rgb gain
+    f32 dof[4];     // x focus (cm), y CoC scale (px at the composite source's width), z max radius (half-res px), w unused
 };
-static_assert(sizeof(PostCB) == 144, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(PostCB) == 272, "the HLSL cbuffer mirrors this byte for byte");
+
+// The linear-sRGB multiplier that makes a source of colour temperature `kelvin` read as the 6500 K
+// reference, with `tint` (+ = magenta, - = green) on the green channel. Planckian xy from Kim et al.
+// (2002), Rec.709 primaries, luminance-preserving, clamped to 2500..15000 K; exactly unit at 6500 K / tint 0.
+inline void whiteBalanceGain(f32 kelvin, f32 tint, f32 out[3]) {
+    auto rgbOf = [](f32 t, f32 c[3]) {
+        t = std::clamp(t, 2500.0f, 15000.0f);
+        const f32 t2 = t * t, t3 = t2 * t;
+        const f32 x = t <= 4000.0f ? -0.2661239e9f / t3 - 0.2343589e6f / t2 + 0.8776956e3f / t + 0.179910f
+                                   : -3.0258469e9f / t3 + 2.1070379e6f / t2 + 0.2226347e3f / t + 0.240390f;
+        const f32 y = t <= 2222.0f ? -1.1063814f * x * x * x - 1.34811020f * x * x + 2.18555832f * x - 0.20219683f
+                    : t <= 4000.0f ? -0.9549476f * x * x * x - 1.37418593f * x * x + 2.09137015f * x - 0.16748867f
+                                   :  3.0817580f * x * x * x - 5.87338670f * x * x + 3.75112997f * x - 0.37001483f;
+        const f32 X = x / y, Z = (1.0f - x - y) / y;   // Y = 1
+        c[0] = std::max( 3.2404542f * X - 1.5371385f - 0.4985314f * Z, 1e-3f);
+        c[1] = std::max(-0.9692660f * X + 1.8760108f + 0.0415560f * Z, 1e-3f);
+        c[2] = std::max( 0.0556434f * X - 0.2040259f + 1.0572252f * Z, 1e-3f);
+    };
+    f32 src[3], ref[3];
+    rgbOf(kelvin, src);
+    rgbOf(6500.0f, ref);
+    for (int i = 0; i < 3; ++i) out[i] = ref[i] / src[i];
+    if (kelvin != 6500.0f) {
+        // Keep a neutral input's luminance: white balance recolours, it does not change exposure.
+        const f32 y = 0.2126f * out[0] + 0.7152f * out[1] + 0.0722f * out[2];
+        for (int i = 0; i < 3; ++i) out[i] /= y;
+    }
+    out[1] *= 1.0f - 0.3f * std::clamp(tint, -1.0f, 1.0f);
+}
+
+// Fills PostCB's lens rows from PostSettings. `srcW/srcH`: the composite's source extent (the DOF
+// circle of confusion is in pixels of it). `depthFx`: this backend has this frame's G-buffer view Z
+// and velocity readable; without it DOF and motion blur are off. `lutSize`: the grading LUT's edge,
+// 0 = none usable. `frameSeed` varies the grain per frame. Every default leaves each row at its
+// identity so the shader branches skip the effect.
+inline void fillPostLens(PostCB& cb, const PostSettings& p, u32 srcW, u32 srcH, bool depthFx, u32 lutSize, u32 frameSeed) {
+    auto sat1 = [](f32 v) { return std::clamp(v, 0.0f, 1.0f); };
+    cb.lens[0] = sat1(p.vignette);
+    cb.lens[1] = sat1(p.grain);
+    cb.lens[2] = sat1(p.chromaticAberration);
+    cb.lens[3] = sat1(p.lensFlare);
+
+    const bool mb = depthFx && p.motionBlur > 0.0f;
+    const bool dof = depthFx && p.dofEnabled && srcW > 0 && srcH > 0;
+    cb.lens2[0] = mb ? sat1(p.motionBlur) : 0.0f;
+    cb.lens2[1] = dof ? 1.0f : 0.0f;
+    cb.lens2[2] = static_cast<f32>(frameSeed & 63u);
+    cb.lens2[3] = 0.0f;
+
+    u32 mask = 0;
+    f32 gain[3], lift[3], invGamma[3], wb[3] = {1.0f, 1.0f, 1.0f};
+    for (int i = 0; i < 3; ++i) {
+        lift[i] = p.lift[i];
+        gain[i] = p.gain[i];
+        invGamma[i] = 1.0f / std::max(p.gamma[i], 1e-3f);
+    }
+    if (p.whiteBalanceK != 6500.0f || p.whiteBalanceTint != 0.0f) {
+        whiteBalanceGain(p.whiteBalanceK, p.whiteBalanceTint, wb);
+        mask |= 1u;
+    }
+    for (int i = 0; i < 3; ++i)
+        if (lift[i] != 0.0f || gain[i] != 1.0f || p.gamma[i] != 1.0f) { mask |= 2u; break; }
+    if (p.contrast != 1.0f) mask |= 4u;
+    if (p.saturation != 1.0f) mask |= 8u;
+    cb.grade[0] = std::max(p.saturation, 0.0f);
+    cb.grade[1] = std::max(p.contrast, 0.0f);
+    cb.grade[2] = static_cast<f32>(mask);
+    cb.grade[3] = lutSize ? static_cast<f32>(lutSize) : 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        cb.wb[i] = wb[i]; cb.lift[i] = lift[i]; cb.gamma[i] = invGamma[i]; cb.gain[i] = gain[i];
+    }
+    cb.wb[3] = lutSize ? sat1(p.gradingLutIntensity) : 0.0f;
+    cb.lift[3] = cb.gamma[3] = cb.gain[3] = 0.0f;
+
+    // Physical CoC: c = f^2 / (N (S - f)) * (d - S) / d on a 3.6 cm sensor, + far / - near, in pixels
+    // of the composite source (f and the distances in cm, the engine's world unit).
+    cb.dof[0] = std::max(p.dofFocusCm, 1.0f);
+    const f32 f = std::max(p.dofFocalMm, 1.0f) * 0.1f;
+    const f32 s = std::max(cb.dof[0], f * 1.5f);
+    cb.dof[1] = dof ? f * f / (std::max(p.dofFStop, 0.5f) * (s - f)) / 3.6f * static_cast<f32>(srcW) : 0.0f;
+    cb.dof[2] = std::clamp(static_cast<f32>(srcH) * 0.01f, 4.0f, 12.0f);
+    cb.dof[3] = 0.0f;
+}
 
 } // namespace aver::rhi

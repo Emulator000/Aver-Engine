@@ -30,12 +30,35 @@ cbuffer AverPost : register(b0) {
     // gPostRegion was -- a new post scalar gets its own row rather than hunting for spare
     // components once none are left.
     float4 gPostEye;
+    // LENS EFFECTS AND GRADING (PostSettings' lens block; rhi::fillPostLens packs them, PostCB mirrors
+    // them row for row). Every row sits at its identity by default and every use below is a uniform
+    // branch on it, so an effect left off costs one compare.
+    float4 gPostLens;    // x vignette, y grain, z chromatic aberration, w lens flare
+    float4 gPostLens2;   // x motion-blur shutter (0 = off), y DOF on, z grain frame seed, w unused
+    float4 gPostGrade;   // x saturation, y contrast, z stage bitmask (1 WB, 2 CDL, 4 contrast, 8 saturation),
+                         // w grading-LUT edge in texels (0 = none)
+    float4 gPostWb;      // rgb white-balance multiplier, w LUT intensity
+    float4 gPostLift;    // rgb lift
+    float4 gPostGamma;   // rgb 1/gamma
+    float4 gPostGain;    // rgb gain
+    float4 gPostDof;     // x focus (cm), y CoC scale (px at the composite source's width), z max radius
+                         // (half-res px), w unused
 };
 
 Texture2D<float4>     gPostSceneTex : register(t0);
 Texture2D<float4>     gPostBloomTex : register(t1);
 ByteAddressBuffer     gPostExpRead  : register(t2);
 SamplerState          gPostSamp     : register(s0);
+// The lens table, t3..t6, bound to every post draw. AVER_POST_DEPTHFX (D3D12 only for now: Vulkan has no
+// G-buffer) declares the view-Z, velocity and half-resolution DOF inputs; AVER_POST_LUT the 3D grading LUT.
+#ifdef AVER_POST_DEPTHFX
+Texture2D<float>      gPostViewZTex : register(t3);   // G-buffer linear view Z (cm), scene resolution; 0 = nothing drawn
+Texture2D<float2>     gPostVelTex   : register(t4);   // G-buffer velocity, scene texels per frame
+Texture2D<float4>     gPostDofTex   : register(t6);   // half-res DOF: prep (rgb colour, a signed CoC) or gather (rgb, a near coverage)
+#endif
+#ifdef AVER_POST_LUT
+Texture3D<float4>     gPostLutTex   : register(t5);
+#endif
 
 // Buffers, not textures: a typed UAV load of RGBA16F is an optional D3D12 feature.
 RWByteAddressBuffer   gPostHist     : register(u0);
@@ -456,6 +479,151 @@ void averLocalGridSample(float2 tileXY, float bin, uint gridW, uint gridH, out f
     }
 }
 
+// ---- lens effects ---------------------------------------------------------------------------
+
+// Interleaved gradient noise (Jimenez 2014): cheap, well distributed per pixel.
+float averPostIgn(float2 p) { return frac(52.9829189 * frac(dot(p, float2(0.06711056, 0.00583715)))); }
+
+// The scene with lateral chromatic aberration when it is on: red and blue pushed apart along the radius
+// from the centre of the composite rect, up to gPostLens.z percent of its width at the edge.
+float3 averPostFetch(float2 srcUv, float2 uv) {
+    float3 c;
+    if (gPostLens.z > 0.0) {
+        float2 o = (uv - 0.5) * (0.02 * gPostLens.z) * gPostRegion.zw;
+        c = float3(gPostSceneTex.SampleLevel(gPostSamp, srcUv + o, 0).r,
+                   gPostSceneTex.SampleLevel(gPostSamp, srcUv,     0).g,
+                   gPostSceneTex.SampleLevel(gPostSamp, srcUv - o, 0).b);
+    } else {
+        c = gPostSceneTex.SampleLevel(gPostSamp, srcUv, 0).rgb;
+    }
+    return c;
+}
+
+// Corner darkening, round whatever the aspect: 1 in the middle, 1 - vignette at the corners.
+float averPostVignette(float2 uv) {
+    float aspect = (gPostDst.x * gPostRegion.z) / max(gPostDst.y * gPostRegion.w, 1.0);
+    float2 ax = float2(aspect, 1.0);
+    float d = length((uv - 0.5) * ax) / length(0.5 * ax);
+    return 1.0 - gPostLens.x * smoothstep(0.3, 1.0, d);
+}
+
+#ifdef AVER_POST_BLOOM
+// Ghosts and halo from the bloom pyramid (Chapman's pseudo lens flare): the blurred bright image
+// mirrored through the centre, weighted toward it, plus a ring at a fixed radius. `uv` is in the
+// composite rect's own space; samples are mapped into the pyramid through gPostRegion like bloom's,
+// with red and blue split along `dir` so the ghosts fringe.
+float3 averPostFlareTap(float2 s, float2 dir) {
+    return float3(gPostBloomTex.SampleLevel(gPostSamp, gPostRegion.xy + (s + dir) * gPostRegion.zw, 0).r,
+                  gPostBloomTex.SampleLevel(gPostSamp, gPostRegion.xy +  s        * gPostRegion.zw, 0).g,
+                  gPostBloomTex.SampleLevel(gPostSamp, gPostRegion.xy + (s - dir) * gPostRegion.zw, 0).b);
+}
+
+float3 averPostLensFlare(float2 uv) {
+    float2 toCentre = 0.5 - uv;
+    float2 ghostVec = toCentre * 0.35;
+    float2 dispersion = normalize(toCentre + 1e-5) * 0.004;
+    float3 acc = 0.0;
+    [unroll]
+    for (int k = 1; k <= 5; ++k) {
+        float2 s = uv + ghostVec * (float)k;
+        float w = pow(saturate(1.0 - length(0.5 - s) / 0.70710678), 4.0);
+        acc += averPostFlareTap(s, dispersion) * w;
+    }
+    float2 hs = uv + normalize(toCentre + 1e-5) * 0.45;
+    float hw = pow(saturate(1.0 - length(0.5 - hs) / 0.70710678), 5.0);
+    acc += averPostFlareTap(hs, dispersion * 2.0) * hw * 2.0;
+    return acc * 0.15;
+}
+#endif
+
+// White balance, ASC-CDL-style lift/gamma/gain, contrast about middle grey and saturation, on linear
+// radiance. Each stage runs only when gPostGrade.z says it is not the identity.
+float3 averPostGrade(float3 c) {
+    uint m = (uint)gPostGrade.z;
+    if (m & 1u) c *= gPostWb.rgb;
+    if (m & 2u) c = pow(max(c * gPostGain.rgb + gPostLift.rgb, 0.0), gPostGamma.rgb);
+    if (m & 4u) { const float pivot = 0.18; c = pivot * pow(max(c / pivot, 0.0), gPostGrade.y); }
+    if (m & 8u) { float l = averLuminance(c); c = lerp(l.xxx, c, gPostGrade.x); }
+    return max(c, 0.0);
+}
+
+#ifdef AVER_POST_DEPTHFX
+// Signed circle of confusion in pixels of the composite source: + beyond the focus plane, - in front.
+// View Z 0 is "nothing drawn" (sky): infinitely far.
+float averDofCoc(float viewZ) {
+    float d = viewZ > 1e-3 ? viewZ : 1e7;
+    return gPostDof.y * (d - gPostDof.x) / d;
+}
+
+// DOF 1/2: halves the composite source into (colour, signed half-res CoC). Colour is Karis-weighted so a
+// single bright texel does not own the tap, and ceilinged like everything else the bloom reads.
+float4 PSDofPrep(AverPostVSOut i) : SV_TARGET {
+    float2 o = gPostDst.zw * 0.25;
+    float2 sz = gPostSrc.xy;
+    float e = averPostExposure();
+    float3 sum = 0.0; float coc = 0.0, wSum = 0.0;
+    [unroll]
+    for (int k = 0; k < 4; ++k) {
+        float2 uv = i.uv + float2((k & 1) ? o.x : -o.x, (k & 2) ? o.y : -o.y);
+        float3 c = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, uv, 0).rgb);
+        int2 p = clamp(int2(uv * sz), int2(0, 0), int2(sz) - 1);
+        float z = gPostViewZTex.Load(int3(p, 0));
+        float w = 1.0 / (1.0 + averLuminance(c) * e);
+        sum += c * w;
+        coc += clamp(averDofCoc(z) * 0.5, -gPostDof.z, gPostDof.z) * w;
+        wSum += w;
+    }
+    return float4(sum / wSum, coc / wSum);
+}
+
+// DOF 2/2: scatter-as-gather over a rotated Vogel disc at half resolution. A tap contributes when its own
+// blur disc reaches this pixel (coverage), far taps in front of a farther pixel are kept and ones behind
+// it rejected, and near taps accumulate apart so a blurred foreground can cover a sharp background.
+// rgb = far blended under near, a = near coverage; PSComposite mixes it with the sharp image.
+float4 PSDofGather(AverPostVSOut i) : SV_TARGET {
+    const int N = 48;
+    float R = gPostDof.z;
+    float e = averPostExposure();
+    float4 ctr = gPostDofTex.SampleLevel(gPostSamp, i.uv, 0);
+    float cp = ctr.a;
+    float rot = averPostIgn(i.pos.xy) * 6.2831853;
+
+    float3 farSum = 0.0; float farW = 0.0;
+    if (cp >= 0.0) {
+        float wc = 1.0 / ((1.0 + averLuminance(ctr.rgb) * e) * (1.0 + cp * cp));
+        farSum = ctr.rgb * wc; farW = wc;
+    }
+    float3 nearSum = 0.0; float nearW = 0.0, nearCover = 0.0, nearCoc = 0.0;
+    [loop]
+    for (int k = 0; k < N; ++k) {
+        float r = sqrt(((float)k + 0.5) / (float)N) * R;
+        float a = (float)k * 2.3999632 + rot;
+        float2 off = float2(cos(a), sin(a)) * r;
+        float4 s = gPostDofTex.SampleLevel(gPostSamp, i.uv + off * gPostDst.zw, 0);
+        float w0 = 1.0 / (1.0 + averLuminance(s.rgb) * e);
+        if (s.a >= 0.0) {
+            float cover = saturate(s.a - r + 1.0);
+            float occl = 1.0 - saturate((s.a - max(cp, 0.0)) / (1.0 + max(cp, 0.0)));
+            float wf = cover * occl * w0 / (1.0 + s.a * s.a);
+            farSum += s.rgb * wf; farW += wf;
+        } else {
+            float cover = saturate(-s.a - r + 1.0);
+            nearSum += s.rgb * (cover * w0); nearW += cover * w0;
+            nearCover += cover; nearCoc += cover * -s.a;
+        }
+    }
+    float3 col = farW > 1e-6 ? farSum / farW : ctr.rgb;
+    float alpha = 0.0;
+    if (nearW > 1e-6) {
+        // A uniform near blob of radius c covers (c/R)^2 of the disc, so that is what "fully covered" means.
+        float avg = nearCoc / max(nearCover, 1e-6);
+        alpha = saturate((nearCover / (float)N) / max((avg / R) * (avg / R), 1e-3));
+        col = lerp(col, nearSum / nearW, alpha);
+    }
+    return float4(col, alpha);
+}
+#endif
+
 // ---- composite -----------------------------------------------------------------------------
 
 // SCOTOPIC NIGHT VISION (Krawczyk, Myszkowski & Seidel 2005, "Perceptual effects in real-time tone
@@ -495,7 +663,37 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
     // every source read below -- the scene sample, the bloom sample and the local-exposure lookup --
     // so all three agree on which part of the (possibly larger) source textures this pixel belongs to.
     float2 srcUv = gPostRegion.xy + i.uv * gPostRegion.zw;
-    float3 cRaw = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, srcUv, 0).rgb);
+    float3 cRaw;
+#ifdef AVER_POST_DEPTHFX
+    // MOTION BLUR: a centred blur along the G-buffer velocity (scene texels per frame), scaled by the
+    // shutter fraction and capped at 4% of the height so one bad vector cannot smear the frame. Under a
+    // texel of travel nothing blurs, which also keeps a TAA jitter in the vectors from softening a still image.
+    float2 mbVel = 0.0;
+    if (gPostLens2.x > 0.0) {
+        mbVel = gPostVelTex.SampleLevel(gPostSamp, srcUv, 0).rg * gPostLens2.x;
+        float px = length(mbVel);
+        mbVel *= px > 0.04 * gPostSrc.y ? (0.04 * gPostSrc.y / px) : 1.0;
+    }
+    if (dot(mbVel, mbVel) >= 1.0) {
+        float2 mbStep = mbVel * gPostSrc.zw;
+        float jitter = averPostIgn(i.pos.xy);
+        float3 acc = 0.0;
+        [loop]
+        for (int k = 0; k < 12; ++k)
+            acc += averPostClampRadiance(averPostFetch(srcUv + mbStep * (((float)k + jitter) / 12.0 - 0.5), i.uv));
+        cRaw = acc / 12.0;
+    } else
+#endif
+    cRaw = averPostClampRadiance(averPostFetch(srcUv, i.uv));
+#ifdef AVER_POST_DEPTHFX
+    // DEPTH OF FIELD: mix the half-res gather in by this pixel's own far CoC and the buffer's near coverage.
+    if (gPostLens2.y > 0.0) {
+        int2 p = clamp(int2(srcUv * gPostSrc.xy), int2(0, 0), int2(gPostSrc.xy) - 1);
+        float coc = averDofCoc(gPostViewZTex.Load(int3(p, 0)));
+        float4 d = gPostDofTex.SampleLevel(gPostSamp, srcUv, 0);
+        cRaw = lerp(cRaw, d.rgb, max(smoothstep(0.5, 2.0, coc), d.a));
+    }
+#endif
     // NIGHT VISION HERE, NOT AFTER: cRaw is SCENE-LINEAR radiance, still BEFORE exposure and before
     // local exposure (both below) -- exactly the scotopic model's input. It applies unconditionally,
     // auto-exposure on or off (gPostEye.z alone gates it, via averNightVision's own sigma), unlike
@@ -549,6 +747,25 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
 #ifdef AVER_POST_BLOOM
     // srcUv again: the bloom pyramid, like the local-exposure grid, is built over the whole scene.
     c += gPostBloomTex.SampleLevel(gPostSamp, srcUv, 0).rgb * gPostTone.y;
+    if (gPostLens.w > 0.0) c += averPostLensFlare(i.uv) * gPostLens.w;
 #endif
-    return float4(toGamma(averTonemap(c, gPostMisc.w)), 1.0);
+    if (gPostGrade.z > 0.0) c = averPostGrade(c);
+    if (gPostLens.x > 0.0) c *= averPostVignette(i.uv);
+    float3 outc = toGamma(averTonemap(c, gPostMisc.w));
+#ifdef AVER_POST_LUT
+    // The grading LUT in display space: texel centres, so 0 and 1 land on the first and last entry.
+    if (gPostWb.w > 0.0 && gPostGrade.w > 0.0) {
+        float n = gPostGrade.w;
+        float3 graded = gPostLutTex.SampleLevel(gPostSamp, saturate(outc) * ((n - 1.0) / n) + 0.5 / n, 0).rgb;
+        outc = lerp(outc, graded, gPostWb.w);
+    }
+#endif
+    if (gPostLens.y > 0.0) {
+        // Film grain: triangular noise re-rolled each frame, strongest in the midtones, added in display space.
+        float2 seed = i.pos.xy + gPostLens2.z * float2(17.13, 29.71);
+        float n = averPostIgn(seed) + averPostIgn(seed.yx + 91.7) - 1.0;
+        float l = saturate(averLuminance(outc));
+        outc = saturate(outc + n * gPostLens.y * 0.1 * lerp(0.4, 1.0, 4.0 * l * (1.0 - l)));
+    }
+    return float4(outc, 1.0);
 }

@@ -1785,6 +1785,13 @@ private:
     VkPipelineLayout postPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline bloomPrefilterPso_ = VK_NULL_HANDLE, bloomDownPso_ = VK_NULL_HANDLE, bloomUpPso_ = VK_NULL_HANDLE;
     VkPipeline compositePso_[2][2] = {};   // indexed [bloom on][auto-exposure on]
+    // Lens effects: the grading LUT is one more texture (t5, AVER_POST_LUT), so its composite permutations bind
+    // a second set -- set 3 of the post layout, rewritten each frame in flight. DOF and motion blur are absent
+    // here: this backend has no G-buffer to read (see post.hlsl's AVER_POST_DEPTHFX).
+    VkPipeline compositeLutPso_[2][2] = {};
+    VkDescriptorSetLayout postLutSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSet postLutSets_[kFrameCount] = {};
+    u32 lensFrame_ = 0;   // film grain's per-frame seed
     VkPipeline histogramPso_ = VK_NULL_HANDLE, exposurePso_ = VK_NULL_HANDLE;
     VkPipeline localGridPso_ = VK_NULL_HANDLE, localBlurPso_ = VK_NULL_HANDLE;   // CSLocalGrid, CSLocalBlur -- local exposure's two compute passes
     ConstantRing postRing_[kFrameCount]{};   // reuses section 5's ConstantRing shape; the ONE place outside VulkanRenderContext.cpp that owns a ring, as D3D12Device::postConstants() does separately from D3D12RenderContext::ringAlloc()
