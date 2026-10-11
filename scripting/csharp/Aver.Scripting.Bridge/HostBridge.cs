@@ -292,6 +292,7 @@ public static class HostBridge
         s_graphInstances.Clear();
         // Timers and event subscribers are callbacks into the context being unloaded: drop them first.
         try { Timers.Shutdown(); Events.Shutdown(); } catch { }
+        try { GameplayAbilities.Shutdown(); } catch { }   // its callbacks and behaviours are script-context objects too
 
         ScriptLoadContext? ctx = s_context;
         s_context = null;
@@ -402,6 +403,9 @@ public static class HostBridge
     {
         try
         {
+            // The one per-Play-start call both composition roots already make, so the ability-system session reset
+            // rides on it rather than adding a ScriptHost export. If this call is renamed or split, move BeginSession with it.
+            GameplayAbilities.BeginSession();
             string? settingsPath = Marshal.PtrToStringUTF8(utf8SettingsPath);
             if (!string.IsNullOrEmpty(settingsPath) && !Settings.Open(settingsPath))
                 Emit((int)Log.Level.Warn,
@@ -655,6 +659,7 @@ public static class HostBridge
             string? dir = Marshal.PtrToStringUTF8(utf8ContentDir);
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir))
                 return 0;
+            GameplayAbilities.SetContentRoot(dir);   // where BeginSession finds *.ocgas
 
             int declared = 0;
             // `pawn=` assignments, in a SECOND pass below (Graph.ClassPawn): aver_fw_class_set_default_pawn
@@ -900,6 +905,7 @@ public static class HostBridge
             Emit((int)Log.Level.Info, $"[Scripting] loaded {file}: {found} behaviour(s)");
 
             int actors = DeclareActors(asm, file);
+            GameplayAbilities.RegisterAssembly(asm);
             DiscoverHuds(asm, file);
 
             if (found == 0 && actors == 0) WarnAboutNearMisses(asm, file);
@@ -1002,6 +1008,7 @@ public static class HostBridge
             // id there too, so the order is a real choice: a class-spawned instance's host wins if an id ever appears in both.
             GraphEvents.Router = FireEventRouter;
             InstallGraphVarProvider();
+            GameplayAbilities.Startup();   // the managed-state save provider (ability systems ride in saves)
         }
         catch (Exception ex)
         {
@@ -1453,6 +1460,8 @@ public static class HostBridge
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispBeginPlay(int entity, int reason)
     {
+        // Before the early return so a graph-only class gets its ability-system defaults too.
+        try { GameplayAbilities.ActorBeginPlay(entity); } catch (Exception ex) { Emit(3, $"[bridge] ability defaults threw for entity {entity}: {ex.Message}"); }
         if (!s_actorsByEntity.TryGetValue(entity, out ActorLive? live) || live.Disabled) return;
         try { live.Instance.OnBeginPlay((BeginReason)reason); }
         catch (Exception ex) { DisableActor(live, "OnBeginPlay", ex); }
@@ -1467,6 +1476,12 @@ public static class HostBridge
         // Game-UI events (a click, a changed slider, a command) reach their handlers once a frame, before
         // anything ticks: the first group's tick is the earliest point every graph and actor can see them.
         if (group == 0) { try { Aver.UI.UiSystem.Pump(); } catch (DllNotFoundException) { } }
+        // Culture-change events and data-table hot reloads, on the game thread (docs/LOCALIZATION.md, docs/DATA_TABLES.md).
+        if (group == 0) { try { Aver.Framework.ContentPump.Tick(); } catch (DllNotFoundException) { } }
+        // Gameplay effects expire, periodic effects execute and abilities auto-end on the game clock, once a frame.
+        if (group == 0) { try { GameplayAbilities.Update(); } catch (DllNotFoundException) { } }
+        // Input triggers raised by this frame's aver_fw_action_update reach C# events and graph OnInputAction entries.
+        if (group == 0) { try { EnhancedInput.PumpEvents(); } catch (DllNotFoundException) { } }
 
         // EnhancedInput needs no per-frame snapshot here: that call is gone, not relocated -- it's now
         // a thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h NAMED
@@ -1562,6 +1577,7 @@ public static class HostBridge
         // VAR storage) and left GraphTickBoundInstances ticking a destroyed entity forever.
         s_graphInstances.Remove(entity);
         GraphTimerEvents.UnbindEntity(entity);   // its AN_OnEvent subscriptions and the timers it owns
+        try { GameplayAbilities.EntityGone(entity); } catch (Exception ex) { Emit(3, $"[bridge] ability system teardown threw for entity {entity}: {ex.Message}"); }
 
         // Drop this entity's warn-once memory (s_fireWarnedOnce's own comment): a reused entity id
         // deserves its own first FireEvent warning, not inherited silence. RemoveWhere has no

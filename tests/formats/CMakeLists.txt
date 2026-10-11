@@ -56,6 +56,16 @@ target_link_libraries(OcInputTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcInputTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcStringsTest / OcTableTest / LocGatherTest -- localization string tables, data tables and the key
+# gatherer (docs/plans/wave2/DATA_TABLES_LOCALIZATION.md). Text formats in the base target; no add_test
+# for the reason stated above (aver_register_ctest_in picks up every *Test).
+foreach(_t OcStringsTest OcTableTest LocGatherTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${_t} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
 # OcParticleTest -- the .ocparticle format (particles DECIDED 3). Round-tripping, unknown-record and
 # comment preservation, strict malformed-input rejection, and a real on-disk malformed file. Guarded
 # on the TARGET rather than on AVER_MODULE_PARTICLES for MaterialTest's exact reason below: an

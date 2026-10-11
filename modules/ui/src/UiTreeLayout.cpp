@@ -92,25 +92,29 @@ UiVec2 UiTree::measure(UiWidget& w) {
     f32 cw = 0.0f, ch = 0.0f;
     switch (w.kind) {
         case UiWidgetKind::Text: {
+            const std::string& txt = shown(w.text);
             const f32 wrapW = (w.wrap && w.width >= 0.0f) ? std::max(0.0f, w.width * s - pad.horizontal()) : 0.0f;
             if (wrapW > 0.0f) {
-                const std::vector<std::string> lines = uiWrapText(m, w.text, px, wrapW);
+                const std::vector<std::string> lines = uiWrapText(m, txt, px, wrapW);
                 for (const std::string& l : lines) cw = std::max(cw, m.textWidth(l, px));
                 ch = lineH * static_cast<f32>(lines.size());
             } else {
-                cw = m.textWidth(w.text, px);
-                ch = lineH * static_cast<f32>(lineCount(w.text));
+                cw = m.textWidth(txt, px);
+                ch = lineH * static_cast<f32>(lineCount(txt));
             }
             break;
         }
         case UiWidgetKind::Button:
-        case UiWidgetKind::KeyBind:
-            cw = m.textWidth(w.text, px);
-            ch = lineH * static_cast<f32>(lineCount(w.text));
+        case UiWidgetKind::KeyBind: {
+            const std::string& txt = shown(w.text);
+            cw = m.textWidth(txt, px);
+            ch = lineH * static_cast<f32>(lineCount(txt));
             break;
+        }
         case UiWidgetKind::Toggle: {
             const f32 box = px * 1.1f;
-            cw = box + (w.text.empty() ? 0.0f : 8.0f * s + m.textWidth(w.text, px));
+            const std::string& txt = shown(w.text);
+            cw = box + (txt.empty() ? 0.0f : 8.0f * s + m.textWidth(txt, px));
             ch = std::max(box, lineH);
             break;
         }
@@ -119,11 +123,11 @@ UiVec2 UiTree::measure(UiWidget& w) {
             ch = std::max(lineH, 22.0f * s);
             break;
         case UiWidgetKind::Choice:
-            for (const std::string& it : w.items) cw = std::max(cw, m.textWidth(it, px));
+            for (const std::string& it : w.items) cw = std::max(cw, m.textWidth(shown(it), px));
             ch = lineH;
             break;
         case UiWidgetKind::List: {
-            for (const std::string& it : w.items) cw = std::max(cw, m.textWidth(it, px));
+            for (const std::string& it : w.items) cw = std::max(cw, m.textWidth(shown(it), px));
             cw = std::max(cw, 160.0f * s);
             const f32 rows = static_cast<f32>(std::clamp<usize>(w.items.size(), 1, 6));
             ch = rowHeightOf(w) * rows;
@@ -289,6 +293,7 @@ void UiTree::arrange(UiWidget& w, const UiRect& rect) {
 }
 
 void UiTree::layout(const UiTextMetrics& m) {
+    syncText();
     const UiTextMetrics* previous = metrics_;
     metrics_ = &m;
     scale_ = uiComputeScale(dpi_, viewport_.w, viewport_.h);

@@ -133,6 +133,8 @@ AUTHOR OpenConstructor Team
 |---|---|---|
 | Identity | 9 | `OCPROJECT` `NAME` `ENGINE` `CREATEDWITH` `CONTENT` `STARTMAP` `AUTHOR` `DRONE.GRAPH` `INPUT.SCHEME` `GAME.MODE` |
 
+**`LOCALE.DEFAULT <tag>`** (Project Settings > Default Culture) is the culture every missing translation falls back to; absent means `en`. The strings themselves live in `Content/Localization/<culture>/`, see [LOCALIZATION.md](LOCALIZATION.md).
+
 **`GAME.MODE <class>`** (Project Settings > Default Game Mode) is the GameMode every level uses unless its World Settings override it (`.ocworld` `GAMEMODE`). Without it the editor plays the engine's own drone pawn: declaring a GameMode class no longer makes it the default. The packaged runtime has no drone, so there a project without `GAME.MODE` still falls back to the first concrete GameMode declared. The FirstPerson template writes `GAME.MODE AN_FPRules`.
 | `RENDER.*` | 40 | `GI` `RAYTRACING` `PATHTRACING` `VOXELRES` `GIINTENSITY` `GIDISTANCE` `RTSHADOWRAYS` `RTPIXELSPERRAY` `RTSHADOWDENOISE` `RTRENDERMODE` `RDSTAGES` `FOGOCCLUSION` `PTBOUNCES` `LAYEREDBSDF` `GICONES` `GIMODE` `DENOISER` `RESTIRVISIBILITY` `RESTIRHISTORY` `REFRACTIONMODE` `REFRACTIONSTRENGTH` `REFRACTIONEDGEFADE` `LODSELECT` `LODTHRESHOLD` `OCCLUSIONCULL` `DEPTHPREPASS` `BACKEND` `FRAMEBUDGETMS` `AVERSR` `FRAMEINTERP` `TAA` `NEURAA` `MSAA` `MESHSHADERS` `GIUPDATEINTERVAL` `GIVOLUME` `EXPOSURE` `BLOOM` `AUTOEXPOSURE` `TONEMAP` |
 | `WINDOW.*` | 4 | `TITLE` `SIZE` `RESIZABLE` `FULLSCREEN` |

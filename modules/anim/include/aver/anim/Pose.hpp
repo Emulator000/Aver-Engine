@@ -8,6 +8,7 @@
 #include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"   // kOcMeshInfluences: the influence width skinVertices reads
 
+#include <string>
 #include <vector>
 
 namespace aver::anim {
@@ -50,6 +51,24 @@ bool socketModelMatrix(const std::vector<Mat4>& model, const fmt::OcSocket& sock
 // `a` toward `b` by `t`, per bone: lerp on translation and scale, shortest-arc slerp on rotation.
 // `t` is clamped. Mismatched bone counts leave `out` as a copy of `a`.
 void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out);
+
+// Per-bone blend: bone i moves from `a` toward `b` by w[i] (clamped). A w that does not have one
+// entry per bone, or mismatched poses, leaves `out` a copy of `a`.
+void blendPoseMasked(const Pose& a, const Pose& b, const std::vector<f32>& w, Pose& out);
+
+// One branch-filter entry: a bone name, how many bones down from it the weight ramps in, a weight.
+struct BranchEntry {
+    std::string bone;
+    i32 depth = 0;            // 0 = the whole subtree at full weight; n = ramps up over n bones
+    f32 weight = 1.0f;
+};
+
+// Branch filter -> one weight per bone. A bone's weight is that of its NEAREST ancestor-or-self entry
+// bone (so a weight-0 entry carves a hole out of a wider one), times
+// ramp = depth > 0 ? min(1, (k + 1) / depth) : 1, with k the bone distance from that entry bone.
+// A bone under no entry reads 0. Names that match no bone are skipped; returns how many entries matched.
+u32 buildBranchMask(const fmt::OcSkeleton& skel, const std::vector<BranchEntry>& entries,
+                    std::vector<f32>& outWeights);
 
 // Layers an additive clip's pose onto a base. `additive` is the additive clip sampled at some time
 // and `additiveRest` is that same clip's own reference pose -- the difference between them is what

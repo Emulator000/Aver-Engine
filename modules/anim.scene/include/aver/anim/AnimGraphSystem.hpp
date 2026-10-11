@@ -11,6 +11,7 @@
 // back each tick for the other direction.
 #pragma once
 
+#include "aver/anim/AnimPipeline.hpp"
 #include "aver/anim/AnimStateMachine.hpp"
 #include "aver/anim/AnimSystem.hpp"
 
@@ -63,6 +64,10 @@ private:
     struct Instance {
         u64 machine = 0;
         std::unique_ptr<AnimStateMachine> sm;
+        // The machine's post stage (slot / layered / additive nodes). Bound lazily, once the entity's
+        // skeleton resolves; an empty pipeline leaves the state machine's pose exactly as it was.
+        AnimPipeline pipe;
+        const fmt::OcSkeleton* pipeSkel = nullptr;
         u32 stamp = 0;
     };
     struct Loaded {
@@ -71,6 +76,7 @@ private:
     };
 
     static bool sourceThunk(scene::Entity e, const fmt::OcSkeleton& skel, Pose& pose, void* user);
+    static f32 rootWeightThunk(scene::Entity e, u64 slotHash, void* user);
     const Loaded* machineFor(u64 id);
     const BlendSpaceAsset* spaceFor(const std::string& ref);
     const fmt::OcAnimation* clipFor(const std::string& ref);

@@ -73,6 +73,7 @@ internal static class Native
     [DllImport(Lib)] internal static extern IntPtr aver_ui_widget_get_prop(uint id, [MarshalAs(UnmanagedType.LPUTF8Str)] string key);
     [DllImport(Lib)] internal static extern void aver_ui_widget_set_text(uint id, [MarshalAs(UnmanagedType.LPUTF8Str)] string text);
     [DllImport(Lib)] internal static extern IntPtr aver_ui_widget_get_text(uint id);
+    [DllImport(Lib)] internal static extern IntPtr aver_ui_widget_get_shown_text(uint id);
     [DllImport(Lib)] internal static extern void  aver_ui_widget_set_value(uint id, float value);
     [DllImport(Lib)] internal static extern float aver_ui_widget_get_value(uint id);
     [DllImport(Lib)] internal static extern void aver_ui_widget_set_checked(uint id, int value);

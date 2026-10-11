@@ -4,6 +4,7 @@
 #include "aver/ui/UiDrawList.hpp"
 
 #include <cstdint>
+#include <string>
 
 namespace aver::ui::abi {
 
@@ -15,5 +16,10 @@ void viewport(float out[4]);
 // The pointer and held buttons the host set this frame.
 void pointer(float& x, float& y, std::uint32_t& buttons);
 bool frameStarted();
+// The host's text resolver (aver_ui_set_text_resolver), shared with aver_ui_text / aver_ui_text_width.
+using TextResolveFn = std::int32_t (*)(const char* raw, char* out, std::int32_t cap);
+void setTextResolver(TextResolveFn fn);
+// True with the resolved text when `raw` is a reference the resolver handles; grows its buffer when truncated.
+bool resolveUiText(const char* raw, std::string& out);
 
 } // namespace aver::ui::abi

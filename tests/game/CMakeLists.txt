@@ -28,3 +28,9 @@ set_target_properties(LevelSequenceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CM
 add_executable(PostVolumesTest src/PostVolumesTest.cpp)
 target_link_libraries(PostVolumesTest PRIVATE Aver.Runtime.Game.Core Aver.Core)
 set_target_properties(PostVolumesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GameLocalizationTest -- culture selection (override > saved setting > OS language > LOCALE.DEFAULT), bestCultureMatch, and
+# content hot reload routed to the string and data-table stores. A temp project; no window, no device.
+add_executable(GameLocalizationTest src/GameLocalizationTest.cpp)
+target_link_libraries(GameLocalizationTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Platform Aver.Core)
+set_target_properties(GameLocalizationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

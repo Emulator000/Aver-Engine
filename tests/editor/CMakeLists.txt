@@ -274,6 +274,19 @@ target_include_directories(FoliageTypeEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/san
 target_link_libraries(FoliageTypeEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(FoliageTypeEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# InputSchemeEditorTest -- the .ocinput editor tab's headless core: load / save / undo, the trigger and
+# modifier setters (validation, canonical storage, ordering) and the rename/remove cascade into
+# chord and combo references. FoliageTypeEditorTest's arrangement: compiles
+# sandbox/src/InputSchemeEditor.cpp directly with AVER_WITH_IMGUI undefined, so the drawing half and the
+# framework live-state column (both behind that macro) stay out. .ocinput lives in the BASE
+# Aver.Formats target, so this is never configured out.
+add_executable(InputSchemeEditorTest
+  src/InputSchemeEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/InputSchemeEditor.cpp)
+target_include_directories(InputSchemeEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(InputSchemeEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(InputSchemeEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # InstanceSetModelTest -- the instance-set editing model (.ocinst select / add / delete / duplicate /
 # move, delta undo, spatial index, frustum culling, ray picking) and the preview gizmo maths.
 #
@@ -622,3 +635,34 @@ add_executable(AnimGraphEditorTest
 target_include_directories(AnimGraphEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(AnimGraphEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AnimGraphEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# DataTableEditorTest / StringTableEditorTest -- the data table (.csv/.json) and localization string table editor tabs'
+# headless cores: row/column/key edits and their refusals, undo, saves that keep a file's own shape (CSV delimiter and line
+# ending; comments in .ocstrings), the dirty-tab-keeps-edits rule, and Gather/Report on a temp content tree
+# (LocGatherRun.cpp). FoliageTypeEditorTest's arrangement: the .cpp files compile directly with AVER_WITH_IMGUI undefined,
+# and both formats live in the BASE Aver.Formats target (docs/plans/wave2/DATA_TABLES_LOCALIZATION.md).
+add_executable(DataTableEditorTest
+  src/DataTableEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/DataTableEditor.cpp)
+target_include_directories(DataTableEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(DataTableEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(DataTableEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(StringTableEditorTest
+  src/StringTableEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/StringTableEditor.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/LocGatherRun.cpp)
+target_include_directories(StringTableEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(StringTableEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(StringTableEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# MontageEditorTest -- the .ocmontage editor tab's headless core: the structural edits (which repair
+# the links between sections), the timeline geometry, clip-path references, and the tab's load / save /
+# dirty / undo bookkeeping. Same arrangement as AnimGraphEditorTest above: compiles the editor source
+# directly with AVER_WITH_IMGUI undefined.
+add_executable(MontageEditorTest
+  src/MontageEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/MontageEditor.cpp)
+target_include_directories(MontageEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(MontageEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MontageEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

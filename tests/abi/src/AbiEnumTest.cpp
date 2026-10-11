@@ -714,6 +714,12 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Framework/EnhancedInput.cs", "InputValueType", "", "", "", "src"},
     {"input action sources",  "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_ACTION_SRC_",
      "scripting/csharp/Aver.Framework/EnhancedInput.cs", "InputSource", ""},
+    // Trigger states and event bits (minor 11). Prefixes deliberately avoid AVER_FW_ACTION_, which the
+    // value-type group above already owns.
+    {"input trigger states",  "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_TRIGGER_STATE_",
+     "scripting/csharp/Aver.Framework/InputTriggers.cs", "TriggerState", ""},
+    {"input action events",   "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_INPUT_EVENT_",
+     "scripting/csharp/Aver.Framework/InputTriggers.cs", "ActionEvent", ""},
 
     // ---- both sides already readable; these were simply never named -----------------------------
     {"physics motion types",  "modules/physics/include/aver/physics/physics_abi.h",         "AVER_PHYS_MOTION_",

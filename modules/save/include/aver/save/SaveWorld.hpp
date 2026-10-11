@@ -47,6 +47,16 @@ using GraphVarAtFn    = i32 (*)(scene::Entity e, i32 index, char* nameBuf, i32 n
                                 u32* outKind, f32* outF, i32* outI, void* user);
 using GraphVarSetFn   = i32 (*)(scene::Entity e, const char* name, u32 kind, f32 f, i32 i, void* user);
 
+// MANAGED ENTITY STATE (framework_state_abi.h): named text channels per entity, for state that lives
+// in C# and has no native representation (gameplay abilities is the first user). Same COUNT / AT / SET
+// shape as the graph-var seam, relayed through aver_fw_state_*; this module still does not link the
+// framework. stateAt returns the payload's FULL byte length (it may exceed dataCap; the caller retries
+// with a larger buffer) or -1 for a bad index; stateSet returns 1 if the channel was accepted.
+using StateCountFn = i32 (*)(scene::Entity e, void* user);
+using StateAtFn    = i32 (*)(scene::Entity e, i32 index, char* nameBuf, i32 nameCap,
+                             char* dataBuf, i32 dataCap, void* user);
+using StateSetFn   = i32 (*)(scene::Entity e, const char* name, const char* data, i32 dataLen, void* user);
+
 // The seams a host supplies. Every one may be null; the effect of leaving one null is stated.
 struct Host {
     SpawnClassFn   spawnClass   = nullptr;   // null: actors restore as PLAIN entities, and say so
@@ -56,6 +66,9 @@ struct Host {
     GraphVarCountFn graphVarCount = nullptr; // null: no entity is ever asked for graph VARs
     GraphVarAtFn    graphVarAt    = nullptr; // null: capture() never reads them (paired with above)
     GraphVarSetFn   graphVarSet   = nullptr; // null: restore() never writes them; graphs keep defaults
+    StateCountFn    stateCount    = nullptr; // null: no managed state is captured
+    StateAtFn       stateAt       = nullptr; // null: no managed state is captured (paired with above)
+    StateSetFn      stateSet      = nullptr; // null: restore() counts every "$State" field as dropped
     void*          user         = nullptr;
 };
 

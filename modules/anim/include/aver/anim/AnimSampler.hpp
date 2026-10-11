@@ -21,6 +21,10 @@ f32 clipTime(const fmt::OcAnimation& clip, f32 seconds);
 // per FORMAT_SPECS.md 9.2 ("each key = Time + inTangent + value + outTangent").
 void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut);
 
+// One track sampled into `inOut` (the body of sampleAnimation's loop): channels the track lacks are
+// left alone. For a caller that wants a single bone, such as root motion.
+void sampleTrack(const fmt::OcTrack& t, f32 seconds, Transform& inOut);
+
 // A named float curve at `seconds`. Returns the value, or `fallback` when the curve has no keys.
 //
 // CLAMPED AT BOTH ENDS, NOT WRAPPED: before the first key the curve reads that key's value, after
@@ -62,6 +66,13 @@ struct ClipStep {
 // clamped here rather than dropped. An author who drags a marker past the end of a clip and then
 // shortens the clip should get the event at the end, not silence.
 void notifiesCrossed(const fmt::OcAnimation& clip, const ClipStep& step, std::vector<u32>& outIndices);
+
+// The same rule over a bare notify list and its duration (a montage has no clip to hand), and over
+// bare times. notifiesCrossed is a one-line delegate to the first.
+void notifiesCrossedIn(const std::vector<fmt::OcNotify>& notifies, f32 duration, const ClipStep& step,
+                       std::vector<u32>& outIndices);
+void notifiesCrossedTimes(const std::vector<f32>& times, f32 duration, const ClipStep& step,
+                          std::vector<u32>& outIndices);
 
 // Plays one clip against a skeleton, and crossfades when the clip changes.
 //

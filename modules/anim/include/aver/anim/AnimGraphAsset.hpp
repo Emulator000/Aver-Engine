@@ -7,6 +7,7 @@
 #pragma once
 
 #include "aver/anim/AnimStateMachine.hpp"
+#include "aver/anim/Montage.hpp"
 
 #include <string>
 #include <string_view>
@@ -14,7 +15,9 @@
 namespace aver::anim {
 
 inline constexpr int kBlendSpaceVersion = 1;
-inline constexpr int kStateMachineVersion = 1;
+// 2 only when the machine carries a pipeline; a machine without one is still written as version 1.
+inline constexpr int kStateMachineVersion = 2;
+inline constexpr int kMontageVersion = 1;
 
 std::string writeBlendSpace(const BlendSpaceAsset& a);
 bool parseBlendSpace(std::string_view json, BlendSpaceAsset& out, std::string* why = nullptr);
@@ -25,5 +28,12 @@ std::string writeStateMachine(const AnimStateMachineAsset& a);
 bool parseStateMachine(std::string_view json, AnimStateMachineAsset& out, std::string* why = nullptr);
 bool saveStateMachine(const std::string& path, const AnimStateMachineAsset& a, std::string* why = nullptr);
 bool loadStateMachine(const std::string& path, AnimStateMachineAsset& out, std::string* why = nullptr);
+
+// .ocmontage. Parse does not call valid(); it synthesizes a "Default" section at 0 when none is
+// authored and sorts sections by start.
+std::string writeMontage(const MontageAsset& a);
+bool parseMontage(std::string_view json, MontageAsset& out, std::string* why = nullptr);
+bool saveMontage(const std::string& path, const MontageAsset& a, std::string* why = nullptr);
+bool loadMontage(const std::string& path, MontageAsset& out, std::string* why = nullptr);
 
 } // namespace aver::anim

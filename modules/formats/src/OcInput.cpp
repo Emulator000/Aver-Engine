@@ -6,8 +6,9 @@
 //
 //   OCINPUT 1                                     -- header, required, exactly once, version 1
 //   NAME <text to end of line>                    -- optional authoring label
-//   ACTION <name> digital|axis1|axis2             -- declares one action; OcInputValueType
-//   BIND <action> key <KeyName>                  [scale <f32>] [component x|y|z]
+//   ACTION <name> digital|axis1|axis2 [trigger <spec>]... [modifier <spec>]...
+//                                                 -- declares one action; OcInputValueType
+//   BIND <action> key <KeyName>                  [scale <f32>] [component x|y|z] [trigger <spec>]... [modifier <spec>]...
 //   BIND <action> mousex                         [scale <f32>] [component x|y|z]
 //   BIND <action> mousey                         [scale <f32>] [component x|y|z]
 //   BIND <action> wheel                          [scale <f32>] [component x|y|z]
@@ -18,6 +19,25 @@
 //                                                     GamepadButton/GamepadAxis enums, same opaque-token
 //                                                     treatment as <KeyName> -- see OcInput.hpp)
 //   CONTEXT <name> priority <i32>                 -- optional; this scheme's runtime name + AddContext priority
+//
+// TRIGGER AND MODIFIER SPECS. Each is ONE whitespace-free token (no `#` or `;`), keywords
+// case-insensitive, numbers decimal floats; `trigger`/`modifier` pairs repeat and attach to the ACTION
+// (evaluated on the summed value) or to a single BIND (evaluated on that binding's value). Positional
+// numbers fill in the order shown; the flags once/onstart/nostart/radial/axial may sit anywhere.
+//
+//   trigger  := down[:act] | pressed[:act] | released[:act]
+//             | hold:sec[:act][:once] | holdrelease:sec[:act] | tap[:max][:act]
+//             | pulse:interval[:limit][:act][:onstart|:nostart]
+//             | chord:ActionName | combo:window:Action,Action[,Action...]
+//   modifier := deadzone[:lo[:hi]][:radial|:axial] | scale:x[:y[:z]] | negate[:xyz-subset]
+//             | swizzle:(xyz|yxz|zyx|xzy|yzx|zxy) | smooth:tau | curve:ex[:ey[:ez]]
+//
+// Defaults: act 0.15, tap max 0.2, deadzone lo 0.2 hi 1 radial; a scale/curve given only x is
+// uniform, given x and y it takes z = 1. Validation (file rejected): sec/max >= 0, window > 0,
+// interval > 0, act >= 0, limit an integer >= 0, 0 <= lo < hi, tau >= 0, exponents > 0, a combo needs
+// >= 2 steps, chord/combo names must be declared ACTIONs and a chord may not name its own action. The
+// writer emits canonical text (formatTriggerSpec/formatModifierSpec), `trigger`s then `modifier`s
+// after scale/component, so a file with none of the new keywords is written exactly as before.
 //
 // `scale` defaults to 1.0 and `component` to x (0) when omitted -- BindKey's own defaults
 // (EnhancedInput.cs:104) -- and writeOcinput omits either segment whenever it holds that default,
@@ -54,7 +74,9 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <charconv>
+#include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <vector>
 
 namespace aver::fmt {
@@ -126,6 +148,96 @@ const char* componentWord(i32 c) {
     }
 }
 
+// ---- trigger / modifier specs ---------------------------------------------------------------------
+constexpr f32 kDefaultActuation = 0.15f;
+constexpr f32 kDefaultTapMax    = 0.2f;
+bool sameNum(f32 a, f32 b) { return std::fabs(a - b) <= 1e-6f; }
+
+bool specFail(std::string* err, std::string msg) {
+    if (err) *err = std::move(msg);
+    return false;
+}
+std::string lowerStr(std::string_view s) {
+    std::string r(s);
+    for (char& c : r) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return r;
+}
+
+// Splits a spec token on ':' after rejecting what no spec may contain (whitespace would break the
+// one-token-per-pair line grammar; '#' and ';' are comment/terminator characters).
+bool splitSpec(std::string_view spec, const char* what, std::vector<std::string_view>& f, std::string* err) {
+    if (spec.empty()) return specFail(err, std::string("empty ") + what + " spec");
+    for (char c : spec)
+        if (isSpace(c) || c == '#' || c == ';')
+            return specFail(err, std::string(what) + " spec '" + std::string(spec) +
+                                 "' contains whitespace, '#' or ';'");
+    f = splitChar(spec, ':');
+    for (std::string_view x : f)
+        if (x.empty())
+            return specFail(err, std::string(what) + " spec '" + std::string(spec) + "' has an empty field");
+    return true;
+}
+
+// The fields after the kind: a bare word matching `flags` sets that flag's bit (repeats are an
+// error), anything else must be a finite number; numbers are kept in order, at most `maxNums`.
+struct SpecArgs { std::vector<f32> nums; u32 flags = 0; };
+bool scanArgs(const std::vector<std::string_view>& f, std::string_view spec,
+              std::initializer_list<const char*> flags, usize maxNums, SpecArgs& out, std::string* err) {
+    for (usize i = 1; i < f.size(); ++i) {
+        const std::string w = lowerStr(f[i]);
+        u32 bit = 0;
+        bool isFlag = false;
+        for (const char* fl : flags) {
+            if (w == fl) {
+                if (out.flags & (1u << bit))
+                    return specFail(err, "flag '" + w + "' repeated in '" + std::string(spec) + "'");
+                out.flags |= 1u << bit;
+                isFlag = true;
+                break;
+            }
+            ++bit;
+        }
+        if (isFlag) continue;
+        f32 v{};
+        if (!strictF32(f[i], v) || !std::isfinite(v))
+            return specFail(err, "'" + std::string(f[i]) + "' in '" + std::string(spec) +
+                                 "' is not a number or a known flag");
+        if (out.nums.size() >= maxNums)
+            return specFail(err, "too many values in '" + std::string(spec) + "'");
+        out.nums.push_back(v);
+    }
+    return true;
+}
+
+const char* const kSwizzleWords[6] = {"xyz", "yxz", "zyx", "xzy", "yzx", "zxy"};
+
+// Handles one `trigger <spec>` / `modifier <spec>` pair of an ACTION or BIND line. 0 = `kw` is
+// neither (the caller decides whether that is an error), 1 = stored, -1 = rejected with *err set.
+int attachSpecPair(const char* rec, std::string_view kw, std::string_view val,
+                   std::vector<std::string>& triggers, std::vector<std::string>& modifiers, std::string* err) {
+    std::string e;
+    if (equalsCI(kw, "trigger")) {
+        OcTriggerSpec t;
+        if (!parseTriggerSpec(val, t, &e)) { if (err) *err = std::string(rec) + " trigger: " + e; return -1; }
+        triggers.push_back(formatTriggerSpec(t));
+        return 1;
+    }
+    if (equalsCI(kw, "modifier")) {
+        OcModifierSpec m;
+        if (!parseModifierSpec(val, m, &e)) { if (err) *err = std::string(rec) + " modifier: " + e; return -1; }
+        modifiers.push_back(formatModifierSpec(m));
+        return 1;
+    }
+    return 0;
+}
+
+// Appends ` trigger <spec>` / ` modifier <spec>` pairs (already canonical) to a record line.
+void appendSpecPairs(std::string& s, const std::vector<std::string>& triggers,
+                     const std::vector<std::string>& modifiers) {
+    for (const std::string& t : triggers) { s += " trigger "; s += t; }
+    for (const std::string& m : modifiers) { s += " modifier "; s += m; }
+}
+
 // Renders one binding/action as its owned line. `scale`/`component` are omitted from a BIND line
 // when they hold BindKey's own defaults (1.0 / X) -- see this file's header comment for why a
 // hand-authored file should not have to spell out the ordinary case.
@@ -137,11 +249,15 @@ std::string bindLine(const OcInputBinding& b) {
         b.source == OcInputSource::GamepadAxis) { s += ' '; s += b.key; }
     if (b.scale != 1.0f) { s += " scale "; s += num(b.scale); }
     if (b.component != 0) { s += " component "; s += componentWord(b.component); }
+    appendSpecPairs(s, b.triggers, b.modifiers);
     s += '\n';
     return s;
 }
 std::string actionLine(const OcInputAction& a) {
-    return "ACTION " + a.name + " " + valueTypeWord(a.type) + "\n";
+    std::string s = "ACTION " + a.name + " " + valueTypeWord(a.type);
+    appendSpecPairs(s, a.triggers, a.modifiers);
+    s += '\n';
+    return s;
 }
 
 // Which record kind, if any, a line of EXISTING text belongs to -- used only by writeOcinput's merge
@@ -164,6 +280,202 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
 }
 
 } // namespace
+
+bool parseTriggerSpec(std::string_view spec, OcTriggerSpec& out, std::string* err) {
+    std::vector<std::string_view> f;
+    if (!splitSpec(spec, "trigger", f, err)) return false;
+    const std::string kind = lowerStr(f[0]);
+    const std::string sp(spec);
+    OcTriggerSpec t;
+    SpecArgs a;
+    const auto num = [&a](usize i, f32 def) { return i < a.nums.size() ? a.nums[i] : def; };
+
+    if (kind == "down" || kind == "pressed" || kind == "released") {
+        t.kind = kind == "down" ? OcTriggerKind::Down
+               : kind == "pressed" ? OcTriggerKind::Pressed : OcTriggerKind::Released;
+        if (!scanArgs(f, sp, {}, 1, a, err)) return false;
+        t.actuation = num(0, kDefaultActuation);
+    } else if (kind == "hold") {
+        t.kind = OcTriggerKind::Hold;
+        if (!scanArgs(f, sp, {"once"}, 2, a, err)) return false;
+        if (a.nums.empty()) return specFail(err, "hold needs seconds: hold:sec[:act][:once]");
+        t.time = a.nums[0];
+        t.actuation = num(1, kDefaultActuation);
+        t.once = (a.flags & 1u) != 0;
+    } else if (kind == "holdrelease") {
+        t.kind = OcTriggerKind::HoldRelease;
+        if (!scanArgs(f, sp, {}, 2, a, err)) return false;
+        if (a.nums.empty()) return specFail(err, "holdrelease needs seconds: holdrelease:sec[:act]");
+        t.time = a.nums[0];
+        t.actuation = num(1, kDefaultActuation);
+    } else if (kind == "tap") {
+        t.kind = OcTriggerKind::Tap;
+        if (!scanArgs(f, sp, {}, 2, a, err)) return false;
+        t.time = num(0, kDefaultTapMax);
+        t.actuation = num(1, kDefaultActuation);
+    } else if (kind == "pulse") {
+        t.kind = OcTriggerKind::Pulse;
+        if (!scanArgs(f, sp, {"onstart", "nostart"}, 3, a, err)) return false;
+        if (a.nums.empty()) return specFail(err, "pulse needs an interval: pulse:interval[:limit][:act]");
+        if ((a.flags & 3u) == 3u) return specFail(err, "pulse cannot be both onstart and nostart");
+        t.time = a.nums[0];
+        const f32 lim = num(1, 0.0f);
+        if (lim < 0.0f || lim != std::floor(lim) || lim > 1.0e6f)
+            return specFail(err, "pulse limit must be an integer >= 0, got '" + sp + "'");
+        t.limit = static_cast<i32>(lim);
+        t.actuation = num(2, kDefaultActuation);
+        t.onStart = (a.flags & 2u) == 0;
+    } else if (kind == "chord") {
+        if (f.size() != 2) return specFail(err, "chord needs exactly one action name: chord:Action");
+        if (f[1].find(',') != std::string_view::npos)
+            return specFail(err, "chord names one action, not a list: '" + sp + "'");
+        t.kind = OcTriggerKind::Chord;
+        t.refs.emplace_back(f[1]);
+    } else if (kind == "combo") {
+        if (f.size() != 3) return specFail(err, "combo needs: combo:window:Action,Action[,Action...]");
+        f32 w = 0.0f;
+        if (!strictF32(f[1], w) || !std::isfinite(w) || w <= 0.0f)
+            return specFail(err, "combo window must be a number > 0, got '" + std::string(f[1]) + "'");
+        t.kind = OcTriggerKind::Combo;
+        t.time = w;
+        for (std::string_view step : splitChar(f[2], ',')) {
+            if (step.empty()) return specFail(err, "combo has an empty step name in '" + sp + "'");
+            t.refs.emplace_back(step);
+        }
+        if (t.refs.size() < 2) return specFail(err, "combo needs at least 2 steps");
+    } else {
+        return specFail(err, "unknown trigger kind '" + std::string(f[0]) + "'");
+    }
+
+    if (t.actuation < 0.0f) return specFail(err, "actuation must be >= 0 in '" + sp + "'");
+    if (t.time < 0.0f) return specFail(err, "time must be >= 0 in '" + sp + "'");
+    if (t.kind == OcTriggerKind::Pulse && t.time <= 0.0f)
+        return specFail(err, "pulse interval must be > 0 in '" + sp + "'");
+    out = std::move(t);
+    return true;
+}
+
+bool parseModifierSpec(std::string_view spec, OcModifierSpec& out, std::string* err) {
+    std::vector<std::string_view> f;
+    if (!splitSpec(spec, "modifier", f, err)) return false;
+    const std::string kind = lowerStr(f[0]);
+    const std::string sp(spec);
+    OcModifierSpec m;
+    SpecArgs a;
+    const auto num = [&a](usize i, f32 def) { return i < a.nums.size() ? a.nums[i] : def; };
+
+    if (kind == "deadzone") {
+        m.kind = OcModifierKind::DeadZone;
+        if (!scanArgs(f, sp, {"radial", "axial"}, 2, a, err)) return false;
+        if ((a.flags & 3u) == 3u) return specFail(err, "deadzone cannot be both radial and axial");
+        m.v[0] = num(0, 0.2f);
+        m.v[1] = num(1, 1.0f);
+        m.mode = (a.flags & 2u) ? 1 : 0;
+        if (m.v[0] < 0.0f || m.v[0] >= m.v[1])
+            return specFail(err, "deadzone needs 0 <= lower < upper in '" + sp + "'");
+    } else if (kind == "scale" || kind == "curve") {
+        m.kind = kind == "scale" ? OcModifierKind::Scale : OcModifierKind::Curve;
+        if (!scanArgs(f, sp, {}, 3, a, err)) return false;
+        if (a.nums.empty()) return specFail(err, kind + " needs at least one value: " + kind + ":x[:y[:z]]");
+        m.v[0] = a.nums[0];
+        m.v[1] = a.nums.size() > 1 ? a.nums[1] : a.nums[0];
+        m.v[2] = a.nums.size() > 2 ? a.nums[2] : (a.nums.size() > 1 ? 1.0f : a.nums[0]);
+        if (m.kind == OcModifierKind::Curve && (m.v[0] <= 0.0f || m.v[1] <= 0.0f || m.v[2] <= 0.0f))
+            return specFail(err, "curve exponents must be > 0 in '" + sp + "'");
+    } else if (kind == "negate") {
+        m.kind = OcModifierKind::Negate;
+        if (f.size() > 2) return specFail(err, "negate takes at most one axis list: negate[:xyz]");
+        if (f.size() == 2) {
+            m.mask = 0;
+            for (char c : lowerStr(f[1])) {
+                if (c == 'x') m.mask |= 1;
+                else if (c == 'y') m.mask |= 2;
+                else if (c == 'z') m.mask |= 4;
+                else return specFail(err, "negate axes must be letters from x, y, z in '" + sp + "'");
+            }
+        }
+    } else if (kind == "swizzle") {
+        m.kind = OcModifierKind::Swizzle;
+        if (f.size() != 2) return specFail(err, "swizzle needs an order: swizzle:yxz");
+        const std::string w = lowerStr(f[1]);
+        i32 idx = -1;
+        for (i32 i = 0; i < 6; ++i) if (w == kSwizzleWords[i]) idx = i;
+        if (idx < 0) return specFail(err, "swizzle order must be xyz, yxz, zyx, xzy, yzx or zxy, got '" + w + "'");
+        m.mode = idx;
+    } else if (kind == "smooth") {
+        m.kind = OcModifierKind::Smooth;
+        if (!scanArgs(f, sp, {}, 1, a, err)) return false;
+        if (a.nums.empty()) return specFail(err, "smooth needs a time constant: smooth:tau");
+        if (a.nums[0] < 0.0f) return specFail(err, "smooth tau must be >= 0 in '" + sp + "'");
+        m.v[0] = a.nums[0];
+    } else {
+        return specFail(err, "unknown modifier kind '" + std::string(f[0]) + "'");
+    }
+    out = m;
+    return true;
+}
+
+std::string formatTriggerSpec(const OcTriggerSpec& t) {
+    const bool defAct = sameNum(t.actuation, kDefaultActuation);
+    const auto withAct = [&](std::string s) { if (!defAct) { s += ':'; s += num(t.actuation); } return s; };
+    switch (t.kind) {
+        case OcTriggerKind::Pressed:  return withAct("pressed");
+        case OcTriggerKind::Released: return withAct("released");
+        case OcTriggerKind::Hold: {
+            std::string s = withAct("hold:" + num(t.time));
+            if (t.once) s += ":once";
+            return s;
+        }
+        case OcTriggerKind::HoldRelease: return withAct("holdrelease:" + num(t.time));
+        case OcTriggerKind::Tap:
+            if (!defAct) return "tap:" + num(t.time) + ":" + num(t.actuation);
+            return sameNum(t.time, kDefaultTapMax) ? std::string("tap") : "tap:" + num(t.time);
+        case OcTriggerKind::Pulse: {
+            std::string s = "pulse:" + num(t.time);
+            if (t.limit != 0 || !defAct) { s += ':'; s += std::to_string(t.limit); }
+            if (!defAct) { s += ':'; s += num(t.actuation); }
+            if (!t.onStart) s += ":nostart";
+            return s;
+        }
+        case OcTriggerKind::Chord: return "chord:" + (t.refs.empty() ? std::string() : t.refs[0]);
+        case OcTriggerKind::Combo: {
+            std::string s = "combo:" + num(t.time) + ":";
+            for (usize i = 0; i < t.refs.size(); ++i) { if (i) s += ','; s += t.refs[i]; }
+            return s;
+        }
+        case OcTriggerKind::Down: default: return withAct("down");
+    }
+}
+
+std::string formatModifierSpec(const OcModifierSpec& m) {
+    switch (m.kind) {
+        case OcModifierKind::Scale:
+        case OcModifierKind::Curve: {
+            std::string s = m.kind == OcModifierKind::Scale ? "scale:" : "curve:";
+            s += num(m.v[0]);
+            if (m.v[1] != m.v[0] || m.v[2] != m.v[0]) { s += ':'; s += num(m.v[1]); s += ':'; s += num(m.v[2]); }
+            return s;
+        }
+        case OcModifierKind::Negate: {
+            if ((m.mask & 7) == 7) return "negate";
+            std::string s = "negate:";
+            if (m.mask & 1) s += 'x';
+            if (m.mask & 2) s += 'y';
+            if (m.mask & 4) s += 'z';
+            return s;
+        }
+        case OcModifierKind::Swizzle:
+            return std::string("swizzle:") + kSwizzleWords[m.mode >= 0 && m.mode < 6 ? m.mode : 0];
+        case OcModifierKind::Smooth:  return "smooth:" + num(m.v[0]);
+        case OcModifierKind::DeadZone: default: {
+            std::string s = "deadzone";
+            if (!sameNum(m.v[1], 1.0f)) { s += ':'; s += num(m.v[0]); s += ':'; s += num(m.v[1]); }
+            else if (!sameNum(m.v[0], 0.2f)) { s += ':'; s += num(m.v[0]); }
+            if (m.mode == 1) s += ":axial";
+            return s;
+        }
+    }
+}
 
 // Parses .ocinput text into an OcInputData. Returns false with `err` set. See this file's header
 // comment for the full grammar and OcInput.hpp for the strictness contract.
@@ -214,8 +526,8 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
         } else if (equalsCI(key, "NAME")) {
             out.name = std::string(trim(after(key)));
         } else if (equalsCI(key, "ACTION")) {
-            if (t.size() != 3) {
-                if (err) *err = "ACTION requires exactly 2 fields: ACTION name digital|axis1|axis2";
+            if (t.size() < 3 || (t.size() - 3) % 2 != 0) {
+                if (err) *err = "ACTION requires: ACTION name digital|axis1|axis2 [trigger spec] [modifier spec]";
                 return false;
             }
             OcInputAction a;
@@ -226,6 +538,14 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
             else {
                 if (err) *err = "unknown ACTION type '" + std::string(t[2]) + "' (want digital, axis1 or axis2)";
                 return false;
+            }
+            for (usize i = 3; i < t.size(); i += 2) {
+                const int r = attachSpecPair("ACTION", t[i], t[i + 1], a.triggers, a.modifiers, err);
+                if (r < 0) return false;
+                if (r == 0) {
+                    if (err) *err = "unknown ACTION attribute '" + std::string(t[i]) + "' (want trigger or modifier)";
+                    return false;
+                }
             }
             out.actions.push_back(std::move(a));
         } else if (equalsCI(key, "BIND")) {
@@ -276,8 +596,8 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
                                  "' (want key, mousex, mousey, wheel, gamepadbutton or gamepadaxis)";
                 return false;
             }
-            // Everything from `next` on is `keyword value` pairs (scale/component), in either order,
-            // each optional -- so an odd count means one of them is missing its value.
+            // Everything from `next` on is `keyword value` pairs (scale/component/trigger/modifier),
+            // in any order, each optional -- so an odd count means one of them is missing its value.
             if ((t.size() - next) % 2 != 0) {
                 if (err) *err = "BIND has a trailing keyword with no value";
                 return false;
@@ -298,8 +618,13 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
                         return false;
                     }
                 } else {
-                    if (err) *err = "unknown BIND attribute '" + std::string(kw) + "' (want scale or component)";
-                    return false;
+                    const int r = attachSpecPair("BIND", kw, val, b.triggers, b.modifiers, err);
+                    if (r < 0) return false;
+                    if (r == 0) {
+                        if (err) *err = "unknown BIND attribute '" + std::string(kw) +
+                                         "' (want scale, component, trigger or modifier)";
+                        return false;
+                    }
                 }
             }
             out.bindings.push_back(std::move(b));
@@ -340,6 +665,37 @@ bool parseOcinput(std::string_view text, OcInputData& outData, std::string* err)
             return false;
         }
     }
+
+    // CHORD/COMBO TARGETS MUST BE DECLARED ACTIONS, for the same forward-reference reason as BIND.
+    // The stored specs are canonical, so re-parsing them cannot fail. A chord on its own action could
+    // never fire (it would wait on itself), so it is refused rather than left to read None forever.
+    const auto declared = [&out](const std::string& n) {
+        for (const OcInputAction& a : out.actions) if (a.name == n) return true;
+        return false;
+    };
+    const auto checkRefs = [&](const std::vector<std::string>& specs, const std::string& owner,
+                               const char* rec) {
+        for (const std::string& text : specs) {
+            OcTriggerSpec ts;
+            if (!parseTriggerSpec(text, ts, nullptr)) continue;
+            for (const std::string& r : ts.refs) {
+                if (ts.kind == OcTriggerKind::Chord && r == owner) {
+                    if (err) *err = std::string(rec) + " on action '" + owner + "' has a chord naming itself";
+                    return false;
+                }
+                if (!declared(r)) {
+                    if (err) *err = std::string(rec) + " on action '" + owner + "' names action '" + r +
+                                     "' in a trigger, which this file never declares with ACTION";
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    for (const OcInputAction& a : out.actions)
+        if (!checkRefs(a.triggers, a.name, "ACTION")) return false;
+    for (const OcInputBinding& b : out.bindings)
+        if (!checkRefs(b.triggers, b.action, "BIND")) return false;
 
     // The single commit point. Everything above wrote into the local `out`, so a caller who ignored
     // the bool on a malformed file still has the struct they came in with (OcInputData{}, from the

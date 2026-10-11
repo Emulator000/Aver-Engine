@@ -282,6 +282,87 @@ static void stateMachineTab() {
     std::filesystem::remove(path, ec);
 }
 
+static bool hasProblem(const std::vector<std::string>& v, const char* needle) {
+    for (const std::string& s : v)
+        if (s.find(needle) != std::string::npos) return true;
+    return false;
+}
+
+static void pipelineEdits() {
+    AVER_INFO("pipeline edits");
+    anim::AnimStateMachineAsset a = asmStarterMachine();
+    check(a.pipeline.empty() && asmPipelineProblems(a).empty(), "a starter has no pipeline and no problems");
+
+    check(asmAddPipelineNode(a, anim::PipeNodeKind::Slot) == 0 && a.pipeline[0].slot == "DefaultSlot", "a slot node defaults to DefaultSlot");
+    check(asmAddPipelineNode(a, anim::PipeNodeKind::Slot) == 1 && a.pipeline[1].slot == "DefaultSlot 2", "a second default slot gets a numbered name");
+    check(asmAddPipelineNode(a, anim::PipeNodeKind::Layered) == 2, "a layered node is appended");
+    const anim::PipeNode& l = a.pipeline[2];
+    check(l.source.kind == anim::PipeSourceKind::Slot && l.source.slot == "UpperBody" && l.branches.size() == 1 && l.weight == 1.0f,
+          "and starts as an UpperBody slot through one branch");
+    check(asmAddPipelineNode(a, anim::PipeNodeKind::Layered) == 3 && a.pipeline[3].source.slot == "UpperBody 2", "a second layered node does not reuse the slot");
+    check(asmAddPipelineNode(a, anim::PipeNodeKind::Additive) == 4 && a.pipeline[4].source.kind == anim::PipeSourceKind::Clip &&
+              a.pipeline[4].ref.kind == anim::PipeRefKind::FirstFrame,
+          "an additive node starts as a clip against its first frame");
+
+    const std::vector<std::string> slots = asmPipelineSlotNames(a);
+    check(slots.size() == 4 && slots[0] == "DefaultSlot" && slots[1] == "DefaultSlot 2" && slots[2] == "UpperBody" && slots[3] == "UpperBody 2",
+          "the slot names come back in first-use order");
+
+    std::vector<std::string> problems = asmPipelineProblems(a);
+    check(problems.size() == 1 && hasProblem(problems, "node 5 has no clip"), "the only gap is the additive node's clip: " + (problems.empty() ? std::string("none") : problems[0]));
+    a.pipeline[4].source.asset = "Anims/sway.ocanim";
+    check(asmPipelineProblems(a).empty() && a.valid(), "filling it in leaves a sound pipeline");
+
+    // Moving.
+    check(asmMovePipelineNode(a, 4, -2) == 2 && a.pipeline[2].kind == anim::PipeNodeKind::Additive && a.pipeline[3].source.slot == "UpperBody",
+          "a node moves up and the others shift");
+    check(asmMovePipelineNode(a, 0, -1) == 0, "moving past the top stays put");
+    check(asmMovePipelineNode(a, 0, 99) == 4, "and past the bottom clamps");
+    check(asmMovePipelineNode(a, 9, 1) == -1, "an index out of range is refused");
+
+    // Removing.
+    check(asmRemovePipelineNode(a, 2) && a.pipeline.size() == 4, "a node can be removed");
+    check(!asmRemovePipelineNode(a, 9), "removing out of range is refused");
+
+    // Problems.
+    anim::AnimStateMachineAsset b = asmStarterMachine();
+    asmAddPipelineNode(b, anim::PipeNodeKind::Layered);
+    asmAddPipelineNode(b, anim::PipeNodeKind::Slot);
+    b.pipeline[1].slot = "UpperBody";
+    problems = asmPipelineProblems(b);
+    check(problems.size() == 1 && hasProblem(problems, "'UpperBody' is used by more than one node"), "a slot consumed twice is reported");
+    asmAddPipelineNode(b, anim::PipeNodeKind::Slot);
+    b.pipeline[2].slot = "UpperBody";
+    check(asmPipelineProblems(b).size() == 1, "and only once however many nodes share it");
+    b.pipeline[1].slot = "Other";
+    b.pipeline[2].slot = "Third";
+    b.pipeline[0].branches.clear();
+    check(hasProblem(asmPipelineProblems(b), "node 1 (layered) has no branches"), "a layered node with no branch is reported");
+    b.pipeline[0].branches = {{"", 0, 1.0f}};
+    check(hasProblem(asmPipelineProblems(b), "no bone name"), "a branch with no bone is reported");
+    b.pipeline[0].branches = {{"spine_01", 0, 1.0f}};
+    b.pipeline[0].weightParam = "nope";
+    check(hasProblem(asmPipelineProblems(b), "unknown parameter 'nope'"), "a weight parameter the machine lacks is reported");
+    b.pipeline[0].weightParam = "speed";
+    check(asmPipelineProblems(b).empty(), "and one it has is not");
+    b.pipeline[2].slot.clear();
+    check(hasProblem(asmPipelineProblems(b), "node 3 has no slot name"), "a slot node with no name is reported");
+
+    // The tab: the edits survive a save, and the file becomes version 2.
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "aver-asm-pipeline-test";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::string file = (dir / "p.ocasm").string();
+    std::string why;
+    anim::AnimStateMachineAsset c = asmStarterMachine();
+    asmAddPipelineNode(c, anim::PipeNodeKind::Slot);
+    check(anim::saveStateMachine(file, c, &why), "a machine with a pipeline saves " + why);
+    AnimStateMachineEditor ed(file);
+    check(ed.loaded() && ed.asset().pipeline.size() == 1 && ed.asset().pipeline[0].slot == "DefaultSlot", "and the tab loads the pipeline back");
+    check(ed.boneNames().empty(), "with no skeleton under the folder there are no bone names to offer");
+    std::filesystem::remove_all(dir, ec);
+}
+
 int main() {
     AVER_INFO("AnimGraphEditorTest");
     blendSpaceEdits();
@@ -290,6 +371,7 @@ int main() {
     stateMachineParams();
     geometry();
     stateMachineTab();
+    pipelineEdits();
     AVER_INFO(g_failures == 0 ? "AnimGraphEditorTest: PASS" : "AnimGraphEditorTest: FAIL");
     return g_failures == 0 ? 0 : 1;
 }

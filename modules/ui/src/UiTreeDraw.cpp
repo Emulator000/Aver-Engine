@@ -52,6 +52,7 @@ void drawBlock(UiPainter& p, const UiRect& r, const std::vector<std::string_view
 } // namespace
 
 void UiTree::draw(UiPainter& p) {
+    syncText();
     for (const UiWidgetId id : sortedRoots()) {
         const UiWidget* r = get(id);
         if (!r || !r->visible) continue;
@@ -117,14 +118,15 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
             break;
 
         case UiWidgetKind::Text: {
-            if (w.text.empty()) break;
+            const std::string& txt = shown(w.text);
+            if (txt.empty()) break;
             std::vector<std::string> wrapped;
             std::vector<std::string_view> lines;
             if (w.wrap) {
-                wrapped = uiWrapText(p, w.text, px, inner.w);
+                wrapped = uiWrapText(p, txt, px, inner.w);
                 for (const std::string& l : wrapped) lines.push_back(l);
             } else {
-                lines = splitLines(w.text);
+                lines = splitLines(txt);
             }
             drawBlock(p, inner, lines, px, w.textAlign, C(textCol), !w.wrap);
             break;
@@ -153,9 +155,12 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
         case UiWidgetKind::KeyBind: {
             fillBg(r);
             border(r);
-            std::string shown = w.text;
-            if (w.kind == UiWidgetKind::KeyBind && w.listening) shown = w.placeholder.empty() ? "Press a key..." : w.placeholder;
-            const std::vector<std::string_view> lines = splitLines(shown);
+            std::string label = shown(w.text);
+            if (w.kind == UiWidgetKind::KeyBind && w.listening) {
+                static const std::string kPrompt = "@UI:controls.pressKey=Press a key...";
+                label = shown(w.placeholder.empty() ? kPrompt : w.placeholder);
+            }
+            const std::vector<std::string_view> lines = splitLines(label);
             drawBlock(p, inner, lines, px, w.textAlign, C(w.listening ? accent : textCol), true);
             break;
         }
@@ -169,9 +174,10 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
                 const f32 pad = std::max(2.0f, box * 0.22f);
                 p.fillRect({b.x + pad, b.y + pad, box - 2 * pad, box - 2 * pad}, C(accent));
             }
-            if (!w.text.empty()) {
+            const std::string& txt = shown(w.text);
+            if (!txt.empty()) {
                 const f32 tx = b.right() + 8.0f * s;
-                p.text(tx, inner.y + (inner.h - lineH) * 0.5f + asc, w.text, px, C(textCol));
+                p.text(tx, inner.y + (inner.h - lineH) * 0.5f + asc, txt, px, C(textCol));
             }
             break;
         }
@@ -202,9 +208,9 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
         case UiWidgetKind::Choice: {
             fillBg(r);
             border(r);
-            const std::string shown = (w.selected >= 0 && static_cast<usize>(w.selected) < w.items.size())
-                                          ? w.items[static_cast<usize>(w.selected)] : std::string();
-            drawBlock(p, inner, {shown}, px, UiTextAlign::Center, C(textCol), true);
+            const std::string sel = (w.selected >= 0 && static_cast<usize>(w.selected) < w.items.size())
+                                        ? shown(w.items[static_cast<usize>(w.selected)]) : std::string();
+            drawBlock(p, inner, {sel}, px, UiTextAlign::Center, C(textCol), true);
             const f32 base = r.y + (r.h - lineH) * 0.5f + asc;
             p.text(r.x + 10.0f * s, base, "<", px, C(accent));
             p.text(r.right() - 10.0f * s - p.textWidth(">", px), base, ">", px, C(accent));
@@ -225,7 +231,7 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
                     const UiRect row{inner.x, inner.y + static_cast<f32>(i) * rh - w.scrollY, inner.w, rh};
                     if (i == w.selected) p.fillRect(row, C(uiWithOpacity(accent, 0.35f)));
                     else if (i == w.hotItem) p.fillRect(row, C(uiWithOpacity(accent, 0.15f)));
-                    p.text(row.x + 8.0f * s, row.y + (rh - lineH) * 0.5f + asc, w.items[static_cast<usize>(i)], px, C(textCol));
+                    p.text(row.x + 8.0f * s, row.y + (rh - lineH) * 0.5f + asc, shown(w.items[static_cast<usize>(i)]), px, C(textCol));
                 }
             }
             p.popClip();
@@ -243,16 +249,16 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
             else border(r);
             const UiRect area = inner;
             p.pushClip(area);
-            const std::string shown = displayText(w);
+            const std::string typed = displayText(w);
             const f32 base = area.y + (area.h - lineH) * 0.5f + asc;
-            if (shown.empty() && !w.placeholder.empty() && !w.focused) {
-                p.text(area.x, base, w.placeholder, px, C(st.placeholder ? st.placeholder : textCol));
+            if (typed.empty() && !w.placeholder.empty() && !w.focused) {
+                p.text(area.x, base, shown(w.placeholder), px, C(st.placeholder ? st.placeholder : textCol));
             } else {
                 const f32 shift = textShift(w, p);
-                p.text(area.x - shift, base, shown, px, C(textCol));
+                p.text(area.x - shift, base, typed, px, C(textCol));
                 if (w.focused && std::fmod(time_, 1.0f) < 0.55f) {
-                    const usize off = uiUtf8Offset(shown, static_cast<usize>(std::max(0, w.caret)));
-                    const f32 cx = area.x - shift + p.textWidth(std::string_view(shown).substr(0, off), px);
+                    const usize off = uiUtf8Offset(typed, static_cast<usize>(std::max(0, w.caret)));
+                    const f32 cx = area.x - shift + p.textWidth(std::string_view(typed).substr(0, off), px);
                     p.fillRect({cx, area.y + (area.h - lineH) * 0.5f, std::max(1.0f, s), lineH}, C(textCol));
                 }
             }
@@ -265,7 +271,7 @@ void UiTree::drawWidget(UiPainter& p, const UiWidget& w, f32 parentOpacity, bool
             const f32 range = w.maxValue - w.minValue;
             const f32 t = range > 0.0f ? std::clamp((w.value - w.minValue) / range, 0.0f, 1.0f) : 0.0f;
             p.fillRect({r.x, r.y, r.w * t, r.h}, C(accent));
-            const std::string label = w.showValue ? formatValue(w) : w.text;
+            const std::string label = w.showValue ? formatValue(w) : shown(w.text);
             if (!label.empty()) drawBlock(p, inner, {label}, px, UiTextAlign::Center, C(textCol), true);
             break;
         }

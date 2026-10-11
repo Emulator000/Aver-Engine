@@ -13,9 +13,13 @@
 #include "aver/scene/scene_abi.h"
 #include "aver/scene/World.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
+#include <vector>
 
 using namespace aver;
 
@@ -276,6 +280,150 @@ int main() {
               "left behind for the caller to trip over");
         check(w.find("Good1") == scene::kInvalidEntity,
               "specifically: the one that HAD been created is gone");
+    }
+
+    AVER_INFO("managed entity state rides in the save as a $State component");
+    {
+        clearWorld(w);
+
+        // A fake of the framework_state_abi.h provider: named text channels per entity. What is under
+        // test is the capture/restore plumbing in this module, so no CLR is involved.
+        struct Chan { std::string name, data; };
+        struct StateCtx {
+            scene::World* w = nullptr;
+            std::map<scene::Entity, std::vector<Chan>> channels;
+            std::vector<std::pair<scene::Entity, Chan>> delivered;
+            std::string refuse;
+            scene::Entity actor = scene::kInvalidEntity;
+            usize deliveredAtBeginPlay = 0;
+            int beginPlays = 0;
+        } ctx;
+        ctx.w = &w;
+
+        auto bind = [](save::Host& h, StateCtx* c, bool withState) {
+            h.user = c;
+            h.classOf = [](scene::Entity e, void* u) -> const char* {
+                return e == static_cast<StateCtx*>(u)->actor ? "FakeActor" : nullptr;
+            };
+            h.spawnClass = [](const char* cn, void* u) -> scene::Entity {
+                return static_cast<StateCtx*>(u)->w->create(cn ? cn : "", scene::kInvalidEntity, Transform{});
+            };
+            h.beginPlay = [](scene::Entity, void* u) {
+                auto& s = *static_cast<StateCtx*>(u);
+                s.deliveredAtBeginPlay = s.delivered.size();
+                ++s.beginPlays;
+            };
+            if (!withState) return;
+            h.stateCount = [](scene::Entity e, void* u) -> i32 {
+                auto& s = *static_cast<StateCtx*>(u);
+                auto it = s.channels.find(e);
+                return it == s.channels.end() ? 0 : static_cast<i32>(it->second.size());
+            };
+            h.stateAt = [](scene::Entity e, i32 index, char* nameBuf, i32 nameCap, char* dataBuf,
+                           i32 dataCap, void* u) -> i32 {
+                auto& s = *static_cast<StateCtx*>(u);
+                auto it = s.channels.find(e);
+                if (it == s.channels.end() || index < 0 || index >= static_cast<i32>(it->second.size())) return -1;
+                const Chan& ch = it->second[static_cast<usize>(index)];
+                std::snprintf(nameBuf, static_cast<usize>(nameCap), "%s", ch.name.c_str());
+                const i32 n = std::min<i32>(dataCap, static_cast<i32>(ch.data.size()));
+                if (n > 0) std::memcpy(dataBuf, ch.data.data(), static_cast<usize>(n));
+                return static_cast<i32>(ch.data.size());   // the FULL length, even when it did not fit
+            };
+            h.stateSet = [](scene::Entity e, const char* name, const char* data, i32 len, void* u) -> i32 {
+                auto& s = *static_cast<StateCtx*>(u);
+                if (s.refuse == name) return 0;
+                s.delivered.push_back({e, Chan{name, std::string(data, static_cast<usize>(len))}});
+                return 1;
+            };
+        };
+
+        const scene::Entity hero  = w.create("Hero");
+        const scene::Entity plain = w.create("Plain");
+        const scene::Entity big   = w.create("Big");
+        const scene::Entity huge  = w.create("Huge");
+        (void)plain;
+        ctx.actor = hero;
+        const std::string withNewlines = "GASSTATE 1\nATTR Health 73.5\r\nEND\n";   // embedded \n and \r\n
+        std::string bigData(5000, 'x');   // over the 4096-byte first read: forces the retry
+        for (usize i = 0; i < bigData.size(); ++i) bigData[i] = static_cast<char>('a' + (i % 26));
+        ctx.channels[hero] = {{"gas", withNewlines}, {"quest", "q"}};
+        ctx.channels[big]  = {{"blob", bigData}};
+        ctx.channels[huge] = {{"huge", std::string(2u * 1024u * 1024u, 'h')}};   // over the 1 MiB cap
+
+        auto stateOf = [](const fmt::OcSaveData& s, const char* name) -> const fmt::OcSaveComponent* {
+            for (const fmt::OcSaveEntity& en : s.entities)
+                if (en.name == name)
+                    for (const fmt::OcSaveComponent& sc : en.components)
+                        if (sc.type == "$State") return &sc;
+            return nullptr;
+        };
+
+        save::CaptureOptions co;
+        bind(co.host, &ctx, true);
+        fmt::OcSaveData snap;
+        std::string why;
+        check(save::capture(w, snap, co, &why), "captures with a state provider: " + why);
+
+        const fmt::OcSaveComponent* hs = stateOf(snap, "Hero");
+        check(hs && hs->fields.size() == 2, "an entity with two channels gets ONE $State component with two fields");
+        if (hs && hs->fields.size() == 2) {
+            check(hs->fields[0].name == "gas" && hs->fields[0].kind == AVER_SCENE_KIND_STRING &&
+                  hs->fields[0].s == withNewlines,
+                  "the payload, embedded newlines and all, is the field's string");
+            check(hs->fields[1].name == "quest" && hs->fields[1].s == "q", "and the second channel follows in order");
+        }
+        check(stateOf(snap, "Plain") == nullptr, "an entity with no channels gets no $State component");
+        const fmt::OcSaveComponent* bs = stateOf(snap, "Big");
+        check(bs && bs->fields.size() == 1 && bs->fields[0].s == bigData,
+              "a 5000-byte payload survives the retry at the length the provider reported");
+        check(stateOf(snap, "Huge") == nullptr, "a 2 MiB payload is skipped, never truncated");
+
+        // THROUGH THE FILE, like the plain-entity block above.
+        std::vector<u8> bytes;
+        check(fmt::writeOcSave(snap, bytes, &why), "the snapshot writes: " + why);
+        fmt::OcSaveData reloaded;
+        check(fmt::parseOcSave(bytes.data(), bytes.size(), reloaded, &why), "and parses: " + why);
+
+        ctx.channels.clear();
+        ctx.delivered.clear();
+        save::RestoreOptions ro;
+        bind(ro.host, &ctx, true);
+        check(save::restore(reloaded, w, ro, &why), "restores with a state provider: " + why);
+        check(ctx.delivered.size() == 3, "three channels were delivered");
+        bool allMatch = true, namesRight = true;
+        for (const auto& d : ctx.delivered) {
+            const std::string en = w.name(d.first);
+            if (d.second.name == "gas") allMatch = allMatch && d.second.data == withNewlines && en == "Hero";
+            else if (d.second.name == "quest") allMatch = allMatch && d.second.data == "q" && en == "Hero";
+            else if (d.second.name == "blob") allMatch = allMatch && d.second.data == bigData && en == "Big";
+            else namesRight = false;
+        }
+        check(allMatch && namesRight, "each channel reached the RESTORED entity it was saved from, byte for byte");
+        check(ctx.beginPlays == 1 && ctx.deliveredAtBeginPlay == 3,
+              "and all of it was delivered BEFORE the actor began play");
+
+        ctx.delivered.clear();
+        ctx.refuse = "quest";
+        check(save::restore(reloaded, w, ro, &why), "a provider that refuses a channel does not fail the load: " + why);
+        bool noQuest = true;
+        for (const auto& d : ctx.delivered) if (d.second.name == "quest") noQuest = false;
+        check(noQuest && ctx.delivered.size() == 2, "the refused channel was counted as dropped, the rest delivered");
+
+        // No pointers at all: nothing captured, and a save that has $State still loads.
+        save::CaptureOptions bare;
+        bind(bare.host, &ctx, false);
+        fmt::OcSaveData snap2;
+        check(save::capture(w, snap2, bare, &why), "captures with no state provider: " + why);
+        check(stateOf(snap2, "Hero") == nullptr && stateOf(snap2, "Big") == nullptr,
+              "no stateCount/stateAt: no $State component is written");
+        save::RestoreOptions plainRo;
+        bind(plainRo.host, &ctx, false);
+        ctx.delivered.clear();
+        check(save::restore(reloaded, w, plainRo, &why),
+              "a save WITH $State loads where stateSet is null (the field is dropped, not an error): " + why);
+        check(w.find("Hero") != scene::kInvalidEntity && ctx.delivered.empty(),
+              "the entity is there and nothing was delivered");
     }
 
     clearWorld(w);

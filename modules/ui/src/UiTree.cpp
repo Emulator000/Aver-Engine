@@ -239,6 +239,36 @@ void UiTree::setVisible(UiWidgetId id, bool visible) {
     if (UiWidget* w = get(id)) w->visible = visible;
 }
 
+void UiTree::setTextResolver(UiTextResolveFn fn, std::function<u32()> epoch) {
+    textResolver_ = std::move(fn);
+    textEpoch_ = std::move(epoch);
+    textEpochSeen_ = textEpoch_ ? textEpoch_() : 0;
+    shownCache_.clear();
+}
+
+void UiTree::syncText() {
+    const u32 e = textEpoch_ ? textEpoch_() : 0;
+    // Bounded: an app that keeps generating distinct "@..." strings must not grow the cache without end. Cleared only
+    // here, never mid-frame, because shown() hands out references into it.
+    if (e != textEpochSeen_ || shownCache_.size() > 4096) {
+        shownCache_.clear();
+        textEpochSeen_ = e;
+    }
+}
+
+const std::string& UiTree::shown(const std::string& raw) const {
+    if (raw.empty() || raw[0] != '@') return raw;
+    const auto hit = shownCache_.find(raw);
+    if (hit != shownCache_.end()) return hit->second;
+    std::string out;
+    UiTextRef ref;
+    if (raw.size() >= 2 && raw[1] == '@') out = raw.substr(1);
+    else if (!uiParseTextRef(raw, ref)) out = raw;
+    else if (!(textResolver_ && textResolver_(raw, out)))
+        out = ref.hasDefault ? ref.defaultText : "[" + ref.table + ":" + ref.key + "]";
+    return shownCache_.emplace(raw, std::move(out)).first->second;
+}
+
 void UiTree::setText(UiWidgetId id, std::string_view text) {
     UiWidget* w = get(id);
     if (!w) return;

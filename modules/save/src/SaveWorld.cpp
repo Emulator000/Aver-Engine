@@ -85,6 +85,52 @@ void captureGraphVars(scene::Entity e, fmt::OcSaveEntity& en, const CaptureOptio
     if (!sc.fields.empty()) en.components.push_back(std::move(sc));
 }
 
+// MANAGED ENTITY STATE, the same synthetic-component trick as the graph VARs above: one "$State"
+// component per entity with one STRING field per channel (name = channel, s = payload). Payloads are
+// binary-safe (the string table is length-prefixed). Read with a stack buffer first and one retry at
+// the size the provider reports; over the cap a channel is skipped with a warning, never truncated.
+constexpr char kStateComponentType[] = "$State";
+constexpr i32 kMaxStatePayload = 1 << 20;
+constexpr usize kMaxStateChannels = 64;
+
+void captureState(scene::Entity e, fmt::OcSaveEntity& en, const CaptureOptions& opt) {
+    if (!opt.host.stateCount || !opt.host.stateAt) return;
+    i32 n = opt.host.stateCount(e, opt.host.user);
+    if (n <= 0) return;
+    if (n > static_cast<i32>(kMaxStateChannels)) n = static_cast<i32>(kMaxStateChannels);
+
+    fmt::OcSaveComponent sc;
+    sc.type = kStateComponentType;
+    char nameBuf[64];
+    char small[4096];
+    std::vector<char> big;
+    for (i32 i = 0; i < n; ++i) {
+        nameBuf[0] = '\0';
+        i32 len = opt.host.stateAt(e, i, nameBuf, static_cast<i32>(sizeof(nameBuf)), small,
+                                   static_cast<i32>(sizeof(small)), opt.host.user);
+        if (len < 0 || nameBuf[0] == '\0') continue;
+        const char* data = small;
+        if (len > kMaxStatePayload) {
+            AVER_WARN("[Save] entity '{}' state channel '{}' is {} bytes, over the {} this format "
+                      "captures -- skipped", en.name, nameBuf, len, kMaxStatePayload);
+            continue;
+        }
+        if (len > static_cast<i32>(sizeof(small))) {
+            big.assign(static_cast<usize>(len), '\0');
+            const i32 again = opt.host.stateAt(e, i, nameBuf, static_cast<i32>(sizeof(nameBuf)),
+                                               big.data(), len, opt.host.user);
+            if (again != len) continue;   // the provider's state moved between the two reads
+            data = big.data();
+        }
+        fmt::OcSaveField f;
+        f.name = nameBuf;
+        f.kind = AVER_SCENE_KIND_STRING;
+        f.s.assign(data, static_cast<usize>(len));
+        sc.fields.push_back(std::move(f));
+    }
+    if (!sc.fields.empty()) en.components.push_back(std::move(sc));
+}
+
 // Components a snapshot deliberately never writes, each for a stated reason. A SMALL NAMED LIST
 // rather than an opt-in flag on the component, because the default must be "a component nobody
 // thought about is saved" -- the opposite default is how a feature added later silently stops
@@ -219,6 +265,7 @@ void appendSubtree(const scene::World& w, scene::Entity e, i32 parentIndex,
     const usize selfIndex = g.out.entities.size();
     captureFields(w, e, en, selfIndex, g);
     captureGraphVars(e, en, opt);
+    captureState(e, en, opt);
 
     g.out.entities.push_back(std::move(en));
     g.handles.push_back(e);
@@ -443,6 +490,17 @@ bool restore(const fmt::OcSaveData& in, scene::World& w, const RestoreOptions& o
                     }
                 } else {
                     droppedFields += static_cast<u32>(sc.fields.size());
+                }
+                continue;
+            }
+            // MANAGED STATE: delivered here for the same reason as the VARs above (after the entity
+            // exists, before beginPlay), so a system restored from a save is complete by begin play.
+            if (sc.type == kStateComponentType) {
+                for (const fmt::OcSaveField& f : sc.fields) {
+                    if (!opt.host.stateSet ||
+                        !opt.host.stateSet(e, f.name.c_str(), f.s.data(), static_cast<i32>(f.s.size()),
+                                           opt.host.user))
+                        ++droppedFields;
                 }
                 continue;
             }

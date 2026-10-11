@@ -150,6 +150,9 @@ Asset references (`clip`, `asset`) are project asset paths. At runtime a path be
 `fnv1a64(path)`, the same hash `Assets.ObjectIdOf` computes in C#, and resolves through
 `AnimSystem`'s asset-path resolver exactly like a skeleton or a clip.
 
+`.ocasm` version 2 adds an optional `pipeline` (slot, layered and additive nodes after the machine), and
+`.ocmontage` is a third asset beside these: see `docs/ANIM_MONTAGES.md`.
+
 ## 4. On an entity: `CAnimGraph`
 
 Registered at runtime like `CControlRig` (no change to built-in component ids or the scene ABI).

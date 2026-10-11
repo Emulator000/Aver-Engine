@@ -246,7 +246,56 @@ public class AverCharacter : AverPawn
         SyncFromSimulation();
 
         Vec3 v = Velocity;
-        Phys.aver_phys_character_set_velocity(_capsule, wish.X, wish.Y, v.Z);
+        float vx = wish.X, vy = wish.Y, vz = v.Z;
+        ApplyRootMotion(ref vx, ref vy, ref vz);
+        Phys.aver_phys_character_set_velocity(_capsule, vx, vy, vz);
+    }
+
+    // ROOT MOTION FOR A CAPSULE. The animation system cannot see the capsule handle, so with mode Apply
+    // it leaves CLocal alone (the External bit) and the motion collects in CRootMotion; this turns what
+    // collected since the last Drive into the velocity that covers it. It overrides input only while it
+    // moves the character, so an idle clip with no travel leaves ordinary walking to the input.
+    // Latency: the animation tick runs after Drive, so the capsule follows a frame behind (accepted).
+    private bool _rootExternal;
+
+    private void ApplyRootMotion(ref float vx, ref float vy, ref float vz)
+    {
+        bool apply = Self.RootMotion == RootMotionMode.Apply;
+        if (!apply)
+        {
+            ReleaseRootExternal();
+            return;
+        }
+        if (!_rootExternal)
+        {
+            Self.SetInt("CRootMotion.flags", Self.GetInt("CRootMotion.flags") | Entity.RootMotionExternalBit);
+            _rootExternal = true;
+        }
+        if (!Self.ConsumeRootMotion(out Vec3 m, out float yawRad, out float seconds) || seconds <= 1e-4f) return;
+
+        Vec3 d = WalkForward * m.X + WalkRight * m.Y;
+        if (MathF.Abs(d.X) > 1e-4f || MathF.Abs(d.Y) > 1e-4f)
+        {
+            vx = d.X / seconds;
+            vy = d.Y / seconds;
+        }
+        int axes = Self.GetInt("CRootMotion.axes");
+        if (axes != 0 && (axes & (int)RootMotionAxes.Z) != 0) vz = m.Z / seconds;
+
+        if (yawRad != 0f)
+        {
+            _yaw = DeltaDegrees(_yaw + yawRad * (180f / MathF.PI), 0f);
+            ApplyLookRotation();
+        }
+    }
+
+    // The accumulator is ours only while the mode is Apply: hand it back to the animation system.
+    private void ReleaseRootExternal()
+    {
+        if (!_rootExternal) return;
+        _rootExternal = false;
+        if (Self.HasComponent("CRootMotion"))
+            Self.SetInt("CRootMotion.flags", Self.GetInt("CRootMotion.flags") & ~Entity.RootMotionExternalBit);
     }
 
     // Yaw about +Z out of a quaternion, in degrees, matching Rot(yaw,0,0).ToQuat()'s own convention
@@ -342,6 +391,7 @@ public class AverCharacter : AverPawn
     internal override void OnUnbound()
     {
         if (_capsule != 0) { Phys.aver_phys_character_destroy(_capsule); _capsule = 0; }
+        ReleaseRootExternal();
         base.OnUnbound();
     }
 

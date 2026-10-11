@@ -72,6 +72,49 @@ void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out) {
     }
 }
 
+void blendPoseMasked(const Pose& a, const Pose& b, const std::vector<f32>& w, Pose& out) {
+    out.local = a.local;
+    if (a.local.size() != b.local.size() || w.size() != a.local.size()) return;
+    for (usize i = 0; i < out.local.size(); ++i) {
+        const f32 s = clamp01(w[i]);
+        if (s <= 0.0f) continue;
+        out.local[i].position = lerp3(a.local[i].position, b.local[i].position, s);
+        out.local[i].scale    = lerp3(a.local[i].scale,    b.local[i].scale,    s);
+        out.local[i].rotation = Quat::slerp(a.local[i].rotation, b.local[i].rotation, s);
+    }
+}
+
+u32 buildBranchMask(const fmt::OcSkeleton& skel, const std::vector<BranchEntry>& entries,
+                    std::vector<f32>& outWeights) {
+    const usize n = skel.bones.size();
+    outWeights.assign(n, 0.0f);
+    std::vector<i32> entryOf(n, -1);
+    u32 matched = 0;
+    for (usize e = 0; e < entries.size(); ++e) {
+        for (usize b = 0; b < n; ++b) {
+            if (skel.bones[b].name != entries[e].bone) continue;
+            entryOf[b] = static_cast<i32>(e);   // a later entry on the same bone wins
+            ++matched;
+            break;
+        }
+    }
+    for (usize b = 0; b < n; ++b) {
+        i32 cur = static_cast<i32>(b);
+        // The hop cap keeps a malformed (cyclic) parent chain from spinning; valid skeletons end at -1.
+        for (u32 k = 0; cur >= 0 && static_cast<usize>(cur) < n && k <= n; ++k) {
+            if (entryOf[static_cast<usize>(cur)] >= 0) {
+                const BranchEntry& en = entries[static_cast<usize>(entryOf[static_cast<usize>(cur)])];
+                const f32 ramp = en.depth > 0 ? std::fmin(1.0f, static_cast<f32>(k + 1) / static_cast<f32>(en.depth))
+                                              : 1.0f;
+                outWeights[b] = en.weight * ramp;
+                break;
+            }
+            cur = skel.bones[static_cast<usize>(cur)].parent;
+        }
+    }
+    return matched;
+}
+
 void addPose(const Pose& base, const Pose& additive, const Pose& additiveRest, f32 weight, Pose& out) {
     out.local = base.local;
     if (additive.local.size() != base.local.size() || additiveRest.local.size() != base.local.size())

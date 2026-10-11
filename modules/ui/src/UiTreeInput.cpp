@@ -596,6 +596,7 @@ void UiTree::processNav(const UiInputFrame& in) {
 // ---- the frame ----------------------------------------------------------------------------------------------
 
 void UiTree::update(f32 dt, const UiInputFrame& in, const UiTextMetrics& metrics) {
+    syncText();
     ++frame_;
     time_ += dt;
     metrics_ = &metrics;

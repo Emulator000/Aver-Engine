@@ -14,8 +14,13 @@
 # reading of "SHARED depends on Core only" while destroying the separation the split exists for.
 add_library(Aver.Framework SHARED
   src/FrameworkAbi.cpp
+  src/ActionEngine.cpp
   src/TimersEventsAbi.cpp
-  src/BlackboardAbi.cpp)
+  src/BlackboardAbi.cpp
+  src/AnimAbi.cpp
+  src/LocalizationAbi.cpp
+  src/DataTableAbi.cpp
+  src/EntityStateAbi.cpp)
 
 target_include_directories(Aver.Framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Framework PUBLIC cxx_std_20)

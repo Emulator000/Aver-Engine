@@ -11,6 +11,7 @@
 // synthetic window events, publishes, and reads the framework's own state back through the same C
 // ABI gameplay uses. No window, no device, no ImGui, no human.
 #include "aver/game/GameInput.hpp"
+#include "aver/game/GameTick.hpp"
 #include "aver/platform/InputState.hpp"
 #include "aver/framework/framework_abi.h"
 #include "aver/core/ErrorCodes.hpp"
@@ -221,6 +222,37 @@ int main() {
               "and neither does its raw-VK twin - the two halves of one physical key read the "
               "same, which is the disagreement this whole bridge exists to end");
         check(aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT) != 0, "the mouse button still does");
+    }
+
+    // ---- the per-frame action update is wired into the gameplay tick ----
+    //
+    // Triggers and smoothing only advance in aver_fw_action_update; the claim pinned here is that the
+    // ONE function both hosts call each frame (tickGameplayGroups) makes that call, after the input is
+    // published. A hold needs a dt, so a state of TRIGGERED proves the tick passed one.
+    {
+        AVER_INFO("tickGameplayGroups advances input triggers");
+        aver_fw_action_clear_bindings();
+        aver_fw_action_reset_state();
+        const int32_t charge = aver_fw_action_register("InputBridgeCharge", AVER_FW_ACTION_DIGITAL);
+        const int32_t id = aver_fw_action_bind_ex(charge, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_W, 1.0f, 0, 0);
+        check(id >= 0 && aver_fw_action_add_trigger(charge, id, "hold:0.2") == 1, "a hold trigger attaches");
+
+        InputState in;
+        in.newFrame(); in.onEvent(key(kVkW, true));
+        publish(in);
+        check(aver_fw_action_state(charge) == AVER_FW_TRIGGER_STATE_NONE, "before the tick the state is still None");
+        game::tickGameplayGroups(0.25f);
+        check(aver_fw_action_state(charge) == AVER_FW_TRIGGER_STATE_TRIGGERED,
+              "one 0.25 s tick with W held satisfies a 0.2 s hold: the tick ran the update");
+        check((aver_fw_action_events(charge) & AVER_FW_INPUT_EVENT_TRIGGERED) != 0, "...and raised Triggered");
+
+        in.newFrame(); in.onEvent(key(kVkW, false));
+        publish(in);
+        game::tickGameplayGroups(0.016f);
+        check(aver_fw_action_state(charge) == AVER_FW_TRIGGER_STATE_NONE, "releasing W and ticking returns it to None");
+
+        aver_fw_action_clear_bindings();
+        aver_fw_action_reset_state();
     }
 
     if (g_failures == 0) { AVER_INFO("InputBridgeTest: ALL PASS"); return 0; }

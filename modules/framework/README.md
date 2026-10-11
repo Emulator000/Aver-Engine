@@ -60,3 +60,12 @@ first, before anything depended on the answer: `dumpbin /dependents Aver.Framewo
 call into whichever scene DLL is loaded, because that is precisely the mismatch it exists to detect.
 The import library resolves by name, and every name still exists across a major bump, so nothing in
 the loader catches this on its own.
+
+## Managed entity state
+
+`framework_state_abi.h` (own version, `AVER_FW_STATE_ABI_VERSION`) is a five-entry-point seam that lets
+state living in C# ride in a save: managed code installs one provider of three functions, the composition
+roots relay `aver_fw_state_count/at/set` into `aver::save::Host`, and the save module stores each channel
+as a string field of a synthetic `$State` component. The framework holds function pointers and links
+nothing, like the timers and blackboard relays. The gameplay ability system is the first user (channel
+`gas`); see `docs/GAMEPLAY_ABILITIES.md`.

@@ -20,11 +20,24 @@
 #include "aver/ui/UiProps.hpp"
 #include "aver/ui/UiTree.hpp"
 
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace aver::editor {
+
+// Localization as the preview sees it. The host installs these (SandboxApp.cpp, over aver_fw_loc_*) so this file links
+// no framework and the headless test can pass fakes. Unset: references show their inline defaults.
+struct UiLayoutEditorLoc {
+    std::function<bool(std::string_view raw, std::string& out)> resolve;   // true = `raw` was a reference
+    std::function<u32()> epoch;                                            // changes when any text may have
+    std::function<std::vector<std::string>()> cultures;                    // the shipped cultures
+    std::function<std::string()> culture;                                  // the preview culture
+    std::function<void(const std::string&)> setCulture;                    // switches (and remembers) it
+};
+void setUiLayoutEditorLoc(UiLayoutEditorLoc loc);
 
 // ---- canvas maths, as FREE FUNCTIONS --------------------------------------------------------------
 //
@@ -128,6 +141,7 @@ public:
 private:
     void loadFromDisk();
     void rebuildPreview();
+    void applyPreviewLoc();
     ui::UiRect designRectOfParent(i32 index) const;
 
     std::string path_;
@@ -159,6 +173,8 @@ private:
     void drawCanvas();
     void drawInspector();
     bool drawProperty(const ui::UiPropDesc& d);
+    // Under a text / placeholder / items field: the resolved "Shown:" line for a reference, else a Localize button.
+    void drawLocalizeRow(const ui::UiPropDesc& d);
     void propEditBegin();
     void propEditEnd();
 

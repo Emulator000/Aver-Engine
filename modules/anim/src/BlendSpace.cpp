@@ -341,10 +341,35 @@ void BlendSpacePlayer::advance(f32 dt) {
     follow(x_, tx_, space_->axisX.smoothing);
     follow(y_, ty_, space_->axisY.smoothing);
     refresh();
+    const bool root = hasRoot_ && !weights_.empty();
+    if (root) {
+        rootT0_.assign(clips_.size(), 0.0f);
+        for (const SampleWeight& w : weights_)
+            if (w.index < clips_.size()) rootT0_[w.index] = sampleTime(w.index);
+    }
     const f32 step = dt / blendedDuration_;
     phase_ += step;
     elapsed_ += step;
     phase_ -= std::floor(phase_);
+    if (root) {
+        // Blend spaces are cyclic, so a sample whose clock wrapped travelled through the seam.
+        for (const SampleWeight& w : weights_) {
+            if (w.index >= clips_.size() || !clips_[w.index]) continue;
+            const RootDelta d = rootDeltaBetween(*clips_[w.index], rootSpec_, rootT0_[w.index], sampleTime(w.index), true);
+            addWeighted(rootAcc_, d, w.weight);
+        }
+    }
+}
+
+void BlendSpacePlayer::setRootMotion(const RootSpec* spec) {
+    hasRoot_ = spec && spec->valid();
+    if (hasRoot_) rootSpec_ = *spec;
+}
+
+RootDelta BlendSpacePlayer::consumeRootDelta() {
+    const RootDelta d = rootAcc_;
+    rootAcc_ = RootDelta{};
+    return d;
 }
 
 f32 BlendSpacePlayer::sampleTime(u32 i) const {
@@ -359,7 +384,10 @@ void BlendSpacePlayer::evaluate(const fmt::OcSkeleton& skel, Pose& out) const {
     for (const SampleWeight& w : weights_) {
         if (w.index >= clips_.size()) continue;
         restPose(skel, tmp);
-        if (clips_[w.index]) sampleAnimation(*clips_[w.index], sampleTime(w.index), tmp);
+        if (clips_[w.index]) {
+            sampleAnimation(*clips_[w.index], sampleTime(w.index), tmp);
+            if (hasRoot_ && clipHasRootMotion(*clips_[w.index], rootSpec_)) lockRoot(tmp, rootSpec_);
+        }
         if (acc <= 0.0f) { out = tmp; acc = w.weight; continue; }
         blendPose(out, tmp, w.weight / (acc + w.weight), mix);
         out = mix;

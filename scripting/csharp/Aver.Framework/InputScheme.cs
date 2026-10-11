@@ -77,6 +77,9 @@ public static class InputScheme
         }
         LastError = string.Empty;
 
+        // A new Play session starts with no trigger/modifier memory left from the last one.
+        FwIn.aver_fw_action_reset_state();
+
         string contextName = Fw.Str(Fw.aver_fw_input_scheme_context_name());
         if (string.IsNullOrEmpty(contextName))
             contextName = Path.GetFileNameWithoutExtension(path);
@@ -95,6 +98,9 @@ public static class InputScheme
                 InputValueType.Axis2D => InputAction.Axis2D(name),
                 _                     => InputAction.Digital(name),
             };
+            // Action-level config lives natively and is not idempotent, so clear before re-applying.
+            actions[i].ClearConfig();
+            ApplyActionSpecs(actions[i], ~i);
         }
 
         int bindingCount = Fw.aver_fw_input_scheme_binding_count();
@@ -119,7 +125,8 @@ public static class InputScheme
                     continue;
                 }
             }
-            ctx.AddBinding(actions[actionIndex], source, rawKey, scale, component);
+            ctx.AddBinding(actions[actionIndex], source, rawKey, scale, component,
+                           ReadSpecs(i, trigger: true), ReadSpecs(i, trigger: false));
         }
 
         EnhancedInput.AddContext(ctx, priority);
@@ -128,6 +135,28 @@ public static class InputScheme
 
         s_current = ctx;
         return true;
+    }
+
+    // The action-level specs of scheme owner `owner` (a bitwise-not action index) applied through the
+    // action's own AddTrigger/AddModifier. A rejected spec is logged by those and skipped, never fatal.
+    private static void ApplyActionSpecs(InputAction action, int owner)
+    {
+        foreach (string spec in ReadSpecs(owner, trigger: true)) action.AddTrigger(InputTrigger.FromSpec(spec));
+        foreach (string spec in ReadSpecs(owner, trigger: false)) action.AddModifier(InputModifier.FromSpec(spec));
+    }
+
+    // Canonical spec text of a binding (owner >= 0) or action (owner < 0, the bitwise not of its index).
+    private static string[] ReadSpecs(int owner, bool trigger)
+    {
+        int n = trigger ? FwIn.aver_fw_input_scheme_trigger_count(owner) : FwIn.aver_fw_input_scheme_modifier_count(owner);
+        if (n <= 0) return Array.Empty<string>();
+        var list = new List<string>(n);
+        for (int k = 0; k < n; k++)
+        {
+            IntPtr p = trigger ? FwIn.aver_fw_input_scheme_trigger_spec(owner, k) : FwIn.aver_fw_input_scheme_modifier_spec(owner, k);
+            if (p != IntPtr.Zero) list.Add(Fw.Str(p));
+        }
+        return list.ToArray();
     }
 
     /// <summary>Removes the loaded scheme context, if any. Safe to call with nothing loaded.</summary>
@@ -174,7 +203,8 @@ public static class InputScheme
 
         public SchemeContext(string name) => _name = name;
 
-        internal void AddBinding(InputAction action, InputSource source, int rawKey, float scale, int component) =>
-            Bindings.Add(new InputBinding(action, source, rawKey, scale, component));
+        internal void AddBinding(InputAction action, InputSource source, int rawKey, float scale, int component,
+                                 string[] triggers, string[] modifiers) =>
+            Bindings.Add(new InputBinding(action, source, rawKey, scale, component, triggers, modifiers));
     }
 }

@@ -1,0 +1,70 @@
+OCGAS 1
+# Fixture for GameplayDefsParserTests: one of every record.
+TAG State.Stunned                     # declare a tag (and its parent)
+
+ATTRSET Character
+  ATTR Health 100 min=0 max=MaxHealth # clamped to another attribute
+  ATTR MaxHealth 100 min=1
+  ATTR Mana 50 min=0 max=MaxMana
+  ATTR MaxMana 50 min=0
+  ATTR MoveSpeed 600
+  ATTR Strength 10
+  ATTR Damage 0 meta forward=Health scale=-1
+
+EFFECT Effect.Poison
+  POLICY duration 5
+  PERIOD 1 apply
+  MOD Health add -3
+  MOD MoveSpeed multiply 0.5
+  MOD Health add caller=Data.Damage scale=-1
+  MOD Health add from=source.Strength scale=-0.5 add=1
+  ASSET Effect.Damage.Poison
+  GRANTS State.Poisoned
+  REQUIRES State.Alive
+  BLOCKEDBY Immune.Poison
+  ONGOING_REQUIRES State.Alive
+  ONGOING_BLOCKEDBY State.Dead
+  REMOVES Effect.Poison.Weak
+  STACK target 3 refresh expire clear
+  CUE Cue.Poison
+
+EFFECT Effect.FireballCost
+  POLICY instant
+  MOD Mana add -20
+
+EFFECT Effect.FireballCooldown
+  POLICY duration 3
+  GRANTS Cooldown.Fireball
+
+EFFECT Effect.Regen
+  POLICY infinite
+  PERIOD 2
+  MOD Health add 5
+  STACK source 2 keep expire one
+
+ABILITY Ability.Fireball
+  TAGS Ability.Cast.Fire
+  CANCELS Ability.Cast.Ice
+  BLOCKS Ability.Cast
+  OWNS State.Casting
+  REQUIRES State.Alive
+  BLOCKEDBY State.Stunned
+  COST Effect.FireballCost
+  COOLDOWN Effect.FireballCooldown
+  COMMIT manual
+  DURATION 2.5
+  TRIGGER event Event.Hit
+  TRIGGER event Event.Cast
+  TRIGGER granted
+  RETRIGGER on
+  BEHAVIOUR FireballBehaviour
+
+ABILITY Ability.Plain
+
+ACTORDEFAULTS Hero
+  ATTRSET Character
+  ATTR Health 150
+  GRANT Ability.Fireball 2
+  GRANT Ability.Plain
+  APPLY Effect.Regen
+  ADDTAG State.Alive State.Hero

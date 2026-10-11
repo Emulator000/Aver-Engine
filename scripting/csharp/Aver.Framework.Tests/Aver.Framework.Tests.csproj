@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Gameplay Ability System tests. House pattern: a console project whose Main returns the failure count
+       (no xunit). Everything runs in a bare process against a fake IGasHost, so no engine DLL is needed:
+       the clock, entity liveness and the event bus are all simulated. Run with
+       dotnet run with this project. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Aver.Framework.Tests</AssemblyName>
+    <RootNamespace>Aver.Framework.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

@@ -25,6 +25,7 @@
 using System;
 using System.Collections.Generic;
 using Aver.Scene;
+using Aver.Scripting;
 
 namespace Aver.Framework;
 
@@ -111,41 +112,54 @@ public sealed class InputAction
         return a;
     }
 
-    /// <summary>Looks up a previously registered action by name, or null if none exists. Only ever
-    /// returns an action THIS C# runtime itself created via Digital/Axis1D/Axis2D: the ABI has no
-    /// getter for a handle's declared valueType (aver_fw_action_find returns the handle alone), so a
-    /// handle registered from elsewhere -- a graph node, a future C++ caller -- has no way to become a
-    /// strongly-typed InputAction here without this runtime already knowing what shape to build.</summary>
+    /// <summary>Looks up an action by name, or null if none is registered. An action some other caller
+    /// registered natively (a graph node, a C++ system) gets a wrapper built from the registry
+    /// readback (name, declared value type), so this works for every registered action.</summary>
     public static InputAction? Find(string name)
     {
         int handle = Fw.aver_fw_action_find(name);
-        return handle != 0 && s_byHandle.TryGetValue(handle, out InputAction? existing) ? existing : null;
+        return handle != 0 ? FromHandle(handle) : null;
     }
 
-    [ThreadStatic] private static float[]? s_value2Buf;
-    private static float[] Value2Buf => s_value2Buf ??= new float[2];
+    /// <summary>The wrapper for a native handle, built from the registry readback when no C# code made
+    /// one. Null for a handle that is not registered.</summary>
+    internal static InputAction? FromHandle(int handle)
+    {
+        if (handle <= 0) return null;
+        if (s_byHandle.TryGetValue(handle, out InputAction? existing)) return existing;
+        IntPtr namePtr = FwIn.aver_fw_action_name(handle);
+        if (namePtr == IntPtr.Zero) return null;
+        int type = FwIn.aver_fw_action_value_type(handle);
+        if (type < 0 || type > (int)InputValueType.Axis2D) type = (int)InputValueType.Digital;
+        var a = new InputAction(Fw.Str(namePtr), (InputValueType)type, handle);
+        s_byHandle[handle] = a;
+        return a;
+    }
 
-    /// <summary>The current accumulated value: X for a 1D axis, X and Y for 2D, X = 0 or 1 for a
-    /// button. Z is always 0 now -- aver_fw_action_value2 only carries two channels across the ABI
-    /// (framework_abi.h's own comment: "without the Z channel this ABI has no consumer for"), and
-    /// none of this file's own binding methods below ever targeted component 2 either, so nothing
-    /// that used to read a nonzero Z through this property existed to begin with.</summary>
-    public Vec3 Value2D
+    [ThreadStatic] private static float[]? s_value3Buf;
+    private static float[] Value3Buf => s_value3Buf ??= new float[3];
+
+    /// <summary>The current value after modifiers, all three channels: X for a 1D axis, X and Y for 2D,
+    /// X = 0 or 1 for a button.</summary>
+    public Vec3 Value3D
     {
         get
         {
-            float[] v = Value2Buf;
-            Fw.aver_fw_action_value2(Handle, v);
-            return new Vec3(v[0], v[1], 0f);
+            float[] v = Value3Buf;
+            FwIn.aver_fw_action_value3(Handle, v);
+            return new Vec3(v[0], v[1], v[2]);
         }
     }
+
+    /// <summary>The current value, same as <see cref="Value3D"/> (kept for existing callers).</summary>
+    public Vec3 Value2D => Value3D;
 
     /// <summary>The single-axis value.</summary>
     public float Value1D => Value2D.X;
 
-    /// <summary>True while the action is active (any channel's magnitude exceeds the 0.15 dead zone,
-    /// pinned on the native side -- not a parameter here either, for the same reason it is not one
-    /// there: a caller who needs a different threshold wants a different feature).</summary>
+    /// <summary>True while the (modified) value is actuated: any channel's magnitude exceeds 0.15,
+    /// pinned on the native side. This is raw actuation and ignores triggers; use
+    /// <see cref="IsTriggered"/> for the trigger-aware answer.</summary>
     public bool IsHeld => Fw.aver_fw_action_held(Handle) != 0;
 
     /// <summary>True on the frame the action became active.</summary>
@@ -153,6 +167,87 @@ public sealed class InputAction
 
     /// <summary>True on the frame the action stopped being active.</summary>
     public bool WasReleased => Fw.aver_fw_action_released(Handle) != 0;
+
+    // ---- triggers, modifiers and events (framework ABI minor 11) --------------------------------
+
+    /// <summary>Adds an action-level trigger, evaluated on the summed value. Lives natively and survives
+    /// context changes; not idempotent, so call <see cref="ClearConfig"/> first when re-declaring.
+    /// A spec the native parser rejects is logged and skipped. Returns this.</summary>
+    public InputAction AddTrigger(InputTrigger trigger)
+    {
+        if (FwIn.aver_fw_action_add_trigger(Handle, -1, trigger.Spec) == 0)
+            Log.Warn($"[Input] '{Name}': trigger '{trigger.Spec}' rejected: {Fw.Str(FwIn.aver_fw_action_config_error())}");
+        return this;
+    }
+
+    /// <summary>Adds an action-level modifier, applied in the order added. See <see cref="AddTrigger"/>.</summary>
+    public InputAction AddModifier(InputModifier modifier)
+    {
+        if (FwIn.aver_fw_action_add_modifier(Handle, -1, modifier.Spec) == 0)
+            Log.Warn($"[Input] '{Name}': modifier '{modifier.Spec}' rejected: {Fw.Str(FwIn.aver_fw_action_config_error())}");
+        return this;
+    }
+
+    /// <summary>Drops this action's own triggers and modifiers (not its bindings' own).</summary>
+    public InputAction ClearConfig()
+    {
+        FwIn.aver_fw_action_clear_config(Handle);
+        return this;
+    }
+
+    /// <summary>Where the action is in its trigger cycle as of the last gameplay update.</summary>
+    public TriggerState State => (TriggerState)FwIn.aver_fw_action_state(Handle);
+
+    /// <summary>What changed in the last gameplay update.</summary>
+    public ActionEvent Events => (ActionEvent)FwIn.aver_fw_action_events(Handle);
+
+    /// <summary>Seconds the action has continuously been Ongoing or Triggered.</summary>
+    public float ElapsedSeconds => FwIn.aver_fw_action_elapsed(Handle);
+
+    /// <summary>Seconds the action has continuously been Triggered.</summary>
+    public float TriggeredSeconds => FwIn.aver_fw_action_triggered_time(Handle);
+
+    /// <summary>True on the update the action left None.</summary>
+    public bool WasStarted => (Events & ActionEvent.Started) != 0;
+    /// <summary>True while a trigger is waiting (a hold timer running).</summary>
+    public bool IsOngoing => State == TriggerState.Ongoing;
+    /// <summary>True while the action's triggers are firing. The trigger-aware counterpart of <see cref="IsHeld"/>.</summary>
+    public bool IsTriggered => State == TriggerState.Triggered;
+    /// <summary>True on the update the action went from Triggered to None.</summary>
+    public bool WasCompleted => (Events & ActionEvent.Completed) != 0;
+    /// <summary>True on the update the action went from Ongoing to None without triggering.</summary>
+    public bool WasCanceled => (Events & ActionEvent.Canceled) != 0;
+
+    /// <summary>Raised on the update the action left None. Delivered by <see cref="EnhancedInput.PumpEvents"/>.</summary>
+    public event Action<InputAction>? Started;
+    /// <summary>Raised on the update the action is, or becomes, Ongoing.</summary>
+    public event Action<InputAction>? Ongoing;
+    /// <summary>Raised every update the action is Triggered.</summary>
+    public event Action<InputAction>? Triggered;
+    /// <summary>Raised when the action goes from Triggered to None.</summary>
+    public event Action<InputAction>? Completed;
+    /// <summary>Raised when the action goes from Ongoing to None without triggering.</summary>
+    public event Action<InputAction>? Canceled;
+
+    // One handler throwing must not stop the others or the frame.
+    internal void Raise(ActionEvent bit)
+    {
+        Action<InputAction>? ev = bit switch
+        {
+            ActionEvent.Started   => Started,
+            ActionEvent.Ongoing   => Ongoing,
+            ActionEvent.Triggered => Triggered,
+            ActionEvent.Completed => Completed,
+            ActionEvent.Canceled  => Canceled,
+            _                     => null,
+        };
+        if (ev is null) return;
+        foreach (Delegate d in ev.GetInvocationList())
+        {
+            try { ((Action<InputAction>)d)(this); }
+            catch (Exception ex) { Log.Error($"[Input] '{Name}' {bit} handler threw: {ex.GetType().Name}: {ex.Message}"); }
+        }
+    }
 
     public override string ToString() => $"{Name} ({ValueType})";
 }
@@ -176,11 +271,66 @@ internal readonly struct InputBinding
     public readonly float Scale;
     public readonly int   Component;  // 0=X, 1=Y
 
+    /// <summary>This binding's own trigger and modifier spec text, in the order applied; never null.
+    /// Authored data: a rebind changes the key only, so these ride along via <see cref="WithKey"/>.</summary>
+    public readonly string[] Triggers, Modifiers;
+
     /// <summary>Builds one binding. <paramref name="rawKey"/> is whatever id <paramref name="source"/>
     /// reads, already cast to int by the caller -- see <see cref="RawKey"/>'s own comment for which
     /// enum that is per source.</summary>
-    public InputBinding(InputAction action, InputSource source, int rawKey, float scale, int component)
-    { Action = action; Source = source; RawKey = rawKey; Scale = scale; Component = component; }
+    public InputBinding(InputAction action, InputSource source, int rawKey, float scale, int component,
+                        string[]? triggers = null, string[]? modifiers = null)
+    {
+        Action = action; Source = source; RawKey = rawKey; Scale = scale; Component = component;
+        Triggers = triggers ?? Array.Empty<string>();
+        Modifiers = modifiers ?? Array.Empty<string>();
+    }
+
+    /// <summary>A copy reading a different source/key, keeping scale, component, triggers and modifiers.
+    /// Every rebind goes through here so it can never drop a trigger.</summary>
+    public InputBinding WithKey(InputSource source, int rawKey) =>
+        new(Action, source, rawKey, Scale, Component, Triggers, Modifiers);
+
+    internal InputBinding WithTrigger(string spec) =>
+        new(Action, Source, RawKey, Scale, Component, Append(Triggers, spec), Modifiers);
+
+    internal InputBinding WithModifier(string spec) =>
+        new(Action, Source, RawKey, Scale, Component, Triggers, Append(Modifiers, spec));
+
+    private static string[] Append(string[] list, string item)
+    {
+        var r = new string[list.Length + 1];
+        Array.Copy(list, r, list.Length);
+        r[list.Length] = item;
+        return r;
+    }
+}
+
+/// <summary>Refers to one binding just added to a context, so a trigger or modifier can be chained on
+/// it: <c>BindKey(Jump, Key.Space).Trigger(InputTrigger.Tap())</c>. A value type holding the context
+/// and the binding's index; each call replaces the context's list entry with an updated copy.</summary>
+public readonly struct BindingHandle
+{
+    private readonly InputMappingContext? _context;
+    private readonly int _index;
+
+    internal BindingHandle(InputMappingContext context, int index) { _context = context; _index = index; }
+
+    /// <summary>Adds a trigger to this binding, evaluated on this binding's value alone.</summary>
+    public BindingHandle Trigger(InputTrigger trigger)
+    {
+        if (_context is not null && _index >= 0 && _index < _context.Bindings.Count)
+            _context.Bindings[_index] = _context.Bindings[_index].WithTrigger(trigger.Spec);
+        return this;
+    }
+
+    /// <summary>Adds a modifier to this binding, applied to its value before the action sums it.</summary>
+    public BindingHandle Modify(InputModifier modifier)
+    {
+        if (_context is not null && _index >= 0 && _index < _context.Bindings.Count)
+            _context.Bindings[_index] = _context.Bindings[_index].WithModifier(modifier.Spec);
+        return this;
+    }
 }
 
 /// <summary>A set of key-to-action mappings pushed and popped as a whole. Derive it and bind in the
@@ -191,23 +341,29 @@ public abstract class InputMappingContext
 {
     internal readonly List<InputBinding> Bindings = new();
 
+    private BindingHandle AddBinding(InputBinding b)
+    {
+        Bindings.Add(b);
+        return new BindingHandle(this, Bindings.Count - 1);
+    }
+
     /// <summary>Name shown in logs; defaults to the class name.</summary>
     public virtual string Name => GetType().Name;
 
     /// <summary>Binds a key to an action. <paramref name="scale"/> can negate it for an axis.</summary>
-    protected void BindKey(InputAction action, Key key, float scale = 1f, int component = 0) =>
-        Bindings.Add(new InputBinding(action, InputSource.Key, (int)key, scale, component));
+    protected BindingHandle BindKey(InputAction action, Key key, float scale = 1f, int component = 0) =>
+        AddBinding(new InputBinding(action, InputSource.Key, (int)key, scale, component));
 
     /// <summary>Binds a gamepad button to an action. <paramref name="scale"/> can negate it for an
     /// axis, the same as <see cref="BindKey"/>.</summary>
-    protected void BindGamepadButton(InputAction action, GamepadButton button, float scale = 1f, int component = 0) =>
-        Bindings.Add(new InputBinding(action, InputSource.GamepadButton, (int)button, scale, component));
+    protected BindingHandle BindGamepadButton(InputAction action, GamepadButton button, float scale = 1f, int component = 0) =>
+        AddBinding(new InputBinding(action, InputSource.GamepadButton, (int)button, scale, component));
 
     /// <summary>Binds a gamepad axis -- a thumbstick half or a trigger -- to an action.
     /// <paramref name="scale"/> scales the raw value, the same as <see cref="BindMouseLook"/> scales a
     /// mouse delta.</summary>
-    protected void BindGamepadAxis(InputAction action, GamepadAxis axis, float scale = 1f, int component = 0) =>
-        Bindings.Add(new InputBinding(action, InputSource.GamepadAxis, (int)axis, scale, component));
+    protected BindingHandle BindGamepadAxis(InputAction action, GamepadAxis axis, float scale = 1f, int component = 0) =>
+        AddBinding(new InputBinding(action, InputSource.GamepadAxis, (int)axis, scale, component));
 
     /// <summary>Binds two opposed keys to one -1..1 axis.</summary>
     protected void BindAxis1D(InputAction action, Key positive, Key negative, int component = 0)
@@ -234,8 +390,8 @@ public abstract class InputMappingContext
     }
 
     /// <summary>Binds the wheel to a single axis.</summary>
-    protected void BindMouseWheel(InputAction action, float scale = 1f) =>
-        Bindings.Add(new InputBinding(action, InputSource.MouseWheel, (int)Key.A, scale, 0));
+    protected BindingHandle BindMouseWheel(InputAction action, float scale = 1f) =>
+        AddBinding(new InputBinding(action, InputSource.MouseWheel, (int)Key.A, scale, 0));
 
     // The bindings a subclass's constructor set up, captured the first time any of Save/Load/
     // ResetToDefaults below touches this instance -- NOT in a constructor of this base class, because
@@ -336,7 +492,7 @@ public abstract class InputMappingContext
             // Which enum the ".Key" string is parsed against depends on the SOURCE just parsed above --
             // see TryParseRawKey's own comment. Must run after the Source parse for that reason.
             if (!TryParseRawKey(source, Settings.GetString(prefix + ".Key"), out int rawKey)) continue;
-            Bindings[i] = new InputBinding(b.Action, source, rawKey, b.Scale, b.Component);
+            Bindings[i] = b.WithKey(source, rawKey);
         }
     }
 
@@ -402,6 +558,52 @@ public static class EnhancedInput
     /// <summary>How many contexts are active.</summary>
     public static int ContextCount => s_layers.Count;
 
+    /// <summary>Delivers the events the last gameplay update raised: each <see cref="InputAction"/>'s
+    /// C# events, then (only when something listens) the bus event <c>Input.&lt;Action&gt;.&lt;Event&gt;</c>
+    /// with payload x, y, elapsed seconds, triggered seconds. Broadcast (target 0) so any graph with an
+    /// OnInputAction / OnEvent entry of that name hears it. The host calls this once a frame after the
+    /// update; public so a C#-only host or a test can drive it too.</summary>
+    public static void PumpEvents()
+    {
+        int n = FwIn.aver_fw_action_event_count();
+        for (int i = 0; i < n; i++)
+        {
+            if (FwIn.aver_fw_action_event_at(i, out int handle, out int mask) == 0) continue;
+            InputAction? action = InputAction.FromHandle(handle);
+            if (action is null) continue;
+
+            bool bus = false;
+            float[]? v3 = null;
+            for (int bit = 0; bit < s_eventBits.Length; bit++)
+            {
+                ActionEvent ev = s_eventBits[bit];
+                if ((mask & (int)ev) == 0) continue;
+                action.Raise(ev);
+
+                string busName = "Input." + action.Name + "." + ev;
+                if (Events.ListenerCount(busName) == 0) continue;
+                if (!bus)
+                {
+                    bus = true;
+                    v3 = new float[3];
+                    FwIn.aver_fw_action_value3(handle, v3);
+                }
+                try
+                {
+                    Events.Dispatch(busName, Fw.aver_fw_player_controller(0), 0,
+                        v3![0], v3[1], action.ElapsedSeconds, action.TriggeredSeconds);
+                }
+                catch (Exception ex) { Log.Error($"[Input] dispatch of '{busName}' threw: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+    }
+
+    // Raise order within one update.
+    private static readonly ActionEvent[] s_eventBits =
+    {
+        ActionEvent.Started, ActionEvent.Ongoing, ActionEvent.Triggered, ActionEvent.Completed, ActionEvent.Canceled,
+    };
+
     // THE ABI HAS NO CONTEXT HANDLE (framework_abi.h's own NAMED ACTIONS section says so explicitly)
     // and consequently no partial "remove just this context" call either -- aver_fw_action_clear_
     // bindings drops every binding at once. So every AddContext/RemoveContext here clears the WHOLE
@@ -419,7 +621,14 @@ public static class EnhancedInput
             for (int bi = 0; bi < bindings.Count; bi++)
             {
                 InputBinding b = bindings[bi];
-                Fw.aver_fw_action_bind(b.Action.Handle, (int)b.Source, b.RawKey, b.Scale, b.Component, layer.Priority);
+                int id = FwIn.aver_fw_action_bind_ex(b.Action.Handle, (int)b.Source, b.RawKey, b.Scale, b.Component, layer.Priority);
+                if (id < 0) continue;
+                foreach (string spec in b.Triggers)
+                    if (FwIn.aver_fw_action_add_trigger(b.Action.Handle, id, spec) == 0)
+                        Log.Warn($"[Input] '{b.Action.Name}': trigger '{spec}' rejected: {Fw.Str(FwIn.aver_fw_action_config_error())}");
+                foreach (string spec in b.Modifiers)
+                    if (FwIn.aver_fw_action_add_modifier(b.Action.Handle, id, spec) == 0)
+                        Log.Warn($"[Input] '{b.Action.Name}': modifier '{spec}' rejected: {Fw.Str(FwIn.aver_fw_action_config_error())}");
             }
         }
     }
@@ -512,7 +721,7 @@ public static class EnhancedInput
 
                 if (!IsRebindableSource(b.Source) || !IsDefinedRawKey(b.Source, rawKey)) return false;
 
-                bindings[bi] = new InputBinding(b.Action, b.Source, rawKey, b.Scale, b.Component);
+                bindings[bi] = b.WithKey(b.Source, rawKey);
                 Rebind();
                 return true;
             }

@@ -61,3 +61,12 @@ set_target_properties(ObjectAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(AnimGraphSystemTest src/AnimGraphSystemTest.cpp)
 target_link_libraries(AnimGraphSystemTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AnimGraphSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# MontageSystemTest / RootMotionSystemTest -- montages and root motion on entities (docs/ANIM_MONTAGES.md):
+# slots, supersession, pipeline slot nodes, notify delivery, the entity-death guarantees, the provider
+# the framework relays to, and each root motion mode and source. No scripting host, no GPU.
+foreach(t MontageSystem RootMotionSystem)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

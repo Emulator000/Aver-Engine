@@ -4,6 +4,12 @@
 #include "stb_image_write.h"
 #undef STB_IMAGE_WRITE_IMPLEMENTATION
 #include "SandboxApp.hpp"
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_anim_abi.h"   // aver_fw_set_anim_provider (montages)
+#endif
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_loc_abi.h"    // the UI layout editor's culture preview
+#endif
 #if AVER_MODULE_RAGDOLL
 #  include "aver/ragdoll/RagdollSystem.hpp"
 #endif
@@ -134,6 +140,8 @@ void SandboxApp::setWindowed(bool w) { windowedOverride_ = w; }
 void SandboxApp::setFullscreen(bool f) { fullscreenOverride_ = f; }
 
 void SandboxApp::setBackend(std::string b) { backendName_ = std::move(b); }
+
+void SandboxApp::setCultureOverride(std::string tag) { cultureOverride_ = std::move(tag); }
 
 // --frame-budget <ms>: target frame time, and run the controller even in a bounded capture.
 void SandboxApp::setFrameBudget(f32 ms) { frameBudgetMs_ = ms; frameBudgetForced_ = ms > 0.0f; }
@@ -443,6 +451,7 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeUiLayoutEditor);            // .ocui
     assetEditors_.registerFactory(&editor::makeBlendSpaceEditor);          // .ocblend
     assetEditors_.registerFactory(&editor::makeAnimStateMachineEditor);    // .ocasm
+    assetEditors_.registerFactory(&editor::makeMontageEditor);             // .ocmontage
     // Append SoundEditor (claims .ocsnd).
     assetEditors_.registerFactory(&editor::makeSoundEditor);
 #if AVER_MODULE_PARTICLES
@@ -451,6 +460,9 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);  // .ocfoliage
     assetEditors_.registerFactory(&editor::makeInstanceSetEditor);  // .ocinst
     assetEditors_.registerFactory(&editor::makeInputSchemeEditor);  // .ocinput
+    // The string-table editor first: it claims the CSVs under Localization/<culture>/ that the data table editor declines.
+    assetEditors_.registerFactory(&editor::makeStringTableEditor);  // .ocstrings, Localization/<culture>/*.csv
+    assetEditors_.registerFactory(&editor::makeDataTableEditor);    // .csv, table-shaped .json
     assetEditors_.registerFactory(&editor::makeTextureEditor);  // image formats, read-only
     {
         // Hooks to query/set project's Input Scheme.
@@ -465,6 +477,42 @@ void SandboxApp::onInit(Engine& e)  {
             return true;
         };
         editor::setInputSchemeEditorHooks(std::move(hooks));
+    }
+#if AVER_MODULE_FRAMEWORK
+    {
+        // The UI layout editor's preview resolves text references through the framework's string store.
+        editor::UiLayoutEditorLoc loc;
+        loc.resolve = [](std::string_view raw, std::string& out) {
+            const std::string ref(raw);
+            char shortBuf[512];
+            int32_t n = aver_fw_loc_resolve(ref.c_str(), shortBuf, static_cast<int32_t>(sizeof shortBuf));
+            if (n < 0) return false;
+            if (n < static_cast<int32_t>(sizeof shortBuf)) { out.assign(shortBuf, static_cast<usize>(n)); return true; }
+            std::string big(static_cast<usize>(n) + 1, '\0');
+            n = aver_fw_loc_resolve(ref.c_str(), big.data(), static_cast<int32_t>(big.size()));
+            out.assign(big.data(), static_cast<usize>(std::max<int32_t>(n, 0)));
+            return n >= 0;
+        };
+        loc.epoch = [] { return static_cast<u32>(aver_fw_loc_epoch()); };
+        loc.cultures = [] {
+            std::vector<std::string> v;
+            for (int32_t i = 0; i < aver_fw_loc_culture_count(); ++i) v.emplace_back(aver_fw_loc_culture_at(i));
+            return v;
+        };
+        loc.culture = [] { return std::string(aver_fw_loc_culture()); };
+        loc.setCulture = [](const std::string& tag) {
+            editor::setPrefString("loc.previewCulture", tag);
+            editor::flushEditorPrefs();
+            aver_fw_loc_set_culture(tag.c_str());
+        };
+        editor::setUiLayoutEditorLoc(std::move(loc));
+    }
+#endif
+    {
+        editor::StringTableEditorHooks hooks;
+        hooks.defaultCulture = [this] { return project_.localeDefault; };
+        hooks.openAsset = [this](const std::string& abs) { assetEditors_.open(abs); };
+        editor::setStringTableEditorHooks(std::move(hooks));
     }
 #if AVER_MODULE_SCENE
     {
@@ -553,6 +601,10 @@ void SandboxApp::onInit(Engine& e)  {
                                      &ragdoll::ragdollSystem());
 #endif
     }
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Montages: the framework relays PlayMontage and friends to AnimSystem's montage players.
+    aver_fw_set_anim_provider(&anim::montageProvider, &anim::animSystem());
 #endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();

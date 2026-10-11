@@ -55,8 +55,12 @@ extern "C" {
  * 9: aver_fw_class_count (enumerate declared classes) and aver_fw_begin_play_with_pawn (a level's
  *    pawn override) -- for World Settings' game mode / default pawn pickers.
  * 10: RAGDOLLS, RELAYED section (aver_fw_set_ragdoll_provider, aver_fw_ragdoll_start/stop/mode/
- *    set_strength/add_impulse). */
-#define AVER_FW_ABI_VERSION_MINOR 10
+ *    set_strength/add_impulse).
+ * 11: INPUT TRIGGERS AND MODIFIERS (aver_fw_action_bind_ex/add_trigger/add_modifier/config_error/
+ *    clear_config/update/reset_state/state/events/elapsed/triggered_time/value3/count/name/value_type/
+ *    event_count/event_at; aver_fw_input_scheme_trigger_count/trigger_spec/modifier_count/
+ *    modifier_spec) -- see NAMED ACTIONS and INPUT SCHEME below. */
+#define AVER_FW_ABI_VERSION_MINOR 11
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -473,6 +477,65 @@ AVER_FW_ABI int32_t aver_fw_action_held(int32_t action);
 AVER_FW_ABI int32_t aver_fw_action_pressed(int32_t action);
 AVER_FW_ABI int32_t aver_fw_action_released(int32_t action);
 
+/* ---- TRIGGERS AND MODIFIERS (minor 11) --------------------------------------------------------------
+ *
+ * Opt-in on top of the layer above: an action with no triggers and no modifiers answers
+ * held/pressed/released/value2 exactly as before. A trigger decides WHEN an action fires (hold, tap,
+ * pulse, chord, combo...), a modifier reshapes its VALUE (dead zone, scale, negate, swizzle, smooth,
+ * curve). Both are written as one whitespace-free spec token (grammar: OcInput.cpp's header comment,
+ * parsed by aver::fmt::parseTriggerSpec/parseModifierSpec), attach to a binding or to the action
+ * itself, and apply in the order added. Time-based triggers and `smooth` need a dt and per-action
+ * memory, so they advance in aver_fw_action_update, which the host calls ONCE per gameplay frame
+ * after the input is published; the plain queries above stay on demand. Without update calls the
+ * state/events/elapsed/triggered_time reads below stay None/0. */
+#define AVER_FW_TRIGGER_STATE_NONE      0
+#define AVER_FW_TRIGGER_STATE_ONGOING   1
+#define AVER_FW_TRIGGER_STATE_TRIGGERED 2
+/* Event mask from the state transition of the last update (None->Ongoing: STARTED|ONGOING, Ongoing->
+ * Triggered: TRIGGERED, Triggered->None: COMPLETED, Ongoing->None: CANCELED, ...). */
+#define AVER_FW_INPUT_EVENT_NONE        0
+#define AVER_FW_INPUT_EVENT_STARTED     1
+#define AVER_FW_INPUT_EVENT_ONGOING     2
+#define AVER_FW_INPUT_EVENT_TRIGGERED   4
+#define AVER_FW_INPUT_EVENT_COMPLETED   8
+#define AVER_FW_INPUT_EVENT_CANCELED   16
+
+/* Like aver_fw_action_bind but returns the binding id (index into the binding table; valid until the
+ * next aver_fw_action_clear_bindings), or -1 when rejected. aver_fw_action_bind is a thin call to it. */
+AVER_FW_ABI int32_t aver_fw_action_bind_ex(int32_t action, int32_t source, int32_t key, float scale,
+                                           int32_t component, int32_t contextPriority);
+/* Appends a trigger/modifier spec to a binding (binding >= 0, which must belong to `action`) or to the
+ * action itself (binding == -1). 1 on success; 0 on a bad handle, a binding of another action, or a
+ * spec the parser rejects (aver_fw_action_config_error says why). Modifiers apply in call order. A
+ * chord/combo may name an action that is not registered yet: it resolves by name on the first update
+ * that finds it and reads None until then. A chord naming its own action is rejected. */
+AVER_FW_ABI int32_t     aver_fw_action_add_trigger (int32_t action, int32_t binding, const char* spec);
+AVER_FW_ABI int32_t     aver_fw_action_add_modifier(int32_t action, int32_t binding, const char* spec);
+/* The last add_trigger/add_modifier failure, "" after a success. */
+AVER_FW_ABI const char* aver_fw_action_config_error(void);
+/* Drops the action-level triggers and modifiers (not the bindings, not their binding-level config). */
+AVER_FW_ABI void        aver_fw_action_clear_config(int32_t action);
+/* Advances every action once. `dt` is clamped to [0, 0.25] s so a hitch is not read as a long hold. */
+AVER_FW_ABI void        aver_fw_action_update(float dt);
+/* Zeroes all trigger/modifier memory, states, elapsed times and the event list. Config survives. */
+AVER_FW_ABI void        aver_fw_action_reset_state(void);
+/* Results of the last aver_fw_action_update. 0 / 0.0f for an invalid handle. */
+AVER_FW_ABI int32_t     aver_fw_action_state(int32_t action);          /* AVER_FW_TRIGGER_STATE_* */
+AVER_FW_ABI int32_t     aver_fw_action_events(int32_t action);         /* AVER_FW_INPUT_EVENT_* mask */
+AVER_FW_ABI float       aver_fw_action_elapsed(int32_t action);        /* seconds the state has been != None */
+AVER_FW_ABI float       aver_fw_action_triggered_time(int32_t action); /* seconds it has been Triggered */
+/* {X, Y, Z} of the modified value (aver_fw_action_value2 keeps returning X, Y only). Zeros for an
+ * invalid handle. */
+AVER_FW_ABI void        aver_fw_action_value3(int32_t action, float* out3);
+/* Registry readback. Handles run 1..count. */
+AVER_FW_ABI int32_t     aver_fw_action_count(void);
+AVER_FW_ABI const char* aver_fw_action_name(int32_t action);        /* nullptr for an invalid handle */
+AVER_FW_ABI int32_t     aver_fw_action_value_type(int32_t action);  /* AVER_FW_ACTION_DIGITAL..; -1 invalid */
+/* The actions that raised any event in the last update, for the managed pump. event_at returns 1 and
+ * fills the outputs, or 0 for an index out of range. */
+AVER_FW_ABI int32_t     aver_fw_action_event_count(void);
+AVER_FW_ABI int32_t     aver_fw_action_event_at(int32_t index, int32_t* outAction, int32_t* outMask);
+
 /* ---- RAW WIN32 VK, ADDITIVE TWIN TO AVER_FW_KEY_* -------------------------------------------------
  *
  * frameworkKeyFromVk (InputKeys.hpp) maps Win32 VKs onto AVER_FW_KEY_* above; most of the VK range
@@ -674,6 +737,13 @@ AVER_FW_ABI int32_t     aver_fw_input_scheme_binding(int32_t index, int32_t* out
  * Meaningful, and non-empty, for AVER_FW_ACTION_SRC_KEY/GAMEPAD_BUTTON/GAMEPAD_AXIS; "" for the
  * three mouse sources, matching OcInput.hpp's own convention. nullptr out of range. */
 AVER_FW_ABI const char* aver_fw_input_scheme_binding_key(int32_t index);
+/* Trigger/modifier specs (minor 11), canonical text. `owner` >= 0 is a binding index; `owner` < 0 is
+ * the action whose index is (-1 - owner), i.e. the bitwise not. 0 / nullptr out of range. Strings
+ * stay valid until the next aver_fw_input_scheme_load. */
+AVER_FW_ABI int32_t     aver_fw_input_scheme_trigger_count (int32_t owner);
+AVER_FW_ABI const char* aver_fw_input_scheme_trigger_spec  (int32_t owner, int32_t index);
+AVER_FW_ABI int32_t     aver_fw_input_scheme_modifier_count(int32_t owner);
+AVER_FW_ABI const char* aver_fw_input_scheme_modifier_spec (int32_t owner, int32_t index);
 
 #ifdef __cplusplus
 } /* extern "C" */

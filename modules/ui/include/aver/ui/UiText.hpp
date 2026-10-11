@@ -51,6 +51,12 @@ usize uiUtf8Offset(std::string_view s, usize index);
 // Appends a code point as UTF-8.
 void uiAppendUtf8(std::string& out, u32 cp);
 
+// A localization text reference "@Table:Key[=Default]" (Table [A-Za-z0-9_]+, Key [A-Za-z0-9_.-]+, default = the rest
+// after the first '='). Same grammar as aver::fmt::parseLocRef; Aver.UI is Core-only so it carries its own copy.
+// False for anything else, including the "@@..." escape.
+struct UiTextRef { std::string table, key, defaultText; bool hasDefault = false; };
+bool uiParseTextRef(std::string_view s, UiTextRef& out);
+
 // What the tree draws with.
 class UiPainter : public UiTextMetrics {
 public:

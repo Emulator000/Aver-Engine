@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Data-table binder and localization formatting tests. House pattern: a console project whose Main returns the
+       failure count (no xunit). The binder and LocFormat are pure, so no engine DLL is needed; the few Loc calls
+       made here fall back to inline defaults when the native library is absent. Not wired into ctest (like
+       Aver.Graph.Tests); run with `dotnet run -project scripting/csharp/Aver.DataLoc.Tests`. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Aver.DataLoc.Tests</AssemblyName>
+    <RootNamespace>Aver.DataLoc.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
+  </ItemGroup>
+
+</Project>

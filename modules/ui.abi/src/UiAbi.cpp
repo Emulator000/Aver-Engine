@@ -3,6 +3,7 @@
 #include "UiAbiState.hpp"
 #include "aver/ui/UiDrawList.hpp"
 #include "aver/ui/UiFont.hpp"
+#include "aver/ui/UiText.hpp"
 
 namespace {
 
@@ -19,6 +20,9 @@ const aver::ui::UiFont* g_font = nullptr;
 float    g_pointer[2] = {0.0f, 0.0f};
 uint32_t g_buttons    = 0;
 
+// The localization resolver the host installed (framework aver_fw_loc_resolve); null = text drawn as given.
+aver::ui::abi::TextResolveFn g_resolve = nullptr;
+
 // The font only if it is worth drawing with. `valid()` is glyphs plus a line height, so a font that
 // parsed but carries nothing reads as absent rather than as a font that draws nothing.
 const aver::ui::UiFont* usableFont() {
@@ -34,6 +38,29 @@ const UiFont* font() { return usableFont(); }
 void viewport(float out[4]) { for (int i = 0; i < 4; ++i) out[i] = g_viewport[i]; }
 void pointer(float& x, float& y, std::uint32_t& buttons) { x = g_pointer[0]; y = g_pointer[1]; buttons = g_buttons; }
 bool frameStarted() { return g_started; }
+
+void setTextResolver(TextResolveFn fn) { g_resolve = fn; }
+
+bool resolveUiText(const char* raw, std::string& out) {
+    if (!raw || raw[0] != '@') return false;
+    if (raw[1] == '@') { out = raw + 1; return true; }   // "@@x" shows "@x"
+    UiTextRef ref;
+    if (!uiParseTextRef(raw, ref)) return false;
+    // No resolver (or it declined): the inline default, as UiTree::shown does.
+    const auto fallback = [&] { out = ref.hasDefault ? ref.defaultText : "[" + ref.table + ":" + ref.key + "]"; return true; };
+    if (!g_resolve) return fallback();
+    std::string buf(256, '\0');
+    std::int32_t n = g_resolve(raw, buf.data(), static_cast<std::int32_t>(buf.size()));
+    if (n < 0) return fallback();
+    if (static_cast<std::size_t>(n) >= buf.size()) {
+        buf.assign(static_cast<std::size_t>(n) + 1, '\0');
+        n = g_resolve(raw, buf.data(), static_cast<std::int32_t>(buf.size()));
+        if (n < 0 || static_cast<std::size_t>(n) >= buf.size()) return fallback();
+    }
+    buf.resize(static_cast<std::size_t>(n));
+    out = std::move(buf);
+    return true;
+}
 
 } // namespace aver::ui::abi
 
@@ -103,6 +130,8 @@ void aver_ui_font_metrics(float* outAscentDescentLine) {
 float aver_ui_text(float x, float y, const char* utf8, uint32_t rgba) {
     const aver::ui::UiFont* f = usableFont();
     if (!f || !utf8) return x;
+    std::string resolved;
+    if (aver::ui::abi::resolveUiText(utf8, resolved)) return g_list.addText(x, y, resolved.c_str(), *f, rgba);
     return g_list.addText(x, y, utf8, *f, rgba);
 }
 
@@ -110,6 +139,8 @@ float aver_ui_text(float x, float y, const char* utf8, uint32_t rgba) {
 float aver_ui_text_width(const char* utf8) {
     const aver::ui::UiFont* f = usableFont();
     if (!f || !utf8) return 0.0f;
+    std::string resolved;
+    if (aver::ui::abi::resolveUiText(utf8, resolved)) return aver::ui::uiTextWidth(*f, resolved.c_str());
     return aver::ui::uiTextWidth(*f, utf8);
 }
 

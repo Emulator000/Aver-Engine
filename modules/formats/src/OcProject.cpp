@@ -78,6 +78,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.inputScheme = std::string(t[1]);
         } else if (equalsCI(key, "GAME.MODE")) {
             if (t.size() > 1) out.gameMode = std::string(t[1]);
+        } else if (equalsCI(key, "LOCALE.DEFAULT")) {
+            if (t.size() > 1) out.localeDefault = std::string(t[1]);
         } else if (equalsCI(key, "AUTHOR")) {
             out.author = std::string(restOfLine(line, key));
         } else if (equalsCI(key, "RENDER.GI")) {
@@ -297,7 +299,7 @@ bool isOwnedKey(std::string_view line) {
     const std::string_view l = trim(line);
     if (l.empty() || l[0] == '#') return false;
     static const char* kOwned[] = {
-        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR", "DRONE.GRAPH", "INPUT.SCHEME", "GAME.MODE",
+        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR", "DRONE.GRAPH", "INPUT.SCHEME", "GAME.MODE", "LOCALE.DEFAULT",
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
@@ -346,6 +348,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     // Owned key: stripped if present, replaced with this if not empty.
     if (!d.inputScheme.empty())      { owned += "INPUT.SCHEME "; owned += d.inputScheme; owned += '\n'; }
     if (!d.gameMode.empty())         { owned += "GAME.MODE "; owned += d.gameMode; owned += '\n'; }
+    if (!d.localeDefault.empty())    { owned += "LOCALE.DEFAULT "; owned += d.localeDefault; owned += '\n'; }
     appendKey(owned, "RENDER.GI",          d.giQuality);
     appendKey(owned, "RENDER.RAYTRACING",  d.rayTracing);
     appendKey(owned, "RENDER.PATHTRACING", d.pathTracing);

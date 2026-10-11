@@ -27,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace aver::editor {
 
@@ -107,12 +108,42 @@ public:
     void setBindingScale(usize index, f32 scale);
     void setBindingComponent(usize index, i32 component);
 
+    // ---- triggers and modifiers ----
+    // A spec is one whitespace-free token (fmt::parseTriggerSpec / parseModifierSpec; grammar in
+    // OcInput.cpp). It attaches to an action (evaluated on the summed value) or to one binding, in
+    // order. Every setter validates FIRST and only then pushes undo, so a rejected spec leaves the
+    // data, the dirty flag and the undo history exactly as they were and sets specError(). Stored as
+    // the CANONICAL text (formatTriggerSpec), never the typed text. A chord/combo must name a
+    // declared action (a file naming a missing one would not reload) and a chord may not name the
+    // action it sits on.
+    enum class SpecKind { Trigger, Modifier };
+    struct SpecOwner {
+        bool  isAction = true;   // true: `index` is an action; false: a binding
+        usize index = 0;
+    };
+    bool addSpec(SpecOwner owner, SpecKind kind, std::string spec);
+    bool setSpec(SpecOwner owner, SpecKind kind, usize i, std::string spec);
+    void removeSpec(SpecOwner owner, SpecKind kind, usize i);
+    // Moves entry `i` by `delta` places (modifier order matters); clamped, a no-op at either end.
+    void moveSpec(SpecOwner owner, SpecKind kind, usize i, int delta);
+    // Why the last add/setSpec (or a refused rename) failed; empty after a success.
+    const std::string& specError() const { return specError_; }
+
     // ---- context ----
     void setContextName(std::string name);
     void setContextPriority(i32 priority);
 
 private:
     void loadFromDisk();
+    // The list an owner/kind pair addresses, or nullptr for an out-of-range owner.
+    std::vector<std::string>* specList(SpecOwner owner, SpecKind kind);
+    // The action a trigger on `owner` is attached to (for the own-chord rule).
+    std::string ownerActionName(SpecOwner owner) const;
+    // Validates `spec` for `owner`; fills `canonical` on success, else sets specError_.
+    bool validateSpec(SpecOwner owner, SpecKind kind, const std::string& spec, std::string& canonical);
+    // Rewrites every chord/combo reference to `oldName` as `newName`, or drops the trigger that holds
+    // it when `newName` is empty (an action was removed).
+    void rewriteRefs(const std::string& oldName, const std::string& newName);
 
     std::string path_;
     fmt::OcInputData data_;
@@ -124,6 +155,7 @@ private:
     bool loaded_ = false;
     std::string loadError_;
     bool dirty_ = false;
+    std::string specError_;
 
     // Through the shared SnapshotUndo<State> template (SnapshotUndo.hpp). State IS the whole record,
     // matching FoliageTypeEditor/BtEditor/SoundEditor's own shape.
@@ -133,6 +165,11 @@ private:
     void drawContext();
     void drawActions();
     void drawBindings();
+    // The trigger/modifier entries of one owner as a tree node: a kind combo plus that kind's fields
+    // per entry, with add / remove / move buttons. The spec text is shown as a tooltip.
+    void drawSpecs(SpecOwner owner);
+    // Set once a drag on a spec field has pushed its undo step, so the rest of that drag does not.
+    bool specDragUndone_ = false;
     // The "this is not the project's Input Scheme" line and its "Use as Project Input Scheme"
     // button, through InputSchemeEditorHooks above. A no-op when no hooks are installed or no
     // project is open.

@@ -479,6 +479,174 @@ static void testOcProjectInputScheme() {
           "...without disturbing DRONE.GRAPH or anything else");
 }
 
+// Trigger and modifier specs: every kind's exact fields, canonical text both ways, named rejections,
+// attachment to ACTION/BIND in either order, the declared-action post-pass, and merge-write fidelity.
+static void testTriggerModifierGrammar() {
+    AVER_INFO("=== .ocinput: trigger and modifier specs ===");
+    using namespace fmt;
+    std::string err;
+
+    OcTriggerSpec t;
+    check(parseTriggerSpec("hold:0.5:0.3:once", t, &err) && t.kind == OcTriggerKind::Hold &&
+          near(t.time, 0.5f) && near(t.actuation, 0.3f) && t.once, "hold:0.5:0.3:once");
+    check(parseTriggerSpec("HOLD:once:0.5", t, &err) && near(t.time, 0.5f) && t.once &&
+          near(t.actuation, 0.15f), "flags may sit anywhere and keywords are case-insensitive");
+    check(parseTriggerSpec("pulse:0.25:3:nostart", t, &err) && t.kind == OcTriggerKind::Pulse &&
+          near(t.time, 0.25f) && t.limit == 3 && !t.onStart, "pulse:0.25:3:nostart");
+    check(parseTriggerSpec("pulse:0.12", t, &err) && t.limit == 0 && t.onStart, "pulse defaults: unlimited, onstart");
+    check(parseTriggerSpec("tap", t, &err) && near(t.time, 0.2f), "tap defaults to max 0.2");
+    check(parseTriggerSpec("holdrelease:1:0.4", t, &err) && t.kind == OcTriggerKind::HoldRelease &&
+          near(t.time, 1.0f) && near(t.actuation, 0.4f), "holdrelease:1:0.4");
+    check(parseTriggerSpec("chord:Mod", t, &err) && t.kind == OcTriggerKind::Chord && t.refs.size() == 1 &&
+          t.refs[0] == "Mod", "chord keeps the action name's case");
+    check(parseTriggerSpec("combo:0.4:Fire,Fire,Jump", t, &err) && t.kind == OcTriggerKind::Combo &&
+          near(t.time, 0.4f) && t.refs.size() == 3 && t.refs[2] == "Jump", "combo:0.4:Fire,Fire,Jump");
+    check(parseTriggerSpec("released", t, &err) && t.kind == OcTriggerKind::Released, "released");
+
+    OcModifierSpec m;
+    check(parseModifierSpec("deadzone:0.1:0.9:axial", m, &err) && m.kind == OcModifierKind::DeadZone &&
+          near(m.v[0], 0.1f) && near(m.v[1], 0.9f) && m.mode == 1, "deadzone:0.1:0.9:axial");
+    check(parseModifierSpec("deadzone", m, &err) && near(m.v[0], 0.2f) && near(m.v[1], 1.0f) && m.mode == 0,
+          "deadzone defaults: 0.2, 1, radial");
+    check(parseModifierSpec("negate:xz", m, &err) && m.kind == OcModifierKind::Negate && m.mask == 5, "negate:xz is mask 5");
+    check(parseModifierSpec("negate", m, &err) && m.mask == 7, "bare negate flips all three channels");
+    check(parseModifierSpec("swizzle:zyx", m, &err) && m.kind == OcModifierKind::Swizzle && m.mode == 2, "swizzle:zyx is mode 2");
+    check(parseModifierSpec("scale:2", m, &err) && near(m.v[0], 2) && near(m.v[1], 2) && near(m.v[2], 2),
+          "a single scale value is uniform");
+    check(parseModifierSpec("scale:2:3", m, &err) && near(m.v[1], 3) && near(m.v[2], 1), "scale:x:y takes z = 1");
+    check(parseModifierSpec("curve:2", m, &err) && m.kind == OcModifierKind::Curve && near(m.v[2], 2),
+          "a single curve exponent is uniform");
+    check(parseModifierSpec("smooth:0.04", m, &err) && m.kind == OcModifierKind::Smooth && near(m.v[0], 0.04f), "smooth:0.04");
+
+    // parse(format(x)) == x and format(parse(s)) == s over canonical text.
+    const char* const kTriggers[] = {
+        "down", "down:0.3", "pressed", "pressed:0.5", "released", "released:0.25", "hold:0.5", "hold:0.5:0.3",
+        "hold:0.5:once", "hold:0.5:0.3:once", "hold:0", "holdrelease:1", "holdrelease:1:0.4", "tap", "tap:0.18",
+        "tap:0.18:0.3", "pulse:0.12", "pulse:0.12:3", "pulse:0.25:3:nostart", "pulse:0.12:0:0.3",
+        "pulse:0.12:nostart", "chord:Mod", "combo:0.4:Fire,Fire,Jump"};
+    const char* const kModifiers[] = {
+        "deadzone", "deadzone:0.1", "deadzone:0.1:0.9", "deadzone:0.1:0.9:axial", "deadzone:axial", "scale:2",
+        "scale:1:2:3", "negate", "negate:y", "negate:xz", "swizzle:yxz", "swizzle:zxy", "smooth:0.04",
+        "smooth:0", "curve:2", "curve:1.4:2:1"};
+    bool allCanonical = true, allRound = true;
+    for (const char* s : kTriggers) {
+        OcTriggerSpec a, b;
+        if (!parseTriggerSpec(s, a, &err)) { allCanonical = false; AVER_ERROR("   trigger '{}' rejected: {}", s, err); continue; }
+        if (formatTriggerSpec(a) != s) { allCanonical = false; AVER_ERROR("   trigger '{}' formats as '{}'", s, formatTriggerSpec(a)); }
+        if (!parseTriggerSpec(formatTriggerSpec(a), b, &err) || !(a == b)) allRound = false;
+    }
+    for (const char* s : kModifiers) {
+        OcModifierSpec a, b;
+        if (!parseModifierSpec(s, a, &err)) { allCanonical = false; AVER_ERROR("   modifier '{}' rejected: {}", s, err); continue; }
+        if (formatModifierSpec(a) != s) { allCanonical = false; AVER_ERROR("   modifier '{}' formats as '{}'", s, formatModifierSpec(a)); }
+        if (!parseModifierSpec(formatModifierSpec(a), b, &err) || !(a == b)) allRound = false;
+    }
+    check(allCanonical, "every canonical spec formats back to itself");
+    check(allRound, "parse(format(x)) == x for every spec");
+
+    // Rejections carry a message naming the problem.
+    const char* const badTriggers[] = {
+        "hold:-1", "hold", "hold:0.5:", "hold 0.5", "hold:0.5:flag", "bogus", "tap:-0.1", "pulse:0", "pulse:0.1:1.5",
+        "pulse:0.1:onstart:nostart", "combo:0.4:Solo", "combo:0:A,B", "combo:0.4:A,,B", "chord:", "chord:A,B",
+        "down:-1", "hold:0.5:0.1:0.2", "hold:0.5:once:once", "pressed#x", "", "hold:nan"};
+    bool allRejected = true;
+    for (const char* s : badTriggers) {
+        OcTriggerSpec x; err.clear();
+        if (parseTriggerSpec(s, x, &err) || err.empty()) { allRejected = false; AVER_ERROR("   trigger '{}' was not rejected with a message", s); }
+    }
+    const char* const badModifiers[] = {
+        "deadzone:0.5:0.5", "deadzone:0.9:0.1", "deadzone:-1", "deadzone:radial:axial", "scale", "curve:0", "curve:-2",
+        "negate:xq", "negate:x:y", "swizzle", "swizzle:xxx", "smooth", "smooth:-1", "nope", "scale:1:", "scale 2"};
+    for (const char* s : badModifiers) {
+        OcModifierSpec x; err.clear();
+        if (parseModifierSpec(s, x, &err) || err.empty()) { allRejected = false; AVER_ERROR("   modifier '{}' was not rejected with a message", s); }
+    }
+    check(allRejected, "every malformed spec is rejected with a named error");
+    {
+        OcTriggerSpec keep; keep.kind = OcTriggerKind::Tap; keep.time = 0.33f;
+        OcTriggerSpec x = keep;
+        parseTriggerSpec("hold:-1", x, &err);
+        check(x == keep, "a rejected spec leaves the output untouched");
+    }
+
+    // ACTION and BIND carry the pairs, in either order relative to scale/component and to each other.
+    OcInputData d;
+    const char* const kText =
+        "OCINPUT 1\n"
+        "ACTION Move axis2 modifier deadzone:0.2:1:radial modifier smooth:0.04\n"
+        "ACTION Mod digital\n"
+        "ACTION Save digital trigger pressed trigger chord:Mod\n"
+        "ACTION Combo1 digital trigger combo:0.4:Fire,Fire,Jump\n"
+        "ACTION Fire digital\n"
+        "ACTION Jump digital\n"
+        "BIND Move gamepadaxis LeftY trigger down modifier negate:y scale -1 component y\n"
+        "BIND Move mousex scale 0.5 modifier curve:1.4\n"
+        "BIND Jump key Space trigger tap:0.18\n"
+        "BIND Save key S\n";
+    check(parseOcinput(kText, d, &err), "a scheme with ACTION/BIND pairs parses: " + err);
+    if (d.actions.size() == 6 && d.bindings.size() == 4) {
+        check(d.actions[0].modifiers.size() == 2 && d.actions[0].modifiers[0] == "deadzone" &&
+              d.actions[0].modifiers[1] == "smooth:0.04", "action modifiers are stored canonical, in order");
+        check(d.actions[2].triggers.size() == 2 && d.actions[2].triggers[1] == "chord:Mod", "action triggers keep order");
+        check(d.bindings[0].triggers.size() == 1 && d.bindings[0].modifiers.size() == 1 &&
+              near(d.bindings[0].scale, -1.0f) && d.bindings[0].component == 1,
+              "pairs and scale/component mix in any order on a BIND");
+        check(d.bindings[2].triggers.size() == 1 && d.bindings[2].triggers[0] == "tap:0.18", "binding trigger");
+    } else check(false, "unexpected record counts");
+
+    const std::string written = writeOcinput(d);
+    check(written.find("ACTION Move axis2 modifier deadzone modifier smooth:0.04\n") != std::string::npos,
+          "the writer emits canonical modifier text after the type");
+    check(written.find("BIND Move gamepadaxis LeftY scale -1 component y trigger down modifier negate:y\n") != std::string::npos,
+          "the writer emits trigger/modifier pairs after scale/component");
+    OcInputData d2;
+    check(parseOcinput(written, d2, &err), "the written scheme parses again: " + err);
+    check(writeOcinput(d2) == written, "write -> parse -> write is stable");
+
+    // The merge path keeps a hand comment and unknown records while replacing the blocks.
+    const std::string withComment = "OCINPUT 1\n# keep me\nACTION Fire digital\nMYSTERY x\nBIND Fire key MouseLeft\n";
+    OcInputData d3;
+    check(parseOcinput(withComment, d3, &err), "comment fixture parses");
+    d3.actions[0].triggers.push_back("hold:0.5");
+    const std::string merged = writeOcinput(d3, withComment);
+    check(merged.find("# keep me\n") != std::string::npos && merged.find("MYSTERY x\n") != std::string::npos &&
+          merged.find("ACTION Fire digital trigger hold:0.5\n") != std::string::npos,
+          "merge keeps the comment and the unknown record and rewrites the ACTION line");
+
+    // Post-pass: referenced actions must exist, a chord may not name its own action.
+    check(!parseOcinput("OCINPUT 1\nACTION A digital trigger chord:Ghost\n", d, &err) && !err.empty(),
+          "a chord naming an undeclared action rejects the file");
+    check(!parseOcinput("OCINPUT 1\nACTION A digital\nBIND A key W trigger combo:0.5:A,Ghost\n", d, &err),
+          "a combo step naming an undeclared action rejects the file");
+    check(!parseOcinput("OCINPUT 1\nACTION A digital trigger chord:A\n", d, &err), "a chord naming its own action rejects the file");
+    check(!parseOcinput("OCINPUT 1\nACTION A digital\nBIND A key W trigger chord:A\n", d, &err),
+          "...also when the chord sits on one of its bindings");
+    check(parseOcinput("OCINPUT 1\nACTION A digital trigger chord:B\nACTION B digital trigger chord:A\n", d, &err),
+          "a two-action chord cycle is legal data (the engine reads None for it)");
+    check(!parseOcinput("OCINPUT 1\nACTION A digital trigger\n", d, &err), "a trailing keyword with no value is rejected");
+    check(!parseOcinput("OCINPUT 1\nACTION A digital color red\n", d, &err), "an unknown ACTION attribute is rejected");
+    check(!parseOcinput("OCINPUT 1\nACTION A digital\nBIND A key W trigger hold\n", d, &err) &&
+          err.find("BIND trigger:") == 0, "a bad BIND spec's error is prefixed with its record and keyword");
+
+    // No new keyword: the writer is byte-identical to what it was before this feature.
+    OcInputData full;
+    check(parseOcinput(kFull, full, &err), "kFull parses");
+    {
+        // The writer has always dropped a default `component x` (kFull spells it out on the D and A bindings).
+        std::string want = kFull;
+        for (size_t p; (p = want.find(" component x\n")) != std::string::npos;) want.erase(p, 12);
+        const std::string back = writeOcinput(full, kFull);
+        size_t at = 0;
+        while (at < back.size() && at < want.size() && back[at] == want[at]) ++at;
+        check(back == want, "a scheme with no triggers/modifiers merges back as before this feature (first difference at " +
+                                std::to_string(at) + ")");
+    }
+    const std::string fresh = writeOcinput(full);
+    check(fresh.find("trigger") == std::string::npos && fresh.find("modifier") == std::string::npos &&
+          fresh.find("ACTION Move axis2\nACTION Look axis2\n") != std::string::npos,
+          "...and a fresh write adds no trigger/modifier text");
+}
+
 int main() {
     testFullParse();
     testHeaderOnlyDefaults();
@@ -489,6 +657,7 @@ int main() {
     testBindForwardReference();
     testGamepadBindings();
     testMalformedGamepadBindings();
+    testTriggerModifierGrammar();
     testMalformedInput();
     testCommitOnlyOnSuccess();
     testOcProjectInputScheme();

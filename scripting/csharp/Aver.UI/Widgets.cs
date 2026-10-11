@@ -145,6 +145,10 @@ public readonly struct Widget : IEquatable<Widget>
         set => Native.aver_ui_widget_set_text(Id, value ?? string.Empty);
     }
 
+    /// <summary><see cref="Text"/> after localization: a "@Table:Key=Default" reference resolved for the active culture.
+    /// <see cref="Text"/> stays the raw authored string.</summary>
+    public string ShownText => Native.Utf8(Native.aver_ui_widget_get_shown_text(Id));
+
     /// <summary>A slider's or progress bar's value, clamped to its range when set.</summary>
     public float Value
     {

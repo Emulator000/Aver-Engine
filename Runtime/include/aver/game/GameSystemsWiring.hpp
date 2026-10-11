@@ -62,6 +62,7 @@ inline void registerGameSystems() {
 #if AVER_MODULE_SCENE
     scene::World& world = scene::World::instance();
     anim::AnimGraphSystem::registerComponents(world);
+    anim::AnimSystem::registerComponents(world);   // CRootMotion
     anim::animGraphSystem().install(anim::animSystem(), world);
 #endif
 #if AVER_MODULE_AUDIO_SCENE
@@ -110,6 +111,7 @@ inline void tickAnimGraphs(f32 dt) {
 inline void resetGameSystems() {
 #if AVER_MODULE_SCENE
     anim::animGraphSystem().clear();
+    anim::animSystem().montages().stopAll();
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
     synapse::btSystem().clearBlackboards();

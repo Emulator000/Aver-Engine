@@ -4,6 +4,13 @@
 
 #include "SandboxApp.hpp"
 #include "aver/game/GameTick.hpp"
+#include "aver/game/GameLocalization.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_loc_abi.h"
+#endif
+#if AVER_WITH_UI_ABI
+#  include "aver/ui/ui_widget_abi.h"
+#endif
 
 namespace aver {
 void SandboxApp::applyProject(Engine& e) {
@@ -125,6 +132,18 @@ void SandboxApp::applyProject(Engine& e) {
                   "tonemap {}", project_.manifestPath, post_.exposure, post_.bloomIntensity,
                   post_.autoExposure ? "on" : "off", post_.tonemap);
     startContentWatch();
+    {
+        // String and data-table stores for this project. The editor previews a culture (--culture, else the saved
+        // preview choice) and never reads the player's own saved language.
+        game::LocalizationInit li;
+        li.project = &project_;
+        li.cultureOverride = cultureOverride_.empty() ? editor::prefString("loc.previewCulture", "") : cultureOverride_;
+        li.readSavedCulture = false;
+        game::initLocalization(li);
+#if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
+        aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
+#endif
+    }
     pendingUpgrade_ = editor::inspectProject(project_);
     upgradeAsked_ = false;
     if (!pendingUpgrade_.empty())

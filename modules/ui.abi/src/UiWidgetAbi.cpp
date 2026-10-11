@@ -138,6 +138,13 @@ void aver_ui_set_dpi(int32_t mode, float refWidth, float refHeight, float userSc
 
 float aver_ui_scale(void) { return g_tree.scale(); }
 
+void aver_ui_set_text_resolver(AverUiTextResolveFn resolve, AverUiTextEpochFn epoch) {
+    abi::setTextResolver(resolve);
+    if (!resolve) { g_tree.setTextResolver({}, {}); return; }
+    g_tree.setTextResolver([](std::string_view raw, std::string& out) { return abi::resolveUiText(std::string(raw).c_str(), out); },
+                           epoch ? std::function<u32()>([epoch] { return static_cast<u32>(epoch()); }) : std::function<u32()>());
+}
+
 // ---- structure ----------------------------------------------------------------------------------------
 
 uint32_t aver_ui_widget_create(int32_t kind, uint32_t parent, const char* name) {
@@ -185,6 +192,10 @@ void aver_ui_widget_set_text(uint32_t id, const char* utf8) { g_tree.setText(id,
 const char* aver_ui_widget_get_text(uint32_t id) {
     const UiWidget* w = W(id);
     return keep(w ? w->text : std::string());
+}
+const char* aver_ui_widget_get_shown_text(uint32_t id) {
+    const UiWidget* w = W(id);
+    return keep(w ? g_tree.shown(w->text) : std::string());
 }
 void aver_ui_widget_set_value(uint32_t id, float value) { g_tree.setValue(id, value); }
 float aver_ui_widget_get_value(uint32_t id) { const UiWidget* w = W(id); return w ? w->value : 0.0f; }

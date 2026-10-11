@@ -144,6 +144,8 @@ inline void applyProjectAudioMix(const fmt::ProjectDesc& project) {
 // than last frame's. Reordering to match "bracket" literally would make every PHYSICS-group actor
 // read stale transforms.
 inline i32 tickGameplayGroups(f32 dt) {
+    // Input triggers and smoothing advance once a frame, after the host published this frame's input.
+    aver_fw_action_update(dt);
     // Timers fire and posted events are delivered before any group runs, so a graph or actor reached by
     // either sees this frame's PrePhysics as the first thing after its callback.
     aver_fw_timers_update(dt);

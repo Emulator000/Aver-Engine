@@ -3,6 +3,11 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/game/GameLocalization.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_loc_abi.h"
+#  include "aver/framework/framework_table_abi.h"
+#endif
 
 namespace aver {
 // NOT GUARDED ON ANY MODULE, and everything down to drawRecoveryPrompt() used to sit inside one
@@ -434,6 +439,17 @@ void SandboxApp::pumpContentWatch() {
     if (contentWatch_.poll(watchEvents_)) {
         AVER_WARN("[Editor] the watcher lost records; every open editor is being told to re-read");
         assetEditors_.notifyWatchLost();
+#if AVER_MODULE_FRAMEWORK
+        {
+            // Which string or data file changed is unknown: read both stores again, keeping the previewed culture.
+            game::LocalizationInit li;
+            li.project = &project_;
+            li.cultureOverride = aver_fw_loc_culture();
+            li.readSavedCulture = false;
+            game::initLocalization(li);
+            aver_fw_table_reload_path("");
+        }
+#endif
 // BOTH modules, not just PBR: materials() is the PBR system, but it is reached THROUGH
 // voxiRenderer_, declared under AVER_MODULE_VOXI. Guarding on PBR alone compiles in a VOXI=OFF +
 // PBR=ON build where the member doesn't exist -- a configuration failing to build at head, unnoticed, since module-matrix.ps1 could not run (Get-Cached).
@@ -446,6 +462,10 @@ void SandboxApp::pumpContentWatch() {
         return;
     }
     bool sawImage = false;
+#if AVER_MODULE_FRAMEWORK
+    // String tables and data tables hot reload (a bad save keeps the old values and logs once).
+    game::onContentFilesChanged(contentWatch_.root(), watchEvents_);
+#endif
     for (const FileEvent& ev : watchEvents_) {
         if (ev.kind == FileChange::Deleted) continue;
         const std::string full = (std::filesystem::path(contentWatch_.root()) / ev.path).string();

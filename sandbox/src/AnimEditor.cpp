@@ -18,6 +18,7 @@
 #include "ActorEditor.hpp"
 
 #include "aver/anim/AnimSampler.hpp"
+#include "aver/anim/RootMotion.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/render/preview/ActorPreview.hpp"
@@ -694,6 +695,7 @@ private:
     // toggling `bit` in clip_.flags and marking the tab dirty -- the existing Save path rewrites clip_
     // whole, so that's enough to pick it up.
     void flagCheckbox(u8 bit, const char* label);
+    anim::RootSpec rootSpec() const;   // the skeleton's root bone and rest transform, default axes
 
     // Notify state durations. clip_.notifyDurations stays empty until the first is authored (see
     // OcAnimation::notifyDurations); these two are the only places touching it, kept either empty or
@@ -767,6 +769,7 @@ private:
     f32 speed_ = 1.0f;
     bool playing_ = true;
     bool loop_ = true;
+    bool lockRoot_ = false;   // session-only: preview with the root held at rest, as the entity would see it
     int selectedBone_ = -1;
     f64 lastClock_ = 0.0;
 
@@ -1053,6 +1056,10 @@ void AnimEditor::buildPreview(Engine& e) {
             else       { t = t < 0.0f ? 0.0f : (t > clip_.duration ? clip_.duration : t); }
         }
         anim::sampleAnimation(clip_, t, pose_);
+        if (lockRoot_ && (clip_.flags & fmt::kOcAnimRootMotion)) {
+            const anim::RootSpec spec = rootSpec();
+            if (spec.valid()) anim::lockRoot(pose_, spec);
+        }
     }
     anim::poseToModel(skel_, pose_, model_);
     // Same pose, two spaces: poseToModel gives joint transforms for bones, poseToSkinning gives
@@ -2377,6 +2384,17 @@ void AnimEditor::flagCheckbox(u8 bit, const char* label) {
 #endif
 }
 
+// The root bone and its rest transform with the default axes: what AnimSystem builds per entity, so
+// the readout and the preview lock show what the entity would get. Invalid when there is no rig.
+anim::RootSpec AnimEditor::rootSpec() const {
+    anim::RootSpec s;
+    s.bone = anim::rootBoneOf(skel_);
+    if (s.bone == anim::kNoBone) return s;
+    const fmt::OcBone& b = skel_.bones[s.bone];
+    s.rest = Transform{b.translation, b.rotation, b.scale};
+    return s;
+}
+
 // Points the preview's pivot at one bone and picks a distance that frames it, not the whole rig (see
 // header comment for why frameAll() doesn't fit).
 //
@@ -2467,9 +2485,24 @@ void AnimEditor::draw(Engine& e) {
     if (isClip_) {
         flagCheckbox(fmt::kOcAnimLoop, "Clip loops");
         ImGui::SameLine();
-        flagCheckbox(fmt::kOcAnimAdditiveBase, "Additive base");
+        flagCheckbox(fmt::kOcAnimAdditiveBase, "Additive");
+        ImGui::SetItemTooltip("This clip is authored as an additive delta. A montage whose first clip is flagged this way plays additively.");
         ImGui::SameLine();
         flagCheckbox(fmt::kOcAnimRootMotion, "Root motion");
+        ImGui::SetItemTooltip("Extract the root bone's planar travel when an entity's Root Motion mode asks for it.");
+        // What the entity would be moved by, measured the way the runtime does. Reads 0 when the
+        // root bone carries no travel, which is the quick way to tell a stationary clip from a wrong rig.
+        if (clip_.flags & fmt::kOcAnimRootMotion) {
+            const anim::RootSpec spec = rootSpec();
+            if (spec.valid() && clip_.duration > 0.0f) {
+                const anim::RootDelta d = anim::rootDeltaBetween(clip_, spec, 0.0f, clip_.duration, false);
+                ImGui::TextDisabled("root moves %.1f cm, %.1f cm, yaw %.1f deg over %.2f s", d.move.x, d.move.y,
+                                    d.yaw * (180.0f / kPi), clip_.duration);
+            } else {
+                ImGui::TextDisabled("root motion: no root track to measure");
+            }
+            ImGui::Checkbox("Lock root in preview", &lockRoot_);
+        }
     }
 
     if (skel_.bones.empty()) {

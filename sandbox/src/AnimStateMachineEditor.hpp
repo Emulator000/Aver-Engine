@@ -67,6 +67,20 @@ bool asmOpTakesValue(anim::AsmOp op);
 // "speed > 0.1", "grounded is false", "jump (trigger)".
 std::string asmConditionText(const anim::AsmCondition& c);
 
+// ---- the pipeline (docs/ANIM_MONTAGES.md): ordered slot / layered / additive nodes run after the machine ----
+
+// Appends a node of `kind` with a default that works as it is; slot names are made unique among the
+// nodes so a second default never consumes the same slot twice. Returns its index.
+i32 asmAddPipelineNode(anim::AnimStateMachineAsset& a, anim::PipeNodeKind kind);
+bool asmRemovePipelineNode(anim::AnimStateMachineAsset& a, i32 index);
+// Moves a node within the order (the order is the application order). Returns the new index or -1.
+i32 asmMovePipelineNode(anim::AnimStateMachineAsset& a, i32 index, i32 delta);
+// Each distinct slot name some node consumes, in first-use order.
+std::vector<std::string> asmPipelineSlotNames(const anim::AnimStateMachineAsset& a);
+// What would silently misbehave: a slot consumed twice (the second sees none of it), a layered node
+// with no branch, a name the machine does not have, a node with nothing to play. Empty when sound.
+std::vector<std::string> asmPipelineProblems(const anim::AnimStateMachineAsset& a);
+
 // Canvas geometry, ImGui-free. The point on the border of the box centred (cx, cy) with half-extents
 // (hw, hh) that faces (tx, ty).
 struct AsmPt {
@@ -111,6 +125,10 @@ public:
     void setEntry(i32 state);
     void markDirty() { dirty_ = true; simStale_ = true; }
 
+    // Bone names of the first .ocskel found under the project's content (the pipeline's branch filters
+    // name bones); empty when none is found. Scanned once per tab.
+    const std::vector<std::string>& boneNames();
+
 private:
     void loadFromDisk();
 
@@ -131,6 +149,9 @@ private:
     bool simStale_ = true;
     std::vector<anim::AsmEvent> simLog_;
 
+    std::vector<std::string> bones_;
+    bool bonesScanned_ = false;
+
 #if AVER_WITH_IMGUI
     f32 panX_ = 0, panY_ = 0;
     i32 dragState_ = -1;
@@ -140,6 +161,7 @@ private:
     void drawCanvas();
     void drawDetails();
     void drawSimulator();
+    void drawPipeline();
 #endif
 };
 

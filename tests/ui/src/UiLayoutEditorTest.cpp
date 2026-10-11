@@ -37,6 +37,8 @@ static std::vector<std::string> childNames(const UiLayoutEditor& ed, const std::
     return out;
 }
 
+static UiEstimatedMetrics est;
+
 int main() {
     AVER_INFO("=== canvas maths ===");
     {
@@ -263,6 +265,39 @@ int main() {
         writeFileText(file, uiStarterLayoutText());
         clean.onFileChanged();
         check(clean.doc().nodes.size() == 6, "a clean tab reloads");
+    }
+
+    AVER_INFO("=== localized text in the preview ===");
+    {
+        const std::string locFile = tempFile("loc.ocui");
+        writeFileText(locFile, uiStarterLayoutText());
+        UiLayoutEditor ed(locFile);
+        const i32 play = uiLayoutFind(ed.doc(), "PlayButton");
+        check(play > 0 && ed.setProperty(play, "text", "\"@UI:Menu.Play=Play\""), "a reference can be set as text");
+        const UiWidget* w = ed.preview().get(ed.previewWidget(play));
+        check(w && w->text == "@UI:Menu.Play=Play" && ed.preview().shown(w->text) == "Play", "with no host hook the preview shows the inline default");
+
+        static bool german = false;
+        static u32 epoch = 1;
+        UiLayoutEditorLoc loc;
+        loc.resolve = [](std::string_view raw, std::string& out) {
+            if (raw != "@UI:Menu.Play=Play") return false;
+            out = german ? "Spielen" : "Play";
+            return true;
+        };
+        loc.epoch = [] { return epoch; };
+        setUiLayoutEditorLoc(loc);
+        ed.save(nullptr);
+        UiLayoutEditor hooked(locFile);                                  // a preview is built with the host's resolver
+        const i32 hp = uiLayoutFind(hooked.doc(), "PlayButton");
+        w = hooked.preview().get(hooked.previewWidget(hp));
+        check(w && hooked.preview().shown(w->text) == "Play", "the host's resolver reaches the preview");
+        german = true;
+        ++epoch;
+        hooked.layoutPreview(est);
+        check(w && hooked.preview().shown(w->text) == "Spielen", "and the preview follows its epoch without a rebuild");
+        check(hooked.doc().nodes[static_cast<usize>(hp)].props.text == "@UI:Menu.Play=Play", "while the document keeps the reference");
+        setUiLayoutEditorLoc({});
     }
 
     if (g_failures) {

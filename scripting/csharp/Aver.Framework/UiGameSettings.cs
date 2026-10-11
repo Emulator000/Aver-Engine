@@ -51,7 +51,7 @@ public sealed class FrameworkRebindProvider : IRebindProvider
     /// <inheritdoc/>
     public string BindingText(RebindRow row)
     {
-        if (!EnhancedInput.TryGetBindingKey(row.Action, row.Slot, out int rawKey, out InputSource source)) return "Unbound";
+        if (!EnhancedInput.TryGetBindingKey(row.Action, row.Slot, out int rawKey, out InputSource source)) return "@UI:controls.unbound=Unbound";
         return source switch
         {
             InputSource.GamepadButton => Enum.IsDefined(typeof(GamepadButton), rawKey) ? ((GamepadButton)rawKey).ToString() : "?",
@@ -96,9 +96,34 @@ public static class UiGameSettings
     /// Controls tab. Call <see cref="SettingsScreen.ApplyAll"/> once at startup to restore saved values.</summary>
     public static SettingsScreen Create(IRebindProvider? rebind = null)
     {
-        var screen = new SettingsScreen(new FrameworkSettingsStore(), rebind);
+        // With more than one shipped culture the screen gets a Language choice. The culture is not a float setting, so the
+        // store answers that key from Loc (and switches it on Set) rather than from a stored index.
+        bool language = Loc.Cultures.Count > 1;
+        var screen = new SettingsScreen(language ? new LanguageSettingsStore() : new FrameworkSettingsStore(), rebind);
+        if (language)
+            screen.AddChoice(LanguageKey, "@UI:settings.language=Language", "@UI:settings.tab.game=Game",
+                             Loc.Cultures.Select(LocGraph.NativeName), Math.Max(0, LocGraph.CurrentCultureIndexForGraph()));
         screen.SettingChanged += Apply;
         return screen;
+    }
+
+    private const string LanguageKey = "game.language";
+
+    // FrameworkSettingsStore plus the language key.
+    private sealed class LanguageSettingsStore : ISettingsStore
+    {
+        private readonly FrameworkSettingsStore _base = new();
+
+        public float Get(string key, float fallback)
+            => key == LanguageKey ? Math.Max(0, LocGraph.CurrentCultureIndexForGraph()) : _base.Get(key, fallback);
+
+        public void Set(string key, float value)
+        {
+            if (key == LanguageKey) LocGraph.SetCultureByIndexForGraph((int)value);
+            else _base.Set(key, value);
+        }
+
+        public void Flush() => _base.Flush();
     }
 
     private static void Apply(string key, float value)

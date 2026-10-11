@@ -26,6 +26,11 @@ aver_add_module(Aver.Formats
     # reason .ocparticle states for itself minus the module split: this one has no type from outside
     # Aver.Formats to parse into at all (Aver.Framework is C#-only), so it never needed a third target.
     src/OcInput.cpp
+    # Data tables (.csv/.json) and string tables (.ocstrings/.csv) plus the localization key scanner: text only,
+    # no device and no engine type. docs/DATA_TABLES.md, docs/LOCALIZATION.md.
+    src/OcStrings.cpp
+    src/OcTable.cpp
+    src/LocGather.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
     src/OcWorld.cpp

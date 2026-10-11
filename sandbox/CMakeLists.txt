@@ -70,6 +70,7 @@ add_executable(Sandbox WIN32
   src/UiLayoutEditor.cpp
   src/BlendSpaceEditor.cpp
   src/AnimStateMachineEditor.cpp
+  src/MontageEditor.cpp
   src/PrefabEditorModel.cpp
   src/PrefabEditorUi.cpp
   src/SoundEditor.cpp
@@ -80,6 +81,9 @@ add_executable(Sandbox WIN32
   src/PostVolumeTools.cpp
   src/PreviewGizmo.cpp
   src/InputSchemeEditor.cpp
+  src/DataTableEditor.cpp
+  src/StringTableEditor.cpp
+  src/LocGatherRun.cpp
   src/TextureEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp

@@ -17,6 +17,8 @@ aver_add_module(Aver.Anim.Scene
     src/ControlRig.cpp
     # Animation state machines on entities (CAnimGraph), driving poses through AnimSystem's pose source.
     src/AnimGraphSystem.cpp
+    # Montages (slots, sections, blend in/out) and the provider the framework relays to.
+    src/AnimMontages.cpp
   DEPS
     Aver.Anim
     Aver.Scene

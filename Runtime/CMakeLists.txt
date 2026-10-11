@@ -49,6 +49,8 @@ aver_add_module(Aver.Runtime.Game.Core
     src/MouseCapture.cpp
     src/PlayMobility.cpp
     src/LevelSequence.cpp
+    # Culture choice and string/data-table hot reload over the Aver.Framework stores (guarded on AVER_MODULE_FRAMEWORK).
+    src/GameLocalization.cpp
   DEPS
     Aver.RHI
     Aver.Platform

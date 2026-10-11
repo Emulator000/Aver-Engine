@@ -15,6 +15,10 @@ aver_add_module(Aver.Anim
     src/BlendSpace.cpp
     src/AnimStateMachine.cpp
     src/AnimGraphAsset.cpp
+    # Montages, root motion and the slot/layered/additive pipeline (docs/ANIM_MONTAGES.md): pose arithmetic only.
+    src/RootMotion.cpp
+    src/Montage.cpp
+    src/AnimPipeline.cpp
   DEPS
     Aver.Core
     Aver.Formats

@@ -8,6 +8,10 @@
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GamePawn.hpp"
+#include "aver/game/GameLocalization.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_loc_abi.h"
+#endif
 #if AVER_MODULE_RAGDOLL
 #  include "aver/ragdoll/RagdollSystem.hpp"
 #endif
@@ -314,6 +318,19 @@ void SandboxApp::startPlay() {
     }
 #endif
 
+#if AVER_MODULE_FRAMEWORK
+    {
+        // String and data tables re-read at every Play start, so a table saved since the last Play applies, under the
+        // same preview culture. The missing-key list starts empty: Stop reports this session's own.
+        game::LocalizationInit li;
+        li.project = &project_;
+        li.cultureOverride = aver_fw_loc_culture();
+        li.readSavedCulture = false;
+        game::initLocalization(li);
+        aver_fw_loc_missing_clear();
+    }
+#endif
+
     // WHICH GAMEMODE AND PAWN, as Unreal answers it: the level's World Settings override, else the
     // project's GAME.MODE, else the engine's own -- the flying drone. Declaring a GameMode class
     // does not make it the default (PTTest kept the FirstPerson template's AN_FPRules in its scripts,
@@ -612,6 +629,17 @@ void SandboxApp::stopPlay() {
     preplayViewValid_ = false;
     // A session's state machines, boards, crowds and cover claims end with it.
     game::resetGameSystems();
+#if AVER_MODULE_FRAMEWORK
+    // Text the session asked for that no culture had: one toast, the keys in the log (docs/LOCALIZATION.md).
+    if (const int32_t missing = aver_fw_loc_missing_count(); missing > 0) {
+        for (int32_t i = 0; i < missing; ++i) AVER_WARN("[Loc] missing text {} (this Play session)", aver_fw_loc_missing_at(i));
+#if AVER_WITH_IMGUI
+        notifyOutcome(editor::NotifySeverity::Warning, "Localization",
+                      std::to_string(missing) + " localization key" + (missing == 1 ? " was" : "s were") + " missing", true);
+#endif
+        aver_fw_loc_missing_clear();
+    }
+#endif
 #if AVER_MODULE_RAGDOLL
     // Before the physics teardown below: a ragdoll's parts are bodies that session owns.
     ragdoll::ragdollSystem().clear();

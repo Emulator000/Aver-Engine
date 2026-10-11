@@ -7,6 +7,7 @@ game build, so reaching for it would put an editor UI toolkit back into a shippe
 the engine's dependency set unchanged and matches how every other asset here works.
 
     python scripts/bake-font.py third_party/fonts/Roboto-Regular.ttf --size 16 --out <dir>
+    python scripts/bake-font.py third_party/fonts/Roboto-Regular.ttf --size 16 --out assets/fonts         --ranges "32-126,160-591,880-1023,1024-1327,8208-8231,8364"      # what ships (docs/LOCALIZATION.md)
 
 Writes <out>/<stem>.ocfont and <out>/<stem>.png. Needs Pillow, which is already used by this repo's
 other asset scripts (make-editor-icons.py, brand.py).
@@ -18,8 +19,27 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 
-def bake(ttf, size, out_dir, first, last, padding):
+def parse_ranges(spec):
+    """"32-126,160-591,8364" -> sorted code points."""
+    cps = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lo, _, hi = part.partition("-")
+        cps.update(range(int(lo), int(hi or lo) + 1))
+    return sorted(cps)
+
+
+def bake(ttf, size, out_dir, codepoints, padding):
     font = ImageFont.truetype(ttf, size)
+    # A code point the TTF lacks renders as its .notdef box. Such a glyph would draw a box where the font has no letter,
+    # so it is left out and the UI draws nothing for it (UiFont::glyph() is null). U+FFFF is unassigned in every font.
+    def ink(ch):
+        im = Image.new("L", (size * 3, size * 3), 0)
+        ImageDraw.Draw(im).text((size, size // 2), ch, font=font, fill=255)
+        return im.tobytes()
+    notdef = ink(chr(0xFFFF))
     stem = os.path.splitext(os.path.basename(ttf))[0]
     # PIL's default text anchor is 'la' -- LEFT, ASCENDER -- so both draw.text() and getbbox() work
     # in a space whose y = 0 is the ascender line, NOT the baseline. UiFont::offY is documented as
@@ -29,8 +49,12 @@ def bake(ttf, size, out_dir, first, last, padding):
 
     # Measure every glyph first, so the atlas is sized rather than guessed at and then overflowed.
     glyphs = []
-    for cp in range(first, last + 1):
+    skipped = 0
+    for cp in codepoints:
         ch = chr(cp)
+        if cp > 32 and ink(ch) == notdef:
+            skipped += 1
+            continue
         # getbbox returns the INK box relative to the origin: left/top can be negative, and top is
         # negative for anything above the baseline, which is exactly the offY the draw list wants.
         box = font.getbbox(ch)
@@ -115,7 +139,7 @@ def bake(ttf, size, out_dir, first, last, padding):
     ocfont_path = os.path.join(out_dir, stem + ".ocfont")
     open(ocfont_path, "w", newline="\n").write("\n".join(lines) + "\n")
 
-    print("[font] %s: %d glyphs, atlas %dx%d" % (stem, len(glyphs), atlas_w, atlas_h))
+    print("[font] %s: %d glyphs (%d code points not in the font), atlas %dx%d" % (stem, len(glyphs), skipped, atlas_w, atlas_h))
     print("[font] wrote %s" % ocfont_path)
     print("[font] wrote %s" % png_path)
     return 0
@@ -128,10 +152,13 @@ def main():
     ap.add_argument("--out", default=".")
     ap.add_argument("--first", type=int, default=32)   # space
     ap.add_argument("--last", type=int, default=126)   # tilde: printable ASCII
+    # Several ranges at once, e.g. the shipped UI font: Latin with accents, Greek, Cyrillic, punctuation, euro.
+    ap.add_argument("--ranges", default="", help='"32-126,160-591,880-1023,1024-1327,8208-8231,8364"; overrides --first/--last')
     ap.add_argument("--padding", type=int, default=1)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    return bake(a.ttf, a.size, a.out, a.first, a.last, a.padding)
+    cps = parse_ranges(a.ranges) if a.ranges else list(range(a.first, a.last + 1))
+    return bake(a.ttf, a.size, a.out, cps, a.padding)
 
 
 if __name__ == "__main__":

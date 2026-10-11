@@ -25,3 +25,12 @@ set_target_properties(AnimStateMachineTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY $
 add_executable(AnimGraphAssetTest src/AnimGraphAssetTest.cpp)
 target_link_libraries(AnimGraphAssetTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AnimGraphAssetTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Montages, root motion and the .ocasm slot/layered/additive pipeline (docs/ANIM_MONTAGES.md). Same
+# link set and the same reason: sections, blend timing, notify crossings, root deltas and masked blends
+# are arithmetic on structs, so a device would only hide a wrong answer.
+foreach(t Montage RootMotion AnimPipeline)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

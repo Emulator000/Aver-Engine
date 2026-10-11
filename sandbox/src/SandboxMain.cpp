@@ -316,6 +316,7 @@ Application* createApplication(int argc, char** argv) {
     // -1 = absent (0 is real for both: tonemap legacy curve, max-radiance no clamp).
     int tonemapArg = -1; f32 maxRadianceArg = -1.0f;
     bool windowedArg = false;
+    std::string cultureArg;   // --culture; empty = the saved preview culture
     bool fullscreenArg = false;
     // Optimisation dials; -1 = absent (0 is real: forced OFF).
     int giForceRebuildArg = -1;
@@ -382,6 +383,8 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i],"--tonemap") && i+1<argc) { tonemapArg = std::atoi(argv[++i]); continue; }
         // --windowed: default now; kept for backwards compatibility.
         if (!std::strcmp(argv[i],"--windowed")) { windowedArg = true; continue; }
+        // --culture <tag>: the UI culture while editing and in Play (docs/LOCALIZATION.md).
+        if (!std::strcmp(argv[i],"--culture") && i+1<argc) { cultureArg = argv[++i]; continue; }
         // --fullscreen: borderless, sized to monitor.
         if (!std::strcmp(argv[i],"--fullscreen")) { fullscreenArg = true; continue; }
         // --max-radiance: ceiling on scene radiance before tonemap.
@@ -1095,6 +1098,7 @@ Application* createApplication(int argc, char** argv) {
     app->setSkyLight(skyLightArg);
     app->setGiIntensity(giIntensityArg);
     app->setWindowed(windowedArg);
+    if (!cultureArg.empty()) app->setCultureOverride(cultureArg);
     app->setFullscreen(fullscreenArg);
     app->setTonemap(tonemapArg);
     app->setMaxRadiance(maxRadianceArg);

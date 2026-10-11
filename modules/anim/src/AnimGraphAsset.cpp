@@ -2,6 +2,7 @@
 #include "aver/anim/AnimGraphAsset.hpp"
 #include "aver/formats/Json.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -60,6 +61,79 @@ const char* kindName(AsmStateKind k) {
 }
 
 std::string str(const fmt::JsonValue& v, std::string_view key) { return std::string(v[key].asString()); }
+
+const char* pipeKindName(PipeNodeKind k) {
+    static const char* n[] = {"slot", "layered", "additive"};
+    return n[static_cast<int>(k)];
+}
+const char* srcKindName(PipeSourceKind k) {
+    static const char* n[] = {"none", "slot", "clip", "blendspace"};
+    return n[static_cast<int>(k)];
+}
+const char* refKindName(PipeRefKind k) {
+    static const char* n[] = {"firstFrame", "rest", "clip"};
+    return n[static_cast<int>(k)];
+}
+
+std::string writeSource(const PipeSource& src) {
+    std::string s = std::string("{\"kind\": \"") + srcKindName(src.kind) + "\"";
+    switch (src.kind) {
+        case PipeSourceKind::Slot: s += ", \"slot\": " + esc(src.slot); break;
+        case PipeSourceKind::Clip:
+            s += ", \"asset\": " + esc(src.asset) + ", \"loop\": " + (src.loop ? "true" : "false") +
+                 ", \"speed\": " + num(src.speed);
+            break;
+        case PipeSourceKind::BlendSpace:
+            s += ", \"asset\": " + esc(src.asset) + ", \"xParam\": " + esc(src.xParam) +
+                 ", \"yParam\": " + esc(src.yParam) + ", \"speed\": " + num(src.speed);
+            break;
+        case PipeSourceKind::None: break;
+    }
+    return s + "}";
+}
+
+std::string writePipeline(const std::vector<PipeNode>& nodes) {
+    std::string s = ",\n  \"pipeline\": [";
+    for (usize i = 0; i < nodes.size(); ++i) {
+        const PipeNode& n = nodes[i];
+        s += i ? ",\n    " : "\n    ";
+        s += std::string("{\"type\": \"") + pipeKindName(n.kind) + "\"";
+        if (n.kind == PipeNodeKind::Slot) {
+            s += ", \"slot\": " + esc(n.slot) + "}";
+            continue;
+        }
+        s += ", \"source\": " + writeSource(n.source);
+        if (n.kind == PipeNodeKind::Layered) {
+            s += ", \"branches\": [";
+            for (usize k = 0; k < n.branches.size(); ++k) {
+                if (k) s += ", ";
+                s += "{\"bone\": " + esc(n.branches[k].bone) + ", \"depth\": " + std::to_string(n.branches[k].depth) +
+                     ", \"weight\": " + num(n.branches[k].weight) + "}";
+            }
+            s += "]";
+        } else {
+            s += std::string(", \"ref\": {\"kind\": \"") + refKindName(n.ref.kind) + "\", \"asset\": " + esc(n.ref.asset) +
+                 ", \"time\": " + num(n.ref.time) + "}";
+        }
+        s += ", \"weight\": " + num(n.weight) + ", \"weightParam\": " + esc(n.weightParam) + "}";
+    }
+    return s + "\n  ]";
+}
+
+void readSource(const fmt::JsonValue& v, PipeSource& out) {
+    const std::string_view k = v["kind"].asString();
+    out.kind = k == "slot" ? PipeSourceKind::Slot : k == "clip" ? PipeSourceKind::Clip
+             : k == "blendspace" ? PipeSourceKind::BlendSpace : PipeSourceKind::None;
+    out.slot = str(v, "slot");
+    out.asset = str(v, "asset");
+    out.xParam = str(v, "xParam");
+    out.yParam = str(v, "yParam");
+    out.loop = v["loop"].asBool(true);
+    out.speed = v["speed"].asFloat(1.0f);
+}
+
+const char* curveName(BlendCurve c) { return c == BlendCurve::Smooth ? "smooth" : "linear"; }
+BlendCurve curveFrom(std::string_view s) { return s == "linear" ? BlendCurve::Linear : BlendCurve::Smooth; }
 
 bool readFile(const std::string& path, std::string& out, std::string* why) {
     std::ifstream f(path, std::ios::binary);
@@ -157,7 +231,8 @@ bool loadBlendSpace(const std::string& path, BlendSpaceAsset& out, std::string* 
 }
 
 std::string writeStateMachine(const AnimStateMachineAsset& a) {
-    std::string s = "{\n  \"format\": \"ocasm\",\n  \"version\": " + std::to_string(kStateMachineVersion) + ",\n";
+    const int version = a.pipeline.empty() ? 1 : kStateMachineVersion;
+    std::string s = "{\n  \"format\": \"ocasm\",\n  \"version\": " + std::to_string(version) + ",\n";
     s += "  \"name\": " + esc(a.name) + ",\n  \"params\": [";
     for (usize i = 0; i < a.params.size(); ++i) {
         const AsmParam& p = a.params[i];
@@ -197,7 +272,9 @@ std::string writeStateMachine(const AnimStateMachineAsset& a) {
         }
         s += m.transitions.empty() ? "]}" : "\n      ]}";
     }
-    s += a.machines.empty() ? "]\n}\n" : "\n  ]\n}\n";
+    s += a.machines.empty() ? "]" : "\n  ]";
+    if (!a.pipeline.empty()) s += writePipeline(a.pipeline);
+    s += "\n}\n";
     return s;
 }
 
@@ -270,6 +347,37 @@ bool parseStateMachine(std::string_view json, AnimStateMachineAsset& out, std::s
         }
         a.machines.push_back(std::move(m));
     }
+    const fmt::JsonValue& pl = root["pipeline"];
+    for (usize i = 0; i < pl.size(); ++i) {
+        const fmt::JsonValue& v = pl[i];
+        PipeNode n;
+        const std::string_view type = v["type"].asString();
+        if (type == "slot") n.kind = PipeNodeKind::Slot;
+        else if (type == "layered") n.kind = PipeNodeKind::Layered;
+        else if (type == "additive") n.kind = PipeNodeKind::Additive;
+        else {
+            if (why) *why = "unknown pipeline node type";
+            return false;
+        }
+        n.slot = str(v, "slot");
+        readSource(v["source"], n.source);
+        const fmt::JsonValue& bs = v["branches"];
+        for (usize k = 0; k < bs.size(); ++k) {
+            BranchEntry b;
+            b.bone = str(bs[k], "bone");
+            b.depth = static_cast<i32>(bs[k]["depth"].asInt());
+            b.weight = bs[k]["weight"].asFloat(1.0f);
+            n.branches.push_back(std::move(b));
+        }
+        const fmt::JsonValue& rf = v["ref"];
+        const std::string_view rk = rf["kind"].asString("firstFrame");
+        n.ref.kind = rk == "rest" ? PipeRefKind::Rest : rk == "clip" ? PipeRefKind::Clip : PipeRefKind::FirstFrame;
+        n.ref.asset = str(rf, "asset");
+        n.ref.time = rf["time"].asFloat();
+        n.weight = v["weight"].asFloat(1.0f);
+        n.weightParam = str(v, "weightParam");
+        a.pipeline.push_back(std::move(n));
+    }
     out = std::move(a);
     return true;
 }
@@ -281,6 +389,102 @@ bool saveStateMachine(const std::string& path, const AnimStateMachineAsset& a, s
 bool loadStateMachine(const std::string& path, AnimStateMachineAsset& out, std::string* why) {
     std::string text;
     return readFile(path, text, why) && parseStateMachine(text, out, why);
+}
+
+std::string writeMontage(const MontageAsset& a) {
+    std::string s = "{\n  \"format\": \"ocmontage\",\n  \"version\": " + std::to_string(kMontageVersion) + ",\n";
+    s += "  \"name\": " + esc(a.name) + ",\n  \"slot\": " + esc(a.slot) + ",\n";
+    s += "  \"blendIn\": " + num(a.blendIn) + ",\n  \"blendOut\": " + num(a.blendOut) + ",\n";
+    s += std::string("  \"blendInCurve\": \"") + curveName(a.inCurve) + "\",\n  \"blendOutCurve\": \"" +
+         curveName(a.outCurve) + "\",\n";
+    s += "  \"blendOutTrigger\": " + num(a.blendOutTrigger) + ",\n  \"rate\": " + num(a.rate) + ",\n";
+    s += std::string("  \"additive\": ") + (a.additive < 0 ? "\"auto\"" : a.additive ? "true" : "false") + ",\n";
+    s += "  \"segments\": [";
+    for (usize i = 0; i < a.segments.size(); ++i) {
+        const MontageSegment& g = a.segments[i];
+        s += i ? ",\n    " : "\n    ";
+        s += "{\"clip\": " + esc(g.clip) + ", \"start\": " + num(g.start) + ", \"end\": " + num(g.end) +
+             ", \"rate\": " + num(g.rate) + "}";
+    }
+    s += a.segments.empty() ? "],\n" : "\n  ],\n";
+    s += "  \"sections\": [";
+    for (usize i = 0; i < a.sections.size(); ++i) {
+        const MontageSection& g = a.sections[i];
+        s += i ? ",\n    " : "\n    ";
+        s += "{\"name\": " + esc(g.name) + ", \"start\": " + num(g.start);
+        if (!g.next.empty()) s += ", \"next\": " + esc(g.next);
+        s += "}";
+    }
+    s += a.sections.empty() ? "],\n" : "\n  ],\n";
+    s += "  \"notifies\": [";
+    for (usize i = 0; i < a.notifies.size(); ++i) {
+        const MontageNotify& g = a.notifies[i];
+        s += i ? ",\n    " : "\n    ";
+        s += "{\"time\": " + num(g.time) + ", \"name\": " + esc(g.name);
+        if (g.duration > 0.0f) s += ", \"duration\": " + num(g.duration);
+        s += "}";
+    }
+    s += a.notifies.empty() ? "]\n}\n" : "\n  ]\n}\n";
+    return s;
+}
+
+bool parseMontage(std::string_view json, MontageAsset& out, std::string* why) {
+    fmt::JsonValue root;
+    if (!fmt::parseJson(json, root, why)) return false;
+    if (!header(root, "ocmontage", kMontageVersion, why)) return false;
+    MontageAsset a;
+    a.name = str(root, "name");
+    a.slot = str(root, "slot");
+    if (a.slot.empty()) a.slot = kDefaultSlot;
+    a.blendIn = root["blendIn"].asFloat(0.15f);
+    a.blendOut = root["blendOut"].asFloat(0.2f);
+    a.inCurve = curveFrom(root["blendInCurve"].asString("smooth"));
+    a.outCurve = curveFrom(root["blendOutCurve"].asString("smooth"));
+    a.blendOutTrigger = root["blendOutTrigger"].asFloat(-1.0f);
+    a.rate = root["rate"].asFloat(1.0f);
+    const fmt::JsonValue& ad = root["additive"];
+    if (ad.isBool()) a.additive = ad.asBool() ? 1 : 0;
+    else if (ad.asString() == "true") a.additive = 1;
+    else if (ad.asString() == "false") a.additive = 0;
+    const fmt::JsonValue& segs = root["segments"];
+    for (usize i = 0; i < segs.size(); ++i) {
+        MontageSegment g;
+        g.clip = str(segs[i], "clip");
+        g.start = segs[i]["start"].asFloat();
+        g.end = segs[i]["end"].asFloat(-1.0f);
+        g.rate = segs[i]["rate"].asFloat(1.0f);
+        a.segments.push_back(std::move(g));
+    }
+    const fmt::JsonValue& secs = root["sections"];
+    for (usize i = 0; i < secs.size(); ++i) {
+        MontageSection g;
+        g.name = str(secs[i], "name");
+        g.start = secs[i]["start"].asFloat();
+        g.next = str(secs[i], "next");
+        a.sections.push_back(std::move(g));
+    }
+    std::stable_sort(a.sections.begin(), a.sections.end(),
+                     [](const MontageSection& x, const MontageSection& y) { return x.start < y.start; });
+    if (a.sections.empty()) a.sections.push_back({"Default", 0.0f, ""});
+    const fmt::JsonValue& nts = root["notifies"];
+    for (usize i = 0; i < nts.size(); ++i) {
+        MontageNotify g;
+        g.time = nts[i]["time"].asFloat();
+        g.name = str(nts[i], "name");
+        g.duration = nts[i]["duration"].asFloat();
+        a.notifies.push_back(std::move(g));
+    }
+    out = std::move(a);
+    return true;
+}
+
+bool saveMontage(const std::string& path, const MontageAsset& a, std::string* why) {
+    return writeFile(path, writeMontage(a), why);
+}
+
+bool loadMontage(const std::string& path, MontageAsset& out, std::string* why) {
+    std::string text;
+    return readFile(path, text, why) && parseMontage(text, out, why);
 }
 
 } // namespace aver::anim

@@ -89,6 +89,8 @@ struct GameConfig {
     // A bare .ocworld/.ocmap argument: the level to open instead of the project's STARTMAP.
     // Empty = STARTMAP. Same semantics as the editor's openMapPath_.
     std::string levelPath;
+    // --culture <tag>: the UI culture, over the saved setting and the OS language (empty = auto).
+    std::string culture;
     // Logs the held-key set on every change (ImGui-free input path testing).
     bool inputEcho = false;
     // Logs every path the engine opens (package contents verification).

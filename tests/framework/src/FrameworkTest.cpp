@@ -10,9 +10,11 @@
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <string>
 
 using namespace aver;
@@ -28,6 +30,9 @@ static void check(bool cond, const std::string& what) {
     AVER_ERROR("   FAIL  {}", what);
     ++g_failures;
 }
+
+// Float equality within `eps`.
+static bool approx(float a, float b, float eps = 1e-4f) { return std::fabs(a - b) <= eps; }
 
 // Checks that declaring a class is idempotent by name, and that lookups round-trip.
 static void testDeclareIdentity() {
@@ -1011,6 +1016,623 @@ static void testInputScheme() {
     check(aver_fw_input_scheme_load("") == 0, "an empty path is rejected");
 }
 
+// ---- TRIGGERS AND MODIFIERS (minor 11) -------------------------------------------------------------
+//
+// Every helper below drives one simulated frame through step(): roll the input, hold exactly the keys
+// listed (every other key up), advance the actions. dt is 0.125 s throughout -- a power of two, so
+// sums of it are exact and a threshold of 0.5 s lands on update 4 with no float slack to argue about.
+
+static constexpr float kDt = 0.125f;
+
+// One frame: only `keys` are down afterwards.
+static void step(std::initializer_list<int32_t> keys, float dt = kDt) {
+    aver_fw_input_new_frame();
+    for (int32_t k = 0; k < AVER_FW_KEY_COUNT; ++k) aver_fw_input_set_key(k, 0);
+    for (int32_t k : keys) aver_fw_input_set_key(k, 1);
+    aver_fw_action_update(dt);
+}
+
+// Drops every binding, all action-level config and all trigger memory so a case starts clean.
+static void resetActions() {
+    aver_fw_action_clear_bindings();
+    for (int32_t h = 1; h <= aver_fw_action_count(); ++h) aver_fw_action_clear_config(h);
+    aver_fw_action_reset_state();
+    aver_fw_input_new_frame();
+    for (int32_t k = 0; k < AVER_FW_KEY_COUNT; ++k) aver_fw_input_set_key(k, 0);
+    for (int32_t b = 0; b < AVER_FW_GAMEPAD_BUTTON_COUNT; ++b) aver_fw_input_set_gamepad_button(0, b, 0);
+    for (int32_t a = 0; a < AVER_FW_GAMEPAD_AXIS_COUNT; ++a) aver_fw_input_set_gamepad_axis(0, a, 0.0f);
+}
+
+// A digital action on one key, with an optional action-level trigger spec.
+static int32_t keyAction(const char* name, int32_t key, const char* trigger = nullptr, int32_t component = 0) {
+    const int32_t a = aver_fw_action_register(name, AVER_FW_ACTION_DIGITAL);
+    aver_fw_action_bind(a, AVER_FW_ACTION_SRC_KEY, key, 1.0f, component, 0);
+    if (trigger) check(aver_fw_action_add_trigger(a, -1, trigger) == 1, std::string("trigger attaches: ") + trigger);
+    return a;
+}
+
+// State and event mask of `a` after the last step, as one comparable pair.
+static bool is(int32_t a, int state, int events) {
+    return aver_fw_action_state(a) == state && aver_fw_action_events(a) == events;
+}
+
+static constexpr int kN = AVER_FW_TRIGGER_STATE_NONE, kO = AVER_FW_TRIGGER_STATE_ONGOING,
+                     kT = AVER_FW_TRIGGER_STATE_TRIGGERED;
+static constexpr int kEvStarted = AVER_FW_INPUT_EVENT_STARTED, kEvOngoing = AVER_FW_INPUT_EVENT_ONGOING,
+                     kEvTriggered = AVER_FW_INPUT_EVENT_TRIGGERED, kEvCompleted = AVER_FW_INPUT_EVENT_COMPLETED,
+                     kEvCanceled = AVER_FW_INPUT_EVENT_CANCELED;
+
+// Down / Pressed / Released / Hold / HoldAndRelease / Tap / Pulse, and the dt clamp.
+static void testActionTriggers() {
+    AVER_INFO("=== action triggers: down, pressed, released, hold, holdrelease, tap, pulse ===");
+    resetActions();
+
+    // ---- Pressed is Triggered for exactly one update; Released is Ongoing while held ----
+    const int32_t pr = keyAction("T_Pressed", AVER_FW_KEY_W, "pressed");
+    const int32_t rl = keyAction("T_Released", AVER_FW_KEY_S, "released");
+    step({});
+    check(aver_fw_action_state(pr) == kN && aver_fw_action_state(rl) == kN, "idle: both None");
+    step({AVER_FW_KEY_W, AVER_FW_KEY_S});
+    check(aver_fw_action_state(pr) == kT, "pressed: Triggered on the update the key goes down");
+    check(aver_fw_action_state(rl) == kO, "released: Ongoing while the key is held");
+    step({AVER_FW_KEY_W, AVER_FW_KEY_S});
+    check(aver_fw_action_state(pr) == kN, "pressed: None again while still held (one update only)");
+    check(aver_fw_action_state(rl) == kO, "released: still Ongoing");
+    step({});
+    check(aver_fw_action_state(rl) == kT, "released: Triggered on the update the key goes up");
+    step({});
+    check(aver_fw_action_state(rl) == kN, "released: back to None");
+
+    // ---- Hold 0.5 ----
+    resetActions();
+    const int32_t hold = keyAction("T_Hold", AVER_FW_KEY_SPACE, "hold:0.5");
+    step({AVER_FW_KEY_SPACE});
+    check(is(hold, kO, kEvStarted | kEvOngoing), "hold: first update is Ongoing, events Started|Ongoing");
+    step({AVER_FW_KEY_SPACE});
+    check(is(hold, kO, kEvOngoing), "hold: second update raises Ongoing only");
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(hold) == kO && approx(aver_fw_action_elapsed(hold), 0.375f), "hold: 0.375 s is still Ongoing");
+    step({AVER_FW_KEY_SPACE});
+    check(is(hold, kT, kEvTriggered), "hold: 0.5 s reached -> Triggered");
+    step({AVER_FW_KEY_SPACE});
+    check(is(hold, kT, kEvTriggered) && approx(aver_fw_action_triggered_time(hold), 0.25f),
+          "hold: Triggered every update afterwards, triggered time accumulating");
+    step({});
+    check(is(hold, kN, kEvCompleted), "hold: release after firing is Completed");
+
+    step({AVER_FW_KEY_SPACE}); step({AVER_FW_KEY_SPACE}); step({AVER_FW_KEY_SPACE});
+    step({});
+    check(is(hold, kN, kEvCanceled), "hold: release at 0.375 s is Canceled, it never fired");
+
+    // ---- Hold 0.5 once ----
+    resetActions();
+    const int32_t once = keyAction("T_HoldOnce", AVER_FW_KEY_SPACE, "hold:0.5:once");
+    for (int i = 0; i < 3; ++i) step({AVER_FW_KEY_SPACE});
+    step({AVER_FW_KEY_SPACE});
+    check(is(once, kT, kEvTriggered), "hold once: Triggered at 0.5 s");
+    step({AVER_FW_KEY_SPACE});
+    check(is(once, kN, kEvCompleted), "hold once: exactly one Triggered update, then None (Completed)");
+    step({AVER_FW_KEY_SPACE});
+    check(is(once, kN, 0), "hold once: stays latched while the key stays down");
+    step({}); step({AVER_FW_KEY_SPACE});
+    for (int i = 0; i < 2; ++i) step({AVER_FW_KEY_SPACE});
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(once) == kT, "hold once: fires again after release and a fresh press");
+
+    // ---- HoldAndRelease 0.5 ----
+    resetActions();
+    const int32_t hr = keyAction("T_HoldRelease", AVER_FW_KEY_SPACE, "holdrelease:0.5");
+    for (int i = 0; i < 3; ++i) {
+        step({AVER_FW_KEY_SPACE});
+        check(aver_fw_action_state(hr) == kO, "holdrelease: Ongoing while held, never Triggered");
+    }
+    step({});
+    check(is(hr, kN, kEvCanceled), "holdrelease: releasing at 0.375 s fires nothing (Canceled)");
+    for (int i = 0; i < 5; ++i) step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(hr) == kO, "holdrelease: still Ongoing at 0.625 s");
+    step({});
+    check(aver_fw_action_state(hr) == kT, "holdrelease: Triggered on the release after the time was met");
+    step({});
+    check(aver_fw_action_state(hr) == kN, "holdrelease: then None");
+
+    // ---- Tap 0.25 ----
+    resetActions();
+    const int32_t tap = keyAction("T_Tap", AVER_FW_KEY_SPACE, "tap:0.25");
+    step({AVER_FW_KEY_SPACE});
+    check(is(tap, kO, kEvStarted | kEvOngoing), "tap: Ongoing while within the window");
+    step({});
+    check(is(tap, kT, kEvTriggered), "tap: a quick release is Triggered");
+    step({});
+    check(is(tap, kN, kEvCompleted), "tap: then Completed");
+    step({AVER_FW_KEY_SPACE}); step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(tap) == kO, "tap: 0.25 s is still inside the window");
+    step({AVER_FW_KEY_SPACE});
+    check(is(tap, kN, kEvCanceled), "tap: expires at 0.375 s (Canceled)");
+    step({});
+    check(is(tap, kN, 0), "tap: the late release does not fire");
+
+    // ---- Pulse every 0.25 s, limit 3 ----
+    resetActions();
+    const int32_t pulse = keyAction("T_Pulse", AVER_FW_KEY_SPACE, "pulse:0.25:3");
+    const int expectOnStart[7] = {kT, kO, kT, kO, kT, kN, kN};
+    bool ok = true;
+    for (int i = 0; i < 7; ++i) {
+        step({AVER_FW_KEY_SPACE});
+        ok = ok && aver_fw_action_state(pulse) == expectOnStart[i];
+    }
+    check(ok, "pulse onstart: Triggered at t=0, 0.25, 0.5 and never again");
+    step({});
+    check(aver_fw_action_state(pulse) == kN, "pulse: release resets");
+
+    resetActions();
+    const int32_t pulseNs = keyAction("T_PulseNoStart", AVER_FW_KEY_SPACE, "pulse:0.25:3:nostart");
+    const int expectNoStart[7] = {kO, kO, kT, kO, kT, kO, kT};
+    ok = true;
+    for (int i = 0; i < 7; ++i) {
+        step({AVER_FW_KEY_SPACE});
+        ok = ok && aver_fw_action_state(pulseNs) == expectNoStart[i];
+    }
+    check(ok, "pulse nostart: first Triggered at t=0.25, then 0.5 and 0.75, then latched");
+
+    // ---- dt is clamped to 0.25 s: a hitch is not a long hold ----
+    resetActions();
+    const int32_t clamp = keyAction("T_Clamp", AVER_FW_KEY_SPACE, "hold:0.5");
+    step({AVER_FW_KEY_SPACE}, 1.0f);
+    check(aver_fw_action_state(clamp) == kO && approx(aver_fw_action_elapsed(clamp), 0.25f),
+          "a 1.0 s frame counts as 0.25 s: a 0.5 s hold is not satisfied by one hitch");
+    step({AVER_FW_KEY_SPACE}, -3.0f);
+    check(approx(aver_fw_action_elapsed(clamp), 0.25f), "a negative dt counts as 0");
+    step({AVER_FW_KEY_SPACE}, std::nanf(""));
+    check(approx(aver_fw_action_elapsed(clamp), 0.25f), "a NaN dt counts as 0");
+
+    resetActions();
+}
+
+// DeadZone / Scale / Negate / Swizzle / Curve / Smooth, action- and binding-level.
+static void testActionModifiers() {
+    AVER_INFO("=== action modifiers: deadzone, scale, negate, swizzle, curve, smooth ===");
+    resetActions();
+    float v[2], w[3];
+
+    // ---- radial dead zone on a stick (two bindings, one action-level modifier) ----
+    const int32_t stick = aver_fw_action_register("T_Stick", AVER_FW_ACTION_AXIS2D);
+    aver_fw_action_bind(stick, AVER_FW_ACTION_SRC_GAMEPAD_AXIS, AVER_FW_GAMEPAD_AXIS_LEFT_X, 1.0f, 0, 0);
+    aver_fw_action_bind(stick, AVER_FW_ACTION_SRC_GAMEPAD_AXIS, AVER_FW_GAMEPAD_AXIS_LEFT_Y, 1.0f, 1, 0);
+    check(aver_fw_action_add_modifier(stick, -1, "deadzone:0.2:1:radial") == 1, "a radial dead zone attaches to the action");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 0.1f);
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_Y, 0.1f);
+    aver_fw_action_value2(stick, v);
+    check(v[0] == 0.0f && v[1] == 0.0f, "radial: a deflection of length 0.14 is inside the 0.2 dead zone");
+    check(aver_fw_action_held(stick) == 0, "...and so the action is not held");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 0.6f);
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_Y, 0.0f);
+    aver_fw_action_value2(stick, v);
+    check(approx(v[0], 0.5f) && v[1] == 0.0f, "radial: 0.6 remaps to (0.6-0.2)/(1-0.2) = 0.5");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 1.0f);
+    aver_fw_action_value2(stick, v);
+    check(approx(v[0], 1.0f), "radial: full deflection stays 1.0");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, -0.6f);
+    aver_fw_action_value2(stick, v);
+    check(approx(v[0], -0.5f), "radial: the sign is kept");
+
+    // ---- axial dead zone: each channel on its own ----
+    aver_fw_action_clear_config(stick);
+    check(aver_fw_action_add_modifier(stick, -1, "deadzone:0.2:1:axial") == 1, "an axial dead zone attaches");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 0.15f);
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_Y, 0.6f);
+    aver_fw_action_value2(stick, v);
+    check(v[0] == 0.0f && approx(v[1], 0.5f), "axial: x (0.15) is cut, y (0.6) remaps to 0.5 independently");
+
+    // ---- negate / swizzle / scale / curve ----
+    resetActions();
+    const int32_t neg = keyAction("T_NegY", AVER_FW_KEY_W, nullptr, 1);
+    check(aver_fw_action_add_modifier(neg, -1, "negate:y") == 1, "negate attaches");
+    aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+    aver_fw_action_value2(neg, v);
+    check(v[0] == 0.0f && v[1] == -1.0f, "negate:y flips the y channel");
+
+    const int32_t sw = keyAction("T_Swizzle", AVER_FW_KEY_W, nullptr, 0);   // W feeds x
+    check(aver_fw_action_add_modifier(sw, -1, "swizzle:yxz") == 1, "swizzle attaches");
+    aver_fw_action_value2(sw, v);
+    check(v[0] == 0.0f && v[1] == 1.0f, "swizzle:yxz moves a W binding's x into y");
+
+    const int32_t sc = aver_fw_action_register("T_Scale", AVER_FW_ACTION_AXIS2D);
+    const int32_t scB = aver_fw_action_bind_ex(sc, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_D, 1.0f, 0, 0);
+    check(scB >= 0 && aver_fw_action_add_modifier(sc, scB, "scale:2:3") == 1, "a binding-level scale attaches");
+    aver_fw_input_set_key(AVER_FW_KEY_D, 1);
+    aver_fw_action_value3(sc, w);
+    check(approx(w[0], 2.0f) && w[1] == 0.0f && w[2] == 0.0f, "scale:2:3 doubles the x channel of that binding");
+    aver_fw_action_clear_config(sc);
+    check(aver_fw_action_add_modifier(sc, -1, "scale:2") == 1, "an action-level uniform scale attaches");
+    aver_fw_action_value3(sc, w);
+    check(approx(w[0], 4.0f), "clear_config leaves the binding-level scale: it and the action scale compose to 4");
+
+    const int32_t z = aver_fw_action_register("T_Z", AVER_FW_ACTION_AXIS1D);
+    aver_fw_action_bind(z, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_E, 0.5f, 2, 0);
+    aver_fw_input_set_key(AVER_FW_KEY_E, 1);
+    aver_fw_action_value3(z, w);
+    check(w[0] == 0.0f && w[1] == 0.0f && w[2] == 0.5f, "value3 reads the Z channel (component 2)");
+
+    const int32_t cv = aver_fw_action_register("T_Curve", AVER_FW_ACTION_AXIS1D);
+    aver_fw_action_bind(cv, AVER_FW_ACTION_SRC_GAMEPAD_AXIS, AVER_FW_GAMEPAD_AXIS_LEFT_TRIGGER, 1.0f, 0, 0);
+    check(aver_fw_action_add_modifier(cv, -1, "curve:2") == 1, "curve attaches");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_TRIGGER, 0.5f);
+    aver_fw_action_value2(cv, v);
+    check(approx(v[0], 0.25f), "curve:2 on 0.5 is 0.25");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_TRIGGER, -0.5f);
+    aver_fw_action_value2(cv, v);
+    check(approx(v[0], -0.25f), "curve keeps the sign");
+
+    // Modifier ORDER matters: scale then negate vs swizzle then scale.
+    resetActions();
+    const int32_t ord = keyAction("T_Order", AVER_FW_KEY_W, nullptr, 0);
+    aver_fw_action_add_modifier(ord, -1, "swizzle:yxz");
+    aver_fw_action_add_modifier(ord, -1, "scale:1:5:1");
+    aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+    aver_fw_action_value2(ord, v);
+    check(approx(v[1], 5.0f), "modifiers apply in the order added (swizzle, then scale y)");
+
+    // ---- smooth ----
+    resetActions();
+    const int32_t sm = keyAction("T_Smooth", AVER_FW_KEY_W, nullptr, 0);
+    check(aver_fw_action_add_modifier(sm, -1, "smooth:0.1") == 1, "smooth attaches");
+    aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+    aver_fw_action_value2(sm, v);
+    check(v[0] == 1.0f, "before any update a smooth action passes the value through");
+    for (int i = 0; i < 10; ++i) step({AVER_FW_KEY_W}, 0.01f);
+    aver_fw_action_value2(sm, v);
+    check(std::fabs(v[0] - 0.632f) < 0.01f, "smooth tau 0.1: a step input reaches ~63% after 0.1 s of updates");
+    const float held = v[0];
+    aver_fw_input_set_key(AVER_FW_KEY_W, 0);   // no update: the on-demand query must not move
+    aver_fw_action_value2(sm, v);
+    check(v[0] == held, "between updates value2 returns the last updated output");
+    check(aver_fw_action_held(sm) == 1, "...and held reads the same cached value");
+    for (int i = 0; i < 30; ++i) step({}, 0.01f);
+    aver_fw_action_value2(sm, v);
+    check(v[0] < 0.1f, "after the key is released the output decays");
+
+    resetActions();
+    const int32_t sm0 = keyAction("T_Smooth0", AVER_FW_KEY_W, nullptr, 0);
+    aver_fw_action_add_modifier(sm0, -1, "smooth:0");
+    step({AVER_FW_KEY_W}, 0.01f);
+    aver_fw_action_value2(sm0, v);
+    check(v[0] == 1.0f, "smooth tau 0 passes through");
+
+    // A binding-level smooth makes the whole action cache-served, and per-binding state is separate.
+    resetActions();
+    const int32_t sb = aver_fw_action_register("T_SmoothBinding", AVER_FW_ACTION_DIGITAL);
+    const int32_t sbId = aver_fw_action_bind_ex(sb, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_W, 1.0f, 0, 0);
+    aver_fw_action_add_modifier(sb, sbId, "smooth:0.1");
+    for (int i = 0; i < 10; ++i) step({AVER_FW_KEY_W}, 0.01f);
+    aver_fw_action_value2(sb, v);
+    check(std::fabs(v[0] - 0.632f) < 0.01f, "a binding-level smooth advances in update too");
+
+    // reset_state drops the smoothing memory and the cache.
+    aver_fw_action_reset_state();
+    aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+    aver_fw_action_value2(sb, v);
+    check(v[0] == 1.0f, "reset_state returns a smoothed action to pass-through until the next update");
+
+    resetActions();
+}
+
+// Event masks for every state transition, elapsed/triggered time, and the managed event list.
+static void testActionEvents() {
+    AVER_INFO("=== action events: the 3x3 transition table, times, and the event list ===");
+    resetActions();
+
+    const int32_t plain = keyAction("T_EvPlain", AVER_FW_KEY_A);
+    const int32_t hold  = keyAction("T_EvHold", AVER_FW_KEY_B, "hold:0.25");
+    const int32_t pulse = keyAction("T_EvPulse", AVER_FW_KEY_C, "pulse:0.25");
+
+    step({});
+    check(is(plain, kN, 0), "None -> None raises nothing");
+    step({AVER_FW_KEY_A, AVER_FW_KEY_B, AVER_FW_KEY_C});
+    check(is(plain, kT, kEvStarted | kEvTriggered), "None -> Triggered: Started|Triggered");
+    check(is(hold, kO, kEvStarted | kEvOngoing), "None -> Ongoing: Started|Ongoing");
+    check(is(pulse, kT, kEvStarted | kEvTriggered), "a pulse starts Triggered");
+    step({AVER_FW_KEY_A, AVER_FW_KEY_B, AVER_FW_KEY_C});
+    check(is(plain, kT, kEvTriggered), "Triggered -> Triggered: Triggered");
+    check(is(hold, kT, kEvTriggered), "Ongoing -> Triggered: Triggered (hold 0.25 reached)");
+    check(is(pulse, kO, kEvOngoing), "Triggered -> Ongoing: Ongoing (between pulses)");
+    check(approx(aver_fw_action_elapsed(plain), 0.25f) && approx(aver_fw_action_triggered_time(plain), 0.25f),
+          "elapsed and triggered time accumulate while Triggered");
+    check(approx(aver_fw_action_elapsed(hold), 0.25f) && approx(aver_fw_action_triggered_time(hold), 0.125f),
+          "a hold: elapsed counts the Ongoing update too, triggered time only the Triggered one");
+    step({AVER_FW_KEY_B, AVER_FW_KEY_C});
+    check(is(plain, kN, kEvCompleted), "Triggered -> None: Completed");
+    check(aver_fw_action_elapsed(plain) == 0.0f && aver_fw_action_triggered_time(plain) == 0.0f,
+          "elapsed and triggered time reset on None");
+    check(is(pulse, kT, kEvTriggered) && is(hold, kT, kEvTriggered), "the pulse fires its second shot");
+    step({AVER_FW_KEY_C});
+    check(is(hold, kN, kEvCompleted), "a fired hold released: Completed");
+
+    // Ongoing -> None: Canceled.
+    resetActions();
+    const int32_t h2 = keyAction("T_EvHold2", AVER_FW_KEY_B, "hold:0.5");
+    step({AVER_FW_KEY_B});
+    step({});
+    check(is(h2, kN, kEvCanceled), "Ongoing -> None: Canceled");
+
+    // The event list names exactly the actions that raised something.
+    resetActions();
+    const int32_t e1 = keyAction("T_EvList1", AVER_FW_KEY_A);
+    const int32_t e2 = keyAction("T_EvList2", AVER_FW_KEY_B);
+    (void)e2;
+    step({AVER_FW_KEY_A});
+    int32_t listed = 0;
+    bool sawE1 = false, matches = true;
+    for (int32_t i = 0; i < aver_fw_action_event_count(); ++i) {
+        int32_t a = 0, mask = 0;
+        matches = matches && aver_fw_action_event_at(i, &a, &mask) == 1 && mask == aver_fw_action_events(a);
+        sawE1 = sawE1 || a == e1;
+        ++listed;
+    }
+    int32_t withEvents = 0;
+    for (int32_t h = 1; h <= aver_fw_action_count(); ++h) if (aver_fw_action_events(h) != 0) ++withEvents;
+    check(listed == withEvents && sawE1 && matches, "event_count/event_at list exactly the actions with events");
+    int32_t a = 77, mask = 77;
+    check(aver_fw_action_event_at(-1, &a, &mask) == 0 && aver_fw_action_event_at(listed, &a, &mask) == 0 &&
+          a == 77 && mask == 77, "event_at out of range returns 0 and leaves the outputs");
+    step({AVER_FW_KEY_A});
+    check(aver_fw_action_event_count() == 1, "a held plain key keeps raising Triggered, so it stays listed");
+    aver_fw_action_reset_state();
+    check(aver_fw_action_event_count() == 0 && aver_fw_action_state(e1) == kN && aver_fw_action_events(e1) == 0,
+          "reset_state clears the list, states and masks");
+
+    // A host that never calls update reads None / 0 from the new queries and unchanged legacy ones.
+    resetActions();
+    const int32_t nu = keyAction("T_NoUpdate", AVER_FW_KEY_A);
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_A, 1);
+    check(aver_fw_action_held(nu) == 1 && aver_fw_action_pressed(nu) == 1, "legacy queries work without any update");
+    check(aver_fw_action_state(nu) == kN && aver_fw_action_events(nu) == 0 && aver_fw_action_elapsed(nu) == 0.0f,
+          "state/events/elapsed read None/0 until update runs");
+
+    resetActions();
+}
+
+// Chord, Combo, cycles and a name that is registered later.
+static void testActionChordCombo() {
+    AVER_INFO("=== chord and combo triggers ===");
+    resetActions();
+
+    // Save is registered BEFORE Mod on purpose: the chord must evaluate Mod on demand, not rely on order.
+    const int32_t save = keyAction("T_Save", AVER_FW_KEY_S);
+    aver_fw_action_add_trigger(save, -1, "pressed");
+    check(aver_fw_action_add_trigger(save, -1, "chord:T_Mod") == 1, "a chord naming an action registered later is accepted");
+    step({AVER_FW_KEY_S});
+    check(aver_fw_action_state(save) == kN, "chord: S alone does nothing (the named action does not exist yet)");
+    const int32_t mod = keyAction("T_Mod", AVER_FW_KEY_LCTRL);
+    step({});
+    step({AVER_FW_KEY_S});
+    check(aver_fw_action_state(save) == kN, "chord: S alone is None");
+    step({});
+    step({AVER_FW_KEY_LCTRL});
+    check(aver_fw_action_state(mod) == kT && aver_fw_action_state(save) == kN, "chord: Mod alone is None for Save");
+    step({AVER_FW_KEY_LCTRL, AVER_FW_KEY_S});
+    check(aver_fw_action_state(save) == kT, "chord: Mod held, then S -> Triggered");
+    step({AVER_FW_KEY_LCTRL, AVER_FW_KEY_S});
+    check(aver_fw_action_state(save) == kN, "chord: and only once (pressed)");
+    step({});
+    step({AVER_FW_KEY_S});
+    step({AVER_FW_KEY_S, AVER_FW_KEY_LCTRL});
+    check(aver_fw_action_state(save) == kN, "chord: S first, then Mod -> None");
+    check(aver_fw_action_add_trigger(save, -1, "chord:T_Save") == 0 &&
+          std::string(aver_fw_action_config_error()).find("itself") != std::string::npos,
+          "a chord naming its own action is rejected");
+
+    // ---- combo Fire, Fire, Jump within 0.5 s of each step ----
+    resetActions();
+    const int32_t fire = keyAction("T_CFire", AVER_FW_KEY_MOUSE_LEFT);
+    const int32_t jump = keyAction("T_CJump", AVER_FW_KEY_SPACE);
+    (void)fire; (void)jump;
+    const int32_t combo = aver_fw_action_register("T_Combo", AVER_FW_ACTION_DIGITAL);
+    check(aver_fw_action_add_trigger(combo, -1, "combo:0.5:T_CFire,T_CFire,T_CJump") == 1, "a combo attaches");
+    step({AVER_FW_KEY_MOUSE_LEFT});
+    check(aver_fw_action_state(combo) == kO, "combo: after Fire it is Ongoing");
+    step({});
+    step({AVER_FW_KEY_MOUSE_LEFT});
+    step({});
+    check(aver_fw_action_state(combo) == kO, "combo: after the second Fire it is still Ongoing");
+    step({AVER_FW_KEY_SPACE});
+    check(is(combo, kT, kEvTriggered), "combo: Jump in time completes it -> Triggered");
+    step({});
+    check(is(combo, kN, kEvCompleted), "combo: Triggered for one update only");
+
+    step({AVER_FW_KEY_MOUSE_LEFT});
+    for (int i = 0; i < 4; ++i) step({});
+    check(aver_fw_action_state(combo) == kO, "combo: 0.5 s after a step it is still alive");
+    step({});
+    check(is(combo, kN, kEvCanceled), "combo: a gap beyond the window drops it (Canceled)");
+
+    step({AVER_FW_KEY_MOUSE_LEFT});
+    step({});
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(combo) == kN, "combo: the wrong action in the middle resets it");
+    step({});
+    step({AVER_FW_KEY_MOUSE_LEFT});
+    step({});
+    step({AVER_FW_KEY_MOUSE_LEFT});
+    step({});
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(combo) == kT, "combo: a clean run works again after a reset");
+
+    // ---- a two-action chord cycle neither hangs nor fires ----
+    resetActions();
+    const int32_t ca = keyAction("T_CycA", AVER_FW_KEY_W);
+    const int32_t cb = keyAction("T_CycB", AVER_FW_KEY_S);
+    check(aver_fw_action_add_trigger(ca, -1, "chord:T_CycB") == 1 && aver_fw_action_add_trigger(cb, -1, "chord:T_CycA") == 1,
+          "a chord cycle is accepted");
+    for (int i = 0; i < 4; ++i) step({AVER_FW_KEY_W, AVER_FW_KEY_S});
+    check(aver_fw_action_state(ca) == kN && aver_fw_action_state(cb) == kN, "a chord cycle reads None and returns");
+
+    resetActions();
+}
+
+// bind_ex ids, attach rules, action vs binding triggers, and trigger-less actions equal the legacy answers.
+static void testActionLegacyUntouched() {
+    AVER_INFO("=== bind_ex, attach rules, binding-vs-action triggers, legacy equivalence ===");
+    resetActions();
+
+    const int32_t a = aver_fw_action_register("T_BindA", AVER_FW_ACTION_DIGITAL);
+    const int32_t b = aver_fw_action_register("T_BindB", AVER_FW_ACTION_DIGITAL);
+    const int32_t id0 = aver_fw_action_bind_ex(a, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_W, 1.0f, 0, 0);
+    const int32_t id1 = aver_fw_action_bind_ex(b, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_S, 1.0f, 0, 0);
+    check(id0 == 0 && id1 == 1, "bind_ex hands out increasing binding ids");
+    check(aver_fw_action_bind_ex(0, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_W, 1.0f, 0, 0) == -1, "bind_ex: invalid action -> -1");
+    check(aver_fw_action_bind_ex(a, 99, 0, 1.0f, 0, 0) == -1, "bind_ex: invalid source -> -1");
+    check(aver_fw_action_bind_ex(a, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_COUNT, 1.0f, 0, 0) == -1, "bind_ex: invalid key -> -1");
+
+    check(aver_fw_action_add_trigger(a, id0, "hold:0.5") == 1 && std::string(aver_fw_action_config_error()).empty(),
+          "a trigger attaches to the action's own binding and clears the error");
+    check(aver_fw_action_add_trigger(a, id1, "hold:0.5") == 0 && !std::string(aver_fw_action_config_error()).empty(),
+          "a binding of another action is refused with a message");
+    check(aver_fw_action_add_trigger(a, 99, "hold:0.5") == 0, "an unknown binding id is refused");
+    check(aver_fw_action_add_trigger(a, -2, "hold:0.5") == 0, "binding < -1 is refused");
+    check(aver_fw_action_add_trigger(0, -1, "hold:0.5") == 0, "an invalid action is refused");
+    check(aver_fw_action_add_trigger(a, -1, "hold:-1") == 0 && !std::string(aver_fw_action_config_error()).empty(),
+          "a spec the parser rejects is refused with its message");
+    check(aver_fw_action_add_modifier(a, -1, "bogus") == 0, "a bad modifier is refused");
+    check(aver_fw_action_add_trigger(a, -1, nullptr) == 0, "a null spec is refused");
+
+    // ---- an action with a plain Space and a held gamepad A fires from either ----
+    resetActions();
+    const int32_t mixed = aver_fw_action_register("T_Mixed", AVER_FW_ACTION_DIGITAL);
+    aver_fw_action_bind(mixed, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_SPACE, 1.0f, 0, 0);
+    const int32_t pad = aver_fw_action_bind_ex(mixed, AVER_FW_ACTION_SRC_GAMEPAD_BUTTON, AVER_FW_GAMEPAD_A, 1.0f, 0, 0);
+    check(aver_fw_action_add_trigger(mixed, pad, "hold:0.25") == 1, "a hold attaches to the gamepad binding only");
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(mixed) == kT, "the trigger-less Space binding still fires at once");
+    step({});
+    aver_fw_input_set_gamepad_button(0, AVER_FW_GAMEPAD_A, 1);
+    aver_fw_action_update(kDt);
+    check(aver_fw_action_state(mixed) == kO, "gamepad A starts its hold: Ongoing");
+    aver_fw_action_update(kDt);
+    check(aver_fw_action_state(mixed) == kT, "gamepad A held 0.25 s -> Triggered");
+    aver_fw_input_set_gamepad_button(0, AVER_FW_GAMEPAD_A, 0);
+
+    // ---- an action trigger plus a plain binding: the action trigger alone decides ----
+    resetActions();
+    const int32_t own = keyAction("T_OwnTrigger", AVER_FW_KEY_SPACE, "hold:0.25");
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(own) == kO, "action trigger: the plain binding does not fire on its own");
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(own) == kT, "action trigger: fires when its hold is met");
+    aver_fw_action_clear_config(own);
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(own) == kT, "clear_config drops the action trigger: back to plain down");
+
+    // ---- no triggers anywhere == the legacy answers on a scripted sequence ----
+    resetActions();
+    const int32_t plain = keyAction("T_LegacyEq", AVER_FW_KEY_SPACE);
+    const int pattern[12] = {0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0};
+    bool same = true;
+    for (int i = 0; i < 12; ++i) {
+        if (pattern[i]) step({AVER_FW_KEY_SPACE}); else step({});
+        const bool held = aver_fw_action_held(plain) == 1, pressed = aver_fw_action_pressed(plain) == 1,
+                   released = aver_fw_action_released(plain) == 1;
+        const int ev = aver_fw_action_events(plain);
+        same = same && held == (aver_fw_action_state(plain) == kT) &&
+               pressed == ((ev & kEvStarted) != 0) && released == ((ev & kEvCompleted) != 0);
+    }
+    check(same, "a trigger-less action: state/events agree with held/pressed/released on every frame");
+
+    resetActions();
+}
+
+// Registry readback and invalid-handle behaviour of the new queries.
+static void testActionRegistryReadback() {
+    AVER_INFO("=== action registry readback ===");
+    const int32_t h1 = aver_fw_action_register("T_RegAxis", AVER_FW_ACTION_AXIS2D);
+    const int32_t h2 = aver_fw_action_register("T_RegDigital", AVER_FW_ACTION_DIGITAL);
+    check(aver_fw_action_count() >= 2 && h1 >= 1 && h2 >= 1 && h1 <= aver_fw_action_count(), "count covers the registered handles");
+    check(std::string(aver_fw_action_name(h1)) == "T_RegAxis" && std::string(aver_fw_action_name(h2)) == "T_RegDigital",
+          "name round-trips");
+    check(aver_fw_action_value_type(h1) == AVER_FW_ACTION_AXIS2D && aver_fw_action_value_type(h2) == AVER_FW_ACTION_DIGITAL,
+          "value_type round-trips");
+    const char* before = aver_fw_action_name(h1);
+    for (int i = 0; i < 64; ++i) aver_fw_action_register(("T_RegFill" + std::to_string(i)).c_str(), AVER_FW_ACTION_DIGITAL);
+    check(aver_fw_action_name(h1) == before && std::string(before) == "T_RegAxis",
+          "the name pointer stays valid across later registrations");
+
+    const int32_t bad[3] = {0, -1, aver_fw_action_count() + 1};
+    bool ok = true;
+    for (int32_t h : bad) {
+        float w[3] = {9, 9, 9};
+        aver_fw_action_value3(h, w);
+        ok = ok && aver_fw_action_name(h) == nullptr && aver_fw_action_value_type(h) == -1 &&
+             aver_fw_action_state(h) == 0 && aver_fw_action_events(h) == 0 && aver_fw_action_elapsed(h) == 0.0f &&
+             aver_fw_action_triggered_time(h) == 0.0f && w[0] == 0.0f && w[1] == 0.0f && w[2] == 0.0f;
+    }
+    check(ok, "invalid handles: name nullptr, value_type -1, everything else zero");
+    aver_fw_action_clear_config(0);   // must not crash
+    aver_fw_action_value3(h1, nullptr);
+}
+
+// The scheme getters for trigger/modifier text, then a scheme-driven action stepped to Triggered.
+static void testInputSchemeTriggers() {
+    AVER_INFO("=== input scheme: trigger and modifier getters ===");
+    resetActions();
+
+    const std::string dir  = std::getenv("TEMP") ? std::getenv("TEMP") : ".";
+    const std::string path = dir + "/aver-frameworktest-inputscheme-triggers.ocinput";
+    {
+        std::ofstream f(path, std::ios::binary | std::ios::trunc);
+        f << "OCINPUT 1\n"
+             "ACTION T_SchemeHold digital trigger hold:0.25 modifier scale:2\n"
+             "ACTION T_SchemeMove axis2 modifier deadzone:0.2:1:radial modifier smooth:0.1\n"
+             "ACTION T_SchemeMod digital\n"
+             "BIND T_SchemeHold key Space modifier negate\n"
+             "BIND T_SchemeMove gamepadaxis LeftX trigger down\n"
+             "BIND T_SchemeMod key LeftCtrl trigger pressed trigger chord:T_SchemeMod2\n"
+             "ACTION T_SchemeMod2 digital\n";
+    }
+    check(aver_fw_input_scheme_load(path.c_str()) == 1, "a scheme with triggers and modifiers loads: " +
+          std::string(aver_fw_input_scheme_error()));
+
+    check(aver_fw_input_scheme_trigger_count(~0) == 1 && std::string(aver_fw_input_scheme_trigger_spec(~0, 0)) == "hold:0.25",
+          "action 0 reads back its trigger as canonical text");
+    check(aver_fw_input_scheme_modifier_count(~0) == 1 && std::string(aver_fw_input_scheme_modifier_spec(~0, 0)) == "scale:2",
+          "action 0 reads back its modifier");
+    check(aver_fw_input_scheme_modifier_count(~1) == 2 && std::string(aver_fw_input_scheme_modifier_spec(~1, 0)) == "deadzone" &&
+          std::string(aver_fw_input_scheme_modifier_spec(~1, 1)) == "smooth:0.1",
+          "action 1 reads back two modifiers in order, the dead zone in canonical form");
+    check(aver_fw_input_scheme_trigger_count(0) == 0 && aver_fw_input_scheme_modifier_count(0) == 1 &&
+          std::string(aver_fw_input_scheme_modifier_spec(0, 0)) == "negate", "binding 0 carries one modifier and no trigger");
+    check(aver_fw_input_scheme_trigger_count(1) == 1 && std::string(aver_fw_input_scheme_trigger_spec(1, 0)) == "down",
+          "binding 1 carries a trigger");
+    check(aver_fw_input_scheme_trigger_count(2) == 2 && std::string(aver_fw_input_scheme_trigger_spec(2, 1)) == "chord:T_SchemeMod2",
+          "binding 2 carries two triggers");
+    check(aver_fw_input_scheme_trigger_count(99) == 0 && aver_fw_input_scheme_trigger_spec(99, 0) == nullptr &&
+          aver_fw_input_scheme_trigger_count(~99) == 0 && aver_fw_input_scheme_modifier_spec(~0, 5) == nullptr &&
+          aver_fw_input_scheme_modifier_spec(0, -1) == nullptr, "out of range: 0 / nullptr");
+
+    // Rebuild the first action the way InputScheme.cs does and step its hold to Triggered.
+    const int32_t h = aver_fw_action_register("T_SchemeHold", AVER_FW_ACTION_DIGITAL);
+    const int32_t bid = aver_fw_action_bind_ex(h, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_SPACE, 1.0f, 0, 0);
+    bool applied = true;
+    for (int i = 0; i < aver_fw_input_scheme_trigger_count(~0); ++i)
+        applied = applied && aver_fw_action_add_trigger(h, -1, aver_fw_input_scheme_trigger_spec(~0, i)) == 1;
+    for (int i = 0; i < aver_fw_input_scheme_modifier_count(~0); ++i)
+        applied = applied && aver_fw_action_add_modifier(h, -1, aver_fw_input_scheme_modifier_spec(~0, i)) == 1;
+    for (int i = 0; i < aver_fw_input_scheme_modifier_count(0); ++i)
+        applied = applied && aver_fw_action_add_modifier(h, bid, aver_fw_input_scheme_modifier_spec(0, i)) == 1;
+    check(applied, "the scheme's specs apply through add_trigger/add_modifier");
+    step({AVER_FW_KEY_SPACE});
+    check(aver_fw_action_state(h) == kO, "scheme hold: Ongoing after 0.125 s");
+    step({AVER_FW_KEY_SPACE});
+    float w[3];
+    aver_fw_action_value3(h, w);
+    check(aver_fw_action_state(h) == kT && approx(w[0], -2.0f),
+          "scheme hold: Triggered at 0.25 s, value negated by the binding then scaled by the action");
+
+    // A rejected load clears the getters, like the rest of the section.
+    check(aver_fw_input_scheme_load((dir + "/aver-frameworktest-inputscheme-missing2.ocinput").c_str()) == 0 &&
+          aver_fw_input_scheme_trigger_count(~0) == 0, "after a failed load the trigger getters read empty");
+    resetActions();
+}
+
 // Runs every framework test. Returns the failure count as the exit code.
 int main() {
     AVER_INFO("Aver.Framework test");
@@ -1032,6 +1654,13 @@ int main() {
     testGamepad();
     testActions();
     testInputScheme();
+    testActionTriggers();
+    testActionModifiers();
+    testActionEvents();
+    testActionChordCombo();
+    testActionLegacyUntouched();
+    testActionRegistryReadback();
+    testInputSchemeTriggers();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

@@ -146,7 +146,19 @@ std::string uiStarterLayoutText() { return uiWriteLayout(uiStarterLayout()); }
 
 // ================================================================================== the tab =======
 
+namespace {
+UiLayoutEditorLoc g_loc;
+}
+
+void setUiLayoutEditorLoc(UiLayoutEditorLoc loc) { g_loc = std::move(loc); }
+
 UiLayoutEditor::UiLayoutEditor(std::string path) : path_(std::move(path)) { loadFromDisk(); }
+
+// The preview shows the preview culture: its own tree resolves references through the host's store.
+void UiLayoutEditor::applyPreviewLoc() {
+    if (g_loc.resolve) preview_.setTextResolver(g_loc.resolve, g_loc.epoch);
+    else preview_.setTextResolver({}, {});
+}
 
 void UiLayoutEditor::loadFromDisk() {
     std::string text;
@@ -427,6 +439,7 @@ void UiLayoutEditor::layoutPreview(const UiTextMetrics& m) { preview_.layout(m);
 void UiLayoutEditor::rebuildPreview() {
     ++structureVersion_;
     preview_.clear();
+    applyPreviewLoc();
     preview_.setTheme(uiBuiltinTheme(doc_.theme));
     preview_.setDpi(doc_.dpi);
     preview_.setViewport({0, 0, previewW_, previewH_});
@@ -683,8 +696,53 @@ bool UiLayoutEditor::drawProperty(const UiPropDesc& d) {
     }
     if (immediate && changed) propEditEnd();
     if (ImGui::IsItemDeactivated()) propEditEnd();
+    if (std::strcmp(d.key, "text") == 0 || std::strcmp(d.key, "placeholder") == 0 || std::strcmp(d.key, "items") == 0)
+        drawLocalizeRow(d);
     ImGui::PopID();
     return changed;
+}
+
+// docs/LOCALIZATION.md: a text field may hold "@Table:Key=Default". Localize turns the literal into one (table UI,
+// key <Layout>.<Widget>.<property>), keeping the literal as the inline default.
+void UiLayoutEditor::drawLocalizeRow(const UiPropDesc& d) {
+    UiWidgetProps& p = doc_.nodes[static_cast<usize>(selected_)].props;
+    std::vector<std::string> tokens;
+    d.get(p, tokens);
+    const bool isItems = d.type == UiPropType::StringList;
+    UiTextRef ref;
+    bool anyRef = false, anyLiteral = false;
+    std::string shown;
+    for (const std::string& t : tokens) {
+        const bool isRef = uiParseTextRef(t, ref);
+        anyRef = anyRef || isRef;
+        anyLiteral = anyLiteral || (!isRef && !t.empty());
+        if (!shown.empty()) shown += ", ";
+        shown += preview_.shown(t);
+    }
+    if (anyRef) ImGui::TextDisabled("Shown: %s", shown.c_str());
+    if (!anyLiteral) return;
+
+    // Keys use [A-Za-z0-9_.-]; anything else in a layout or widget name becomes '_'.
+    const auto clean = [](std::string s) {
+        for (char& c : s) if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '.' && c != '-') c = '_';
+        return s;
+    };
+    const std::string base = "@UI:" + clean(doc_.name.empty() ? std::string("Layout") : doc_.name) + "." + clean(p.name) + "." + d.key;
+    if (!ImGui::SmallButton(isItems ? "Localize items" : "Localize")) return;
+    std::string newText;
+    for (usize i = 0; i < tokens.size(); ++i) {
+        const bool keep = tokens[i].empty() || uiParseTextRef(tokens[i], ref);
+        const std::string value = keep ? tokens[i]
+                                       : base + (isItems ? "." + std::to_string(i) : std::string()) + "=" + tokens[i];
+        newText += (newText.empty() ? "" : " ") + uiQuote(value);
+    }
+    propEditBegin();
+    if (uiSetProp(p, d.key, newText)) {
+        propEdited_ = true;
+        dirty_ = true;
+        rebuildPreview();
+    }
+    propEditEnd();
 }
 
 void UiLayoutEditor::drawInspector() {
@@ -890,6 +948,20 @@ void UiLayoutEditor::drawToolbar() {
     if (ImGui::BeginCombo("##zoom", current)) {
         for (int i = 0; i < 7; ++i) if (ImGui::Selectable(zoomLabels[i], zoomValues[i] == zoomPercent_)) zoomPercent_ = zoomValues[i];
         ImGui::EndCombo();
+    }
+    if (g_loc.cultures && g_loc.culture) {
+        const std::vector<std::string> cultures = g_loc.cultures();
+        if (cultures.size() > 1) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.0f);
+            const std::string active = g_loc.culture();
+            if (ImGui::BeginCombo("##culture", active.c_str())) {
+                for (const std::string& c : cultures)
+                    if (ImGui::Selectable(c.c_str(), c == active) && g_loc.setCulture) g_loc.setCulture(c);
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Preview culture: shows translated text for references like @UI:Menu.Play=Play.");
+        }
     }
     ImGui::SameLine();
     ImGui::Checkbox("Interact", &interact_);

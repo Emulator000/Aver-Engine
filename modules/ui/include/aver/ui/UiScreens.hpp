@@ -47,7 +47,7 @@ struct UiRebindRow {
 
 struct UiRebindModel {
     std::vector<UiRebindRow> rows;
-    std::string hint = "Press a key...";   // shown while a row listens
+    std::string hint = "@UI:controls.pressKey=Press a key...";   // shown while a row listens
 };
 
 // Builds and drives a settings screen in a tree. Must not outlive the tree or the models.

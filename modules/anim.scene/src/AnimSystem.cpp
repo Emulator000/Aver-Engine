@@ -1,11 +1,14 @@
 // The tick that turns a CAnimator's clock into a posed skeleton.
 #include "aver/anim/AnimSystem.hpp"
 
+#include "aver/core/Assert.hpp"
+#include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/scene/ComponentPool.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <utility>
 
@@ -77,7 +80,81 @@ u32 bitsOf(f32 v) {
     return b;
 }
 
+u32 g_rootType = 0;
+
+f32 clamp01(f32 v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+Quat rotZ(f32 yaw) { return Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw); }
+
 } // namespace
+
+u32 AnimSystem::registerComponents(scene::World& world) {
+    auto b = world.registerComponent<CRootMotion>("CRootMotion");
+    b.field("mode", scene::FieldKind::I32, static_cast<u16>(offsetof(CRootMotion, mode)))
+        .field("sources", scene::FieldKind::I32, static_cast<u16>(offsetof(CRootMotion, sources)))
+        .field("axes", scene::FieldKind::I32, static_cast<u16>(offsetof(CRootMotion, axes)))
+        .field("flags", scene::FieldKind::I32, static_cast<u16>(offsetof(CRootMotion, flags)))
+        .field("scale", scene::FieldKind::F32, static_cast<u16>(offsetof(CRootMotion, scale)))
+        .field("accumX", scene::FieldKind::F32, static_cast<u16>(offsetof(CRootMotion, accumX)))
+        .field("accumY", scene::FieldKind::F32, static_cast<u16>(offsetof(CRootMotion, accumY)))
+        .field("accumZ", scene::FieldKind::F32, static_cast<u16>(offsetof(CRootMotion, accumZ)))
+        .field("accumYaw", scene::FieldKind::F32, static_cast<u16>(offsetof(CRootMotion, accumYaw)))
+        .field("accumSeconds", scene::FieldKind::F32, static_cast<u16>(offsetof(CRootMotion, accumSeconds)))
+        .field("reserved", scene::FieldKind::I32, static_cast<u16>(offsetof(CRootMotion, reserved)), 0, true);
+    AVER_ASSERTM(b.verify(sizeof(CRootMotion)), "CRootMotion");
+    g_rootType = b.typeId();
+    return g_rootType;
+}
+
+CRootMotion* AnimSystem::attach(scene::World& world, scene::Entity e, i32 mode, u32 axes, f32 scale) {
+    if (g_rootType == 0) return nullptr;
+    auto* c = static_cast<CRootMotion*>(world.addComponent(e, g_rootType));
+    if (!c) return nullptr;
+    *c = CRootMotion{};
+    c->mode = mode;
+    c->axes = axes;
+    c->scale = scale;
+    return c;
+}
+
+bool AnimSystem::rootSpec(const scene::World& world, scene::Entity e, u32 sourceBit, RootSpec& out) {
+    if (g_rootType == 0) return false;
+    const auto* rm = world.component<CRootMotion>(e, g_rootType);
+    if (!rm || rm->mode == kRootMotionNone) return false;
+    const u32 sources = rm->sources ? rm->sources : (kRootSrcGraph | kRootSrcMontage);
+    if (!(sources & sourceBit)) return false;
+    const auto* sm = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
+    if (!sm || sm->skeleton == 0) return false;
+    const fmt::OcSkeleton* skel = skeleton(sm->skeleton);
+    if (!skel) return false;
+    const u32 bone = rootBoneOf(*skel);
+    if (bone == kNoBone) return false;
+    out.bone = bone;
+    out.axes = rm->axes ? rm->axes : kRootAxesDefault;
+    out.rest = Transform{skel->bones[bone].translation, skel->bones[bone].rotation, skel->bones[bone].scale};
+    return true;
+}
+
+void AnimSystem::addRootMotion(scene::Entity e, const RootDelta& d) {
+    if (!d.any()) return;
+    composeDelta(pendingBase_[e], d);
+}
+
+bool AnimSystem::evaluateSlot(scene::Entity e, u64 slotHash, const fmt::OcSkeleton& skel, const Pose& base,
+                              Pose& out, f32& coverage) {
+    if (std::find(consumedSlots_.begin(), consumedSlots_.end(), slotHash) == consumedSlots_.end())
+        consumedSlots_.push_back(slotHash);
+    return montages_.evaluateSlot(e, slotHash, skel, base, out, coverage);
+}
+
+MontageSystem::Sink AnimSystem::montageSink() {
+    // Same wire as a clip notify: counted, and nothing delivered (no backlog) with no sink installed.
+    return [this](scene::Entity e, const char* name) {
+        if (!notify_) return;
+        ++fired_;
+        notify_(e, name, notifyUser_);
+    };
+}
 
 const fmt::OcSkeleton* AnimSystem::skeleton(u64 objectId) {
     return cachedLoad(skeletons_, objectId, resolve_, user_,
@@ -116,6 +193,12 @@ void AnimSystem::clear() {
     // Every clip pointer a slot caches is about to dangle, and every clock it vouches for is gone.
     ++steadyEpoch_;
     for (auto& [e, clock] : closing) closeAllOpen(e, clock);
+
+    // Montages end the same way: open notify states close and Ended fires, before the clips go.
+    montages_.clear(montageSink());
+    rootClocks_.clear();
+    pendingBase_.clear();
+    warnedSlots_.clear();
 
     skeletons_.clear();
     clips_.clear();
@@ -197,9 +280,16 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         }
     }
 
-    if (!animators) { objects_.clear(); return; }
+    if (!montages_.empty()) {
+        const MontageSystem::Sink sink = montageSink();
+        montages_.prune(world, sink);
+        montages_.tick(*this, world, dt, sink);
+    }
+
+    if (!animators) { objects_.clear(); pendingBase_.clear(); rootClocks_.clear(); return; }
 
     ++objectStamp_;
+    ++rootStamp_;
     for (usize i = 0; i < animators->size(); ++i) {
         const scene::Entity e = animators->entityAt(i);
         auto* a = static_cast<scene::CAnimator*>(animators->dataAt(i));
@@ -265,6 +355,7 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         // Captured BEFORE the advance: t0 is the animator's time when playback starts.
         if (live) captureObject(world, e, *a, *objClip);
 
+        const f32 timeBefore = a->time;
         if (!paused && !held) a->time += dt * speed;
 
         // Before stepNotifies, so a sink that reads the entity's transform sees this frame's placement.
@@ -314,12 +405,24 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         Posed& p = posed_[e];
         p.skel = skel;
         restPose(*skel, p.pose);
+        consumedSlots_.clear();
+
+        // Root motion: None (the zero-fill) costs this one probe and changes nothing below.
+        auto* rm = g_rootType != 0 ? world.component<CRootMotion>(e, g_rootType) : nullptr;
+        const bool rootMode = rm && rm->mode != kRootMotionNone;
+        RootSpec gspec;
+        const bool gOn = rootMode && rootSpec(world, e, kRootSrcGraph, gspec);
+        RootDelta rootD;
 
         const bool sourced = poseSrc_ && poseSrc_(e, *skel, p.pose, poseSrcUser_);
+        if (sourced && rootMode) {
+            if (const auto pb = pendingBase_.find(e); pb != pendingBase_.end()) rootD = pb->second;
+        }
         if (const fmt::OcAnimation* c = sourced ? nullptr : clip(a->clip)) {
             // The loop flag lives on the COMPONENT, not the clip, so one clip can be looped by one
             // actor and played once by another.
-            const f32 t = wrapClipTime(*c, a->time, (a->flags & scene::kAnimatorOnce) != 0);
+            const bool once = (a->flags & scene::kAnimatorOnce) != 0;
+            const f32 t = wrapClipTime(*c, a->time, once);
             if (weight >= 0.999f) {
                 sampleAnimation(*c, t, p.pose);
             } else if (weight > 0.0f) {
@@ -330,7 +433,85 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
                 blendPose(p.pose, sampled, weight, blended);
                 p.pose = blended;
             }
+            if (gOn && clipHasRootMotion(*c, gspec)) {
+                lockRoot(p.pose, gspec);
+                RootClock& rc = rootClocks_[e];
+                // An external write to the clock is a scrub, not motion.
+                const bool scrub = !rc.valid || rc.clip != a->clip ||
+                                   std::fabs(a->time - rc.time) > 2.0f * dt * std::fabs(speed) + 1e-4f;
+                if (!scrub && !paused)
+                    addWeighted(rootD, rootDeltaBetween(*c, gspec, wrapClipTime(*c, timeBefore, once), t, !once), weight);
+                rc.clip = a->clip;
+                rc.time = a->time;
+                rc.valid = true;
+                rc.seen = rootStamp_;
+            }
         }
+
+        // MONTAGES. A slot a pipeline node consumed was applied there; DefaultSlot montages nothing
+        // consumed go full-body over the pose now. Any other unconsumed slot is ignored (warned once).
+        if (!montages_.empty()) {
+            static const u64 defaultSlot = fnv1a64(std::string_view(kDefaultSlot));
+            montages_.slotHashes(e, slotScratch_);
+            for (const u64 s : slotScratch_) {
+                const bool consumed = std::find(consumedSlots_.begin(), consumedSlots_.end(), s) != consumedSlots_.end();
+                if (consumed) continue;
+                if (s != defaultSlot) {
+                    if (warnedSlots_.insert(s).second)
+                        AVER_WARN("[Anim] montage slot '{}' has no slot node in this entity's state machine; ignored",
+                                  montages_.slotLabel(e, s));
+                    continue;
+                }
+                f32 cov = 0.0f;
+                if (!montages_.evaluateSlot(e, s, *skel, p.pose, slotPose_, cov)) continue;
+                blendPose(p.pose, slotPose_, cov, mixPose_);
+                p.pose.local.swap(mixPose_.local);
+            }
+        }
+
+        if (rootMode) {
+            // Mix: each slot's root-motion montage pulls the base delta toward its own by coverage times
+            // the pipeline's keep-weight. A montage with no root-motion clip does not override the base.
+            if (!montages_.empty()) {
+                static const u64 defaultSlot = fnv1a64(std::string_view(kDefaultSlot));
+                for (const u64 s : slotScratch_) {
+                    const bool consumed = std::find(consumedSlots_.begin(), consumedSlots_.end(), s) != consumedSlots_.end();
+                    if (!consumed && s != defaultSlot) continue;
+                    RootDelta md;
+                    f32 cov = 0.0f;
+                    if (!montages_.rootDelta(e, s, md, cov)) continue;
+                    const f32 keep = (consumed && slotRootW_) ? slotRootW_(e, s, slotRootWUser_) : 1.0f;
+                    rootD = lerpDelta(rootD, md, clamp01(cov * keep));
+                }
+            }
+            rootD.move *= (rm->scale == 0.0f ? 1.0f : rm->scale) * world.localTransform(e).scale.x;
+
+            if (rm->mode != kRootMotionIgnore) {
+                RootDelta acc;
+                acc.move = Vec3{rm->accumX, rm->accumY, rm->accumZ};
+                acc.yaw = rm->accumYaw;
+                composeDelta(acc, rootD);
+                rm->accumSeconds += dt;
+                if (rm->mode == kRootMotionApply && !(rm->flags & kRootMotionExternal)) {
+                    // E o delta, the object-animation rule. Through World, not a raw write: see writeObject.
+                    Transform xf = world.localTransform(e);
+                    xf.position = xf.position + xf.rotation.rotate(acc.move);
+                    xf.rotation = (xf.rotation * rotZ(acc.yaw)).normalized();
+                    world.setLocalTransform(e, xf);
+                    acc = RootDelta{};
+                    rm->accumSeconds = 0.0f;
+                } else if (rm->mode == kRootMotionApply && rm->accumSeconds > 0.5f) {
+                    // External, but nobody has consumed it for half a second: drop it.
+                    acc = RootDelta{};
+                    rm->accumSeconds = 0.0f;
+                }
+                rm->accumX = acc.move.x;
+                rm->accumY = acc.move.y;
+                rm->accumZ = acc.move.z;
+                rm->accumYaw = acc.yaw;
+            }
+        }
+
         // THE POSE MODIFIER SEAM. Everything above produced a local-space pose from a clip; this is
         // the one point at which anything else may edit it, and it was empty until a control rig
         // needed it -- sampleAnimation wrote p.pose and the next line consumed it.
@@ -341,6 +522,12 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         if (poseMod_) poseMod_(e, *skel, p.pose, poseModUser_);
 
         poseToSkinning(*skel, p.pose, p.skin);
+    }
+
+    pendingBase_.clear();
+    for (auto it = rootClocks_.begin(); it != rootClocks_.end();) {
+        if (it->second.seen == rootStamp_) ++it;
+        else it = rootClocks_.erase(it);
     }
 
     // Drop every base nothing drove this tick: the entity died, lost its animator or gained a rig, or

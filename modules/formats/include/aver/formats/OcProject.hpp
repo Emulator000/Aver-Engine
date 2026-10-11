@@ -32,6 +32,8 @@ struct ProjectDesc {
     // GAMEMODE override. Empty: the engine's default (the flying drone pawn). Declaring a GameMode
     // class does NOT make it the default; this key does.
     std::string gameMode;
+    // LOCALE.DEFAULT: the culture every missing translation falls back to (BCP-47-like tag). Empty = unstated = "en".
+    std::string localeDefault;          // LOCALE.DEFAULT
     std::string author;                 // AUTHOR (free text, rest of line)
 
     // RENDER.*, all -1 when the manifest did not state them.

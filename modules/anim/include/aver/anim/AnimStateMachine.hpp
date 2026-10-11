@@ -5,7 +5,9 @@
 // scene and no GPU. Design notes and the asset format live in docs/ANIM_BLEND_STATE.md.
 #pragma once
 
+#include "aver/anim/AnimPipeline.hpp"
 #include "aver/anim/BlendSpace.hpp"
+#include "aver/anim/RootMotion.hpp"
 
 #include <functional>
 #include <string>
@@ -70,6 +72,9 @@ struct AnimStateMachineAsset {
     std::string name;
     std::vector<AsmParam> params;
     std::vector<AsmMachine> machines;       // machines[0] is the root
+    // Optional post-machine stage (slots, layered and additive blends). Non-empty makes the file
+    // version 2; see AnimPipeline.hpp.
+    std::vector<PipeNode> pipeline;
 
     bool valid(std::string* why = nullptr) const;
     i32 paramIndex(const std::string& name) const;
@@ -82,9 +87,6 @@ struct AsmEvent {
     std::string state;
     std::string name;             // the state's onEnter/onExit; empty when it has none
 };
-
-using AsmClipFn = std::function<const fmt::OcAnimation*(const std::string&)>;
-using AsmBlendSpaceFn = std::function<const BlendSpaceAsset*(const std::string&)>;
 
 class AnimStateMachine {
 public:
@@ -110,6 +112,12 @@ public:
     void tick(f32 dt);
 
     void evaluate(const fmt::OcSkeleton& skel, Pose& out) const;
+
+    // Root motion: with a spec set, tick() sums the layer-weighted root delta of every flagged clip
+    // and evaluate() locks that root in each layer's pose. Null = off (the spec is copied).
+    void setRootMotion(const RootSpec* spec);
+    // The delta since the last call; resets it.
+    RootDelta consumeRootDelta();
 
     // Events since the last drain, in the order they happened.
     void drainEvents(std::vector<AsmEvent>& out);
@@ -165,6 +173,9 @@ private:
     std::vector<AsmEvent> events_;
     bool blockInterrupt_ = false;
     u32 fired_ = 0;
+    RootSpec rootSpec_;
+    bool hasRoot_ = false;
+    RootDelta rootAcc_;
 };
 
 } // namespace aver::anim

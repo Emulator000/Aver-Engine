@@ -130,6 +130,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "UiLayoutEditor.hpp"
 #include "BlendSpaceEditor.hpp"
 #include "AnimStateMachineEditor.hpp"
+#include "MontageEditor.hpp"
 #include "SoundEditor.hpp"
 // Guarded: ParticleEditor.hpp includes OcParticle.hpp, which sandbox/CMakeLists.txt links only
 // `if(TARGET Aver.Formats.Particles)` (gated on Aver.Particles). With AVER_MODULE_PARTICLES=OFF
@@ -144,6 +145,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Unconditional for the identical reason: OcInput.hpp's own comment states it needs no engine
 // dependency either.
 #include "InputSchemeEditor.hpp"
+// Data tables (.csv/.json) and localization string tables: text formats in the base Aver.Formats target, so unconditional too.
+#include "DataTableEditor.hpp"
+#include "StringTableEditor.hpp"
 #include "SoftBodyPanel.hpp"
 #include "RenderQueueOutput.hpp"
 #include "RenderQueuePanel.hpp"
@@ -267,6 +271,7 @@ static_assert(static_cast<aver::u32>(aver::sr::Quality::Performance) == aver::vo
 #endif
 #if AVER_MODULE_FRAMEWORK
 #include "aver/framework/framework_abi.h"
+#include "aver/framework/framework_state_abi.h"
 #include "aver/framework/framework_hooks.h"
 #endif
 
@@ -381,6 +386,16 @@ inline i32 saveGraphVarSet(aver::scene::Entity e, const char* name, u32 kind, f3
     return aver_fw_graph_var_set(static_cast<i32>(e), name, static_cast<int32_t>(kind), f, i);
 }
 
+// Managed entity state (framework_state_abi.h) relay.
+inline i32 saveStateCount(aver::scene::Entity e, void*) { return aver_fw_state_count(static_cast<i32>(e)); }
+inline i32 saveStateAt(aver::scene::Entity e, i32 index, char* nameBuf, i32 nameCap, char* dataBuf,
+                       i32 dataCap, void*) {
+    return aver_fw_state_at(static_cast<i32>(e), index, nameBuf, nameCap, dataBuf, dataCap);
+}
+inline i32 saveStateSet(aver::scene::Entity e, const char* name, const char* data, i32 dataLen, void*) {
+    return aver_fw_state_set(static_cast<i32>(e), name, data, dataLen);
+}
+
 inline aver::save::Host saveHost() {
     aver::save::Host h;
     h.spawnClass    = &saveSpawnClass;
@@ -390,6 +405,9 @@ inline aver::save::Host saveHost() {
     h.graphVarCount = &saveGraphVarCount;
     h.graphVarAt    = &saveGraphVarAt;
     h.graphVarSet   = &saveGraphVarSet;
+    h.stateCount    = &saveStateCount;
+    h.stateAt       = &saveStateAt;
+    h.stateSet      = &saveStateSet;
     return h;
 }
 
@@ -1271,6 +1289,7 @@ public:
     void setWindowed(bool w);                          // --windowed (now the default)
     void setFullscreen(bool f);                      // --fullscreen
     void setBackend(std::string b);   // --backend <name>
+    void setCultureOverride(std::string tag);   // --culture <tag>: the UI culture over the preview pref (docs/LOCALIZATION.md)
     void setFrameBudget(f32 ms);
     void setDebugLayer(bool d);
 
@@ -2673,9 +2692,17 @@ private:
     void cbCreateUiLayout();
     void cbCreateBlendSpace();
     void cbCreateStateMachine();
+    void cbCreateMontage();
 
     // Writes a starter .ocinput (Input Scheme) and opens it.
     void cbCreateInputScheme();
+
+    // Writes a starter .ocgas (Gameplay Definitions) and opens it.
+    void cbCreateGameplayDefs();
+
+    // Writes a starter data table (.csv) / an empty string table for the default culture, and opens it.
+    void cbCreateDataTable();
+    void cbCreateStringTable(const std::string& name);
 
     std::string cbImportBlockedReason(const std::string& dir) const;
 
@@ -3526,6 +3553,7 @@ private:
     bool windowedOverride_=false;    // --windowed: kept so the flag still parses; windowed is the default now
     bool fullscreenOverride_=false;  // --fullscreen: opt an interactive run INTO borderless fullscreen
     std::string backendName_;   // --backend: which RHI backend to ask for first
+    std::string cultureOverride_;   // --culture: beats the saved preview culture (editor pref loc.previewCulture)
     // RENDER.BACKEND as the OPEN PROJECT states it. Separate from backendName_ (what this run launched with).
     std::string projectBackend_;
     std::string runningBackend_ = "?";   // what the device actually came back as, latched at init
@@ -4166,6 +4194,8 @@ private:
     bool                cbWantDuplicate_ = false, cbWantImport_ = false;
     char                cbRenameBuf_[256] = {};
     char                cbNewFolderBuf_[128] = {};
+    bool                cbWantNewStringTable_ = false;
+    char                cbNewStringTableBuf_[64] = {};
     std::string         cbStatus_;                // Last operation outcome.
     int                 cbIdeChoice_ = -1;        // -1 = IdeIntegration default.
     // Bottom drawers: drawerAnim_ is eased 0..1 slide. drawerShown_ survives retraction.

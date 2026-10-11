@@ -70,6 +70,9 @@ struct UiInputState {
     bool wantsKeyboard() const { return menuOpen || textEditing; }
 };
 
+// True with the resolved text when `raw` is a localization reference the resolver can resolve.
+using UiTextResolveFn = std::function<bool(std::string_view raw, std::string& out)>;
+
 class UiTree {
 public:
     UiTree();
@@ -108,6 +111,17 @@ public:
     f32 scale() const { return scale_; }         // as of the last layout
     void setTheme(UiTheme t) { theme_ = std::move(t); }
     const UiTheme& theme() const { return theme_; }
+
+    // ---- localized text ---------------------------------------------------------------------
+    // A widget's text, items and placeholder may hold a reference "@Table:Key[=Default]" (docs/LOCALIZATION.md).
+    // The resolver returns true with the resolved text when `raw` is a reference it knows how to resolve; `epoch`
+    // (optional) is polled at the top of update(), layout() and draw() and the resolved-string cache is dropped
+    // when it changes, so a culture switch re-reads text without touching a widget.
+    void setTextResolver(UiTextResolveFn fn, std::function<u32()> epoch = {});
+    // Display form of an authored string: `raw` itself unless it starts with '@'; "@@x" -> "@x"; a valid reference ->
+    // resolver(raw) if set and true, else its inline default, else "[Table:Key]". Cached per raw string. The result
+    // is valid until the next update()/layout()/draw(). Typed text and event payloads never go through this.
+    const std::string& shown(const std::string& raw) const;
 
     // ---- per frame --------------------------------------------------------------------------
     // Layout, input, events, layout again. Events reach listeners at the end of the call.
@@ -154,6 +168,8 @@ public:
     void scrollIntoView(UiWidgetId id);
 
 private:
+    void syncText();    // drops the resolved-text cache when the epoch moved
+
     // layout (UiTreeLayout.cpp)
     UiStyle styleOf(const UiWidget& w) const;
     f32 fontPx(const UiWidget& w, const UiStyle& st) const;
@@ -210,6 +226,10 @@ private:
     f32 scale_ = 1.0f;
     UiTheme theme_;
     const UiTextMetrics* metrics_ = nullptr;
+    UiTextResolveFn textResolver_;
+    std::function<u32()> textEpoch_;
+    u32 textEpochSeen_ = 0;
+    mutable std::unordered_map<std::string, std::string> shownCache_;
 
     UiWidgetId focus_ = 0;
     UiWidgetId scope_ = 0;

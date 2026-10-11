@@ -1141,6 +1141,67 @@ Units: engine cm, +X forward, +Y right, +Z up, left-handed, same space as `.ocwo
 
 ---
 
+## 11d. `.ocgas` — gameplay definitions (text)
+
+`scripting/csharp/Aver.Framework/Gas/OcGasParser.cs` (parse), `GameplayDefs.cs` (link). Attribute sets, gameplay effects, abilities and per-class defaults for the gameplay ability system ([../GAMEPLAY_ABILITIES.md](../GAMEPLAY_ABILITIES.md)). Parsed by C#, since only managed code consumes them; no native reader. `*.ocgas` anywhere under the project content folder are discovered recursively, sorted ordinally by relative path, and loaded as one set at every Play start.
+
+```
+OCGAS 1
+TAG State.Stunned                     # declare a tag (and parents); optional, requesting an undeclared one also works
+
+ATTRSET Character
+  ATTR Health 100 min=0 max=MaxHealth # ATTR <name> <base> [min=<num|Attr>] [max=<num|Attr>]
+  ATTR MaxHealth 100 min=1
+  ATTR Damage 0 meta forward=Health scale=-1   # meta [forward=<Attr> scale=<f>]
+
+EFFECT Effect.Poison
+  POLICY duration 5                   # instant | duration <seconds> | infinite
+  PERIOD 1 apply                      # seconds; "apply" also executes once at application
+  MOD Health add -3                   # MOD <attr> add|multiply|override <constant>
+  MOD Health add caller=Data.Damage scale=-1                  # SetByCaller
+  MOD Health add from=source.Strength scale=-0.5 add=1        # AttributeBased: source.<Attr> | target.<Attr>
+  ASSET Effect.Damage.Poison          # tags that describe the effect (matched by REMOVES)
+  GRANTS State.Poisoned               # tags held while active (space-separated list, at most 8)
+  REQUIRES State.Alive                # application: target has all
+  BLOCKEDBY Immune.Poison             # application: target has none
+  ONGOING_REQUIRES State.Alive        # while active (else inhibited)
+  ONGOING_BLOCKEDBY State.Dead
+  REMOVES Effect.Poison.Weak          # on application, remove active effects with these asset/granted tags
+  STACK target 3 refresh expire clear # none | target N | source N, then refresh|keep, then expire clear|one
+  CUE Cue.Poison                      # optional GAS.Cue tag
+
+ABILITY Ability.Fireball
+  TAGS Ability.Cast.Fire              # own tags
+  CANCELS Ability.Cast.Ice            # cancel matching active abilities on activation
+  BLOCKS Ability.Cast                 # while active, matching abilities cannot activate
+  OWNS State.Casting                  # tags the owner holds while active
+  REQUIRES State.Alive
+  BLOCKEDBY State.Stunned
+  COST Effect.FireballCost            # an instant effect
+  COOLDOWN Effect.FireballCooldown    # a duration/infinite effect granting the cooldown tag
+  COMMIT activate                     # activate (default) | manual
+  DURATION 2.5                        # auto-end after N seconds; omit = until ended
+  TRIGGER event Event.Hit             # activate on a gameplay event (repeatable)
+  TRIGGER granted                     # passive: activate when granted
+  RETRIGGER off                       # on | off (default off)
+  BEHAVIOUR FireballBehaviour         # optional C# GameplayAbility bound by [AverAbility] name
+
+ACTORDEFAULTS Hero                    # actor class (C# or graph class) name
+  ATTRSET Character
+  ATTR Health 150                     # per-class override of a set's base
+  GRANT Ability.Fireball 1            # GRANT <ability> [level]
+  APPLY Effect.Regen                  # applied to self at begin play
+  ADDTAG State.Alive
+```
+
+First non-comment line is the header `OCGAS 1`. `#` starts a comment (whole line or trailing); CRLF, a BOM, tabs and blank lines are fine; keywords are case-insensitive, names are case-sensitive, numbers are invariant-culture decimal floats (no NaN or infinity). A **block header** (`ATTRSET`, `EFFECT`, `ABILITY`, `ACTORDEFAULTS`) opens a block; the records that follow (indent is cosmetic, except that an *indented* `ATTRSET` inside `ACTORDEFAULTS` names a set to add) belong to it until the next block header or a top-level `TAG`. Names (attribute sets, effects, abilities, classes) are letters, digits, `_` and `.`; tags are 1 to 8 dot-separated segments `[A-Za-z][A-Za-z0-9_]*`, at most 128 characters.
+
+**Linking happens once, after every file is parsed**, so references may point forward across blocks and files. A record in the wrong block, an unknown record, a bad number, a duplicate name (within a file, across files, or against a code-defined definition, whose message names both sources), a reference to an undefined attribute, effect, ability or set, a `COST` that is not instant, a `COOLDOWN` that is instant, a `PERIOD` on an instant effect, more than 16 modifiers per effect or 8 tags per line, and a `min=`/`max=` cycle are each **refused with a `file:line: message`**; a file with a problem contributes nothing, and the others still load. Tags are not "defined" anywhere: requesting an undeclared one interns it.
+
+Tag ids follow registration order (files in sorted order, `TAG` lines first within a file, then first use), so a given project gets the same ids every run until its definitions change; persistent data therefore uses names. The save payload that carries a live system is a separate text blob, `GASSTATE 1` (see the user guide).
+
+---
+
 ## 12. Versioning & compatibility
 
 - **Two version axes:** `ContainerVersion` (the `AVR1` framework) and `ContentVersion` (per-subtype schema). Text formats carry a single `OC<NAME> <n>` line.

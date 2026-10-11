@@ -315,7 +315,8 @@ std::string SandboxApp::cbParentDir() const {
  bool SandboxApp::cbIsSourceFile(const std::string& ext) {
     static const char* kSource[] = {
         ".cs", ".cpp", ".cxx", ".cc", ".c", ".hpp", ".hxx", ".h", ".inl",
-        ".hlsl", ".hlsli", ".glsl", ".json", ".xml", ".csproj", ".txt", ".md", ".ini", ".cmake"};
+        ".hlsl", ".hlsli", ".glsl", ".json", ".xml", ".csproj", ".txt", ".md", ".ini", ".cmake",
+        ".ocgas"};
     for (const char* s : kSource) if (ext == s) return true;
     return false;
 }
@@ -533,6 +534,93 @@ void SandboxApp::cbCreateInputScheme() {
     cbAdoptNewAsset(target);
 }
 
+// Writes a starter data table (Name,Value:int / row1,1) into the selected folder and opens it. A plain .csv:
+// the Data Table editor claims it, Excel and any text editor read it.
+void SandboxApp::cbCreateDataTable() {
+    const std::filesystem::path target = cbFreeAssetPath("NewTable", ".csv");
+    if (target.empty()) return;
+    std::string why;
+    if (!editor::writeNewFile(target.string(), fmt::writeTableCsv(editor::dataTableStarter()), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new data table failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// Writes an empty string table Localization/<default culture>/<name>.ocstrings and opens it. The default culture is
+// the project's LOCALE.DEFAULT ("en" when unset).
+void SandboxApp::cbCreateStringTable(const std::string& name) {
+    if (!project_.valid()) { cbStatus_ = "Open a project first"; return; }
+    if (!fmt::validLocTable(name)) { cbStatus_ = "A table name is letters, digits and underscores"; return; }
+    std::string culture = fmt::normalizeCulture(project_.localeDefault);
+    if (culture.empty()) culture = "en";
+    const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Localization" / culture;
+    const std::filesystem::path target = dir / (name + ".ocstrings");
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    fmt::OcStringsData starter;
+    starter.culture = culture;
+    std::string why;
+    if (!editor::writeNewFile(target.string(), fmt::writeOcstrings(starter), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new string table failed: {}", why);
+        return;
+    }
+    cbNavigate(dir.string());
+    cbAdoptNewAsset(target);
+}
+
+// Writes a starter .ocgas (Gameplay Definitions: attribute sets, effects, abilities) and opens it. Plain
+// text with line-specific errors at Play start, so the starter is a valid, commented file that links on
+// its own. writeNewFile refuses to touch an existing file, like cbCreateInputScheme above.
+void SandboxApp::cbCreateGameplayDefs() {
+    const std::filesystem::path target = cbFreeAssetPath("NewGameplayDefs", ".ocgas");
+    if (target.empty()) return;
+    static const char* kStarter =
+        "OCGAS 1\n"
+        "# Gameplay definitions: attribute sets, effects and abilities, loaded at every Play start.\n"
+        "# A graph hears them with an OnEvent entry named GAS.AbilityActivated.<Ability>, GAS.AttributeChanged.<Attribute>, ...\n"
+        "\n"
+        "ATTRSET Character\n"
+        "  ATTR Health 100 min=0 max=MaxHealth   # clamped to another attribute\n"
+        "  ATTR MaxHealth 100 min=1\n"
+        "  ATTR Mana 50 min=0\n"
+        "  ATTR Damage 0 meta forward=Health scale=-1   # an instant +N on Damage becomes -N Health\n"
+        "\n"
+        "EFFECT Effect.Heal\n"
+        "  POLICY instant\n"
+        "  MOD Health add 25\n"
+        "\n"
+        "EFFECT Effect.Regen\n"
+        "  POLICY duration 10\n"
+        "  PERIOD 1                    # seconds between executions\n"
+        "  MOD Health add 2\n"
+        "  GRANTS State.Regenerating   # tags held while the effect is active\n"
+        "\n"
+        "EFFECT Effect.ExampleCost\n"
+        "  POLICY instant\n"
+        "  MOD Mana add -10\n"
+        "\n"
+        "EFFECT Effect.ExampleCooldown\n"
+        "  POLICY duration 3\n"
+        "  GRANTS Cooldown.Example\n"
+        "\n"
+        "ABILITY Ability.Example\n"
+        "  TAGS Ability.Example\n"
+        "  COST Effect.ExampleCost\n"
+        "  COOLDOWN Effect.ExampleCooldown\n"
+        "  DURATION 1.5                # auto-end; omit to end it from a graph or code\n";
+
+    std::string why;
+    if (!editor::writeNewFile(target.string(), kStarter, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new gameplay definitions failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
 // Writes a starter .ocgraph (Aver Node visual-scripting graph) and opens it. Bytes come from
 // editor::graphStarterText so a test can parse exactly what this writes; text, not fmt::saveOcgraph,
 // because the C++ OcGraphData struct doesn't model the CLASS record. writeNewFile refuses to overwrite.
@@ -603,6 +691,19 @@ void SandboxApp::cbCreateStateMachine() {
     if (!anim::saveStateMachine(target.string(), editor::asmStarterMachine(), &why)) {
         cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new state machine failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// A starter .ocmontage: no clip yet (the tab takes .ocanim drops), one Default section.
+void SandboxApp::cbCreateMontage() {
+    const std::filesystem::path target = cbFreeAssetPath("NewMontage", ".ocmontage");
+    if (target.empty()) return;
+    std::string why;
+    if (!anim::saveMontage(target.string(), editor::montageStarter(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new montage failed: {}", why);
         return;
     }
     cbAdoptNewAsset(target);
@@ -1035,6 +1136,12 @@ void SandboxApp::cbItemContextMenu(const std::string& full, const std::string& n
             ImGui::EndMenu();
         }
     }
+    if (!isDir && lowerExt(std::filesystem::path(full)) == ".json" && ImGui::MenuItem("Open as Data Table")) {
+        fmt::OcTableData probe;
+        std::string why;
+        if (!fmt::loadTable(full, probe, &why)) cbStatus_ = "Not a data table: " + why;
+        else if (assetEditors_.open(full)) cbStatus_ = "Opened as a data table";
+    }
     if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(full);
     if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); cbStatus_ = "Path copied"; }
     // Find References on demand: the scan already existed but could only be reached from the
@@ -1139,6 +1246,8 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.blendSpace");
         if (ImGui::MenuItem("New State Machine"))   cbCreateStateMachine();
         uiReg_.track("cb.add.stateMachine");
+        if (ImGui::MenuItem("New Animation Montage")) cbCreateMontage();
+        uiReg_.track("cb.add.montage");
         if (ImGui::MenuItem("New Sound Graph"))     cbCreateSoundGraph();
         uiReg_.track("cb.add.soundGraph");
 #if AVER_MODULE_PARTICLES
@@ -1163,6 +1272,12 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.instanceSet");
         if (ImGui::MenuItem("New Input Scheme"))    cbCreateInputScheme();
         uiReg_.track("cb.add.inputScheme");
+        if (ImGui::MenuItem("New Data Table"))      cbCreateDataTable();
+        uiReg_.track("cb.add.dataTable");
+        if (ImGui::MenuItem("New String Table")) { cbWantNewStringTable_ = true; cbNewStringTableBuf_[0] = '\0'; }
+        uiReg_.track("cb.add.stringTable");
+        if (ImGui::MenuItem("New Gameplay Definitions")) cbCreateGameplayDefs();
+        uiReg_.track("cb.add.gameplayDefs");
 #if AVER_MODULE_PBR
         // cbCreateMaterial doesn't exist with the material system compiled out (see its guard
         // above), so this menu entry is guarded the same way.
@@ -1315,6 +1430,7 @@ void SandboxApp::cbFileOpModals() {
     if (cbWantRename_)    { ImGui::OpenPopup("cbRename");    cbWantRename_ = false; }
     if (cbWantDelete_)    { ImGui::OpenPopup("cbDelete");    cbWantDelete_ = false; }
     if (cbWantNewFolder_) { ImGui::OpenPopup("cbNewFolder"); cbWantNewFolder_ = false; }
+    if (cbWantNewStringTable_) { ImGui::OpenPopup("cbNewStringTable"); cbWantNewStringTable_ = false; }
     if (cbWantImport_)    { ImGui::OpenPopup("Import Asset"); cbWantImport_ = false; }
 
     if (cbWantMoveOrCopy_) { ImGui::OpenPopup("cbMoveOrCopy"); cbWantMoveOrCopy_ = false; }
@@ -1518,6 +1634,24 @@ void SandboxApp::cbFileOpModals() {
         ImGui::BeginDisabled(!valid);
         if (ImGui::Button("Create") || (submit && valid)) {
             cbCreateFolder(cbSelectedDir_, cbNewFolderBuf_);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopupModal("cbNewStringTable", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextDisabled("New string table (a file per culture under Localization/)");
+        ImGui::SetNextItemWidth(360.0f*dpi_);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool submit = ImGui::InputText("##cbnewstringtabletxt", cbNewStringTableBuf_, sizeof cbNewStringTableBuf_,
+                                             ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool valid = fmt::validLocTable(cbNewStringTableBuf_);
+        ImGui::BeginDisabled(!valid);
+        if (ImGui::Button("Create") || (submit && valid)) {
+            cbCreateStringTable(cbNewStringTableBuf_);
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled();
@@ -1731,6 +1865,10 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         // ICON_SETTINGS since binding a key is a settings choice, same as .fsproj/.csproj below,
         // though coloured apart from them.
         {".ocinput",    {ICON_SETTINGS,   IM_COL32(230, 200,  60, 255), "Input Scheme"}},
+        {".ocgas",      {ICON_SETTINGS,   IM_COL32(220, 120,  70, 255), "Gameplay Definitions"}},
+        // Translated text per culture, and the spreadsheet-shaped data tables bound to C# records.
+        {".ocstrings",  {ICON_EDIT,       IM_COL32(120, 210, 190, 255), "String Table"}},
+        {".csv",        {ICON_FILE,       IM_COL32(120, 210, 190, 255), "Data Table"}},
         {".ocsnd",      {ICON_WAVE,       IM_COL32(  0, 175, 255, 255), "Sound Graph"}},
         {".ocaudio",    {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".wav",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
@@ -1739,6 +1877,7 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocui",       {ICON_TUNE,       IM_COL32(120, 200, 255, 255), "UI Layout"}},
         {".ocblend",    {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Blend Space"}},
         {".ocasm",      {ICON_TREE,       IM_COL32(190, 140, 255, 255), "Animation State Machine"}},
+        {".ocmontage",  {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Animation Montage"}},
         {".ocprefab",   {ICON_FILE,       IM_COL32( 90, 170, 255, 255), "Prefab"}},
         {".ocgraph",    {ICON_LINK,       IM_COL32( 63, 126, 255, 255), "Graph"}},
         {".ocnav",      {ICON_TERRAIN,    IM_COL32(150, 200, 120, 255), "Navigation"}},

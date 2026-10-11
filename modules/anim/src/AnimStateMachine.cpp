@@ -56,6 +56,29 @@ bool AnimStateMachineAsset::valid(std::string* why) const {
                 if (paramIndex(c.param) < 0) return fail("condition names unknown parameter '" + c.param + "'");
         }
     }
+    for (const PipeNode& n : pipeline) {
+        if (!std::isfinite(n.weight)) return fail("a pipeline node weight is not finite");
+        if (n.kind == PipeNodeKind::Slot) {
+            if (n.slot.empty()) return fail("a pipeline slot node has no slot name");
+            continue;
+        }
+        const PipeSource& src = n.source;
+        if (src.kind == PipeSourceKind::None) return fail("a pipeline node has no source");
+        if (src.kind == PipeSourceKind::Slot && src.slot.empty()) return fail("a pipeline slot source has no slot name");
+        if ((src.kind == PipeSourceKind::Clip || src.kind == PipeSourceKind::BlendSpace) && src.asset.empty())
+            return fail("a pipeline source has no asset");
+        if (!std::isfinite(src.speed)) return fail("a pipeline source speed is not finite");
+        if (n.kind == PipeNodeKind::Layered) {
+            if (n.branches.empty()) return fail("a layered node needs at least one branch");
+            for (const BranchEntry& b : n.branches) {
+                if (b.bone.empty()) return fail("a layered branch has no bone name");
+                if (b.depth < 0) return fail("a layered branch depth is negative");
+                if (!std::isfinite(b.weight)) return fail("a layered branch weight is not finite");
+            }
+        }
+        if (n.kind == PipeNodeKind::Additive && n.ref.kind == PipeRefKind::Clip && n.ref.asset.empty())
+            return fail("an additive clip reference has no asset");
+    }
     // The sub-machine references must form a tree hanging off machine 0.
     std::set<i32> seen{0};
     std::vector<i32> stack{0};
@@ -84,6 +107,7 @@ void AnimStateMachine::bind(const AnimStateMachineAsset* asset, AsmClipFn clips,
     events_.clear();
     blockInterrupt_ = false;
     fired_ = 0;
+    rootAcc_ = RootDelta{};
     if (!asset_ || asset_->machines.empty()) { asset_ = nullptr; return; }
 
     for (usize i = 0; i < asset_->params.size(); ++i) {
@@ -249,18 +273,35 @@ void AnimStateMachine::fire(usize level, const AsmTransition& t, i32 target) {
     blockInterrupt_ = !t.interruptible && t.blendTime > 0.0f;
 }
 
+void AnimStateMachine::setRootMotion(const RootSpec* spec) {
+    hasRoot_ = spec && spec->valid();
+    if (hasRoot_) rootSpec_ = *spec;
+}
+
+RootDelta AnimStateMachine::consumeRootDelta() {
+    const RootDelta d = rootAcc_;
+    rootAcc_ = RootDelta{};
+    return d;
+}
+
 void AnimStateMachine::tick(f32 dt) {
     if (!asset_ || layers_.empty()) return;
 
-    for (Layer& l : layers_) {
+    std::vector<RootDelta> deltas;
+    if (hasRoot_) deltas.assign(layers_.size(), RootDelta{});
+    for (usize li = 0; li < layers_.size(); ++li) {
+        Layer& l = layers_[li];
         const AsmState& s = asset_->machines[l.machine].states[l.state];
         const f32 speed = s.speed * (s.speedParam.empty() ? 1.0f : paramByName(s.speedParam));
         const f32 step = dt * speed;
         if (l.isBlendSpace) {
+            l.bs.setRootMotion(hasRoot_ ? &rootSpec_ : nullptr);
             l.bs.setInput(s.xParam.empty() ? 0.0f : paramByName(s.xParam),
                           s.yParam.empty() ? 0.0f : paramByName(s.yParam));
             l.bs.advance(step);
+            if (hasRoot_) deltas[li] = l.bs.consumeRootDelta();
         } else {
+            const f32 before = l.time;
             l.elapsed += step;
             l.time += step;
             if (s.loop) {
@@ -269,18 +310,27 @@ void AnimStateMachine::tick(f32 dt) {
                 l.time = std::min(l.time, l.duration);
                 l.elapsed = std::min(l.elapsed, l.duration);
             }
+            if (hasRoot_ && l.clip) deltas[li] = rootDeltaBetween(*l.clip, rootSpec_, before, l.time, s.loop);
         }
     }
 
     Layer& newest = layers_.back();
+    bool settled = false;
     if (newest.alpha < 1.0f && layers_.size() > 1) {
         newest.blendElapsed += dt;
         newest.alpha = newest.blendTime > 0.0f ? std::min(1.0f, newest.blendElapsed / newest.blendTime) : 1.0f;
         if (newest.alpha >= 1.0f - 1e-5f) {
             newest.alpha = 1.0f;
-            layers_.erase(layers_.begin(), layers_.end() - 1);
+            settled = true;
         }
     }
+    // Weighted by the post-update alphas, before a finished blend drops the older layers (their share
+    // of this one step is then 0 anyway, since the newest alpha is 1).
+    if (hasRoot_) {
+        const std::vector<f32> w = layerWeights();
+        for (usize li = 0; li < layers_.size(); ++li) addWeighted(rootAcc_, deltas[li], w[li]);
+    }
+    if (settled) layers_.erase(layers_.begin(), layers_.end() - 1);
     if (layers_.size() == 1) blockInterrupt_ = false;
     if (blockInterrupt_) return;
 
@@ -328,7 +378,10 @@ void AnimStateMachine::evaluate(const fmt::OcSkeleton& skel, Pose& out) const {
             l.bs.evaluate(skel, tmp);
         } else {
             restPose(skel, tmp);
-            if (l.clip) sampleAnimation(*l.clip, l.time, tmp);
+            if (l.clip) {
+                sampleAnimation(*l.clip, l.time, tmp);
+                if (hasRoot_ && clipHasRootMotion(*l.clip, rootSpec_)) lockRoot(tmp, rootSpec_);
+            }
         }
         if (acc <= 0.0f) { out = tmp; acc = w[i]; continue; }
         blendPose(out, tmp, w[i] / (acc + w[i]), mix);

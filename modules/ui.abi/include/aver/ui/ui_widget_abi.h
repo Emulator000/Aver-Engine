@@ -103,6 +103,14 @@ AVER_UI_API void  aver_ui_set_theme(const char* name);
 AVER_UI_API void  aver_ui_set_dpi(int32_t mode, float refWidth, float refHeight, float userScale);
 AVER_UI_API float aver_ui_scale(void);
 
+/* Installs the key resolver: given a raw string starting with '@', returns the resolved byte length (copying up to cap-1
+ * bytes + NUL into out) or -1 if it is not a reference. aver_fw_loc_resolve has exactly this signature, so a host
+ * passes it directly. NULL clears. Also applies to aver_ui_text / aver_ui_text_width. `epoch` (may be NULL) is polled
+ * once per update/layout/draw; when its value changes the tree drops its resolved-string cache. */
+typedef int32_t (*AverUiTextResolveFn)(const char* utf8Raw, char* out, int32_t cap);
+typedef int32_t (*AverUiTextEpochFn)(void);
+AVER_UI_API void aver_ui_set_text_resolver(AverUiTextResolveFn resolve, AverUiTextEpochFn epoch);   /* aver_fw_loc_epoch */
+
 // ---- structure ---------------------------------------------------------------------------------------------
 
 // parent 0 makes a root. Returns the id, 0 on a bad parent or kind.
@@ -125,6 +133,7 @@ AVER_UI_API const char* aver_ui_widget_get_prop(uint32_t id, const char* key);  
 // Typed shortcuts for the values a game changes every frame.
 AVER_UI_API void        aver_ui_widget_set_text(uint32_t id, const char* utf8);
 AVER_UI_API const char* aver_ui_widget_get_text(uint32_t id);
+AVER_UI_API const char* aver_ui_widget_get_shown_text(uint32_t id);   /* text after localization (inspection, tests) */
 AVER_UI_API void        aver_ui_widget_set_value(uint32_t id, float value);      /* slider, progress */
 AVER_UI_API float       aver_ui_widget_get_value(uint32_t id);
 AVER_UI_API void        aver_ui_widget_set_checked(uint32_t id, int32_t checked);

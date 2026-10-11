@@ -69,10 +69,17 @@
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_abi.h"
+#  include "aver/framework/framework_state_abi.h"
 #  include "aver/framework/framework_hooks.h"
+#  include "aver/framework/framework_anim_abi.h"
 #endif
 // GamePawn.hpp (game::placePossessedPawn): placePawnAtSpawn's pawn lookup and placement.
 #include "aver/game/GamePawn.hpp"
+// Culture choice and string/data-table stores (docs/LOCALIZATION.md).
+#include "aver/game/GameLocalization.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_loc_abi.h"
+#endif
 #if AVER_MODULE_VOXI
 // For loading instanced foliage
 #  include "aver/game/GameFoliage.hpp"
@@ -171,6 +178,16 @@ i32 saveGraphVarSet(aver::scene::Entity e, const char* name, u32 kind, f32 f, i3
     return aver_fw_graph_var_set(static_cast<i32>(e), name, static_cast<int32_t>(kind), f, i);
 }
 
+// Managed entity state (framework_state_abi.h): relays, like the graph VARs above.
+i32 saveStateCount(aver::scene::Entity e, void*) { return aver_fw_state_count(static_cast<i32>(e)); }
+i32 saveStateAt(aver::scene::Entity e, i32 index, char* nameBuf, i32 nameCap, char* dataBuf,
+                i32 dataCap, void*) {
+    return aver_fw_state_at(static_cast<i32>(e), index, nameBuf, nameCap, dataBuf, dataCap);
+}
+i32 saveStateSet(aver::scene::Entity e, const char* name, const char* data, i32 dataLen, void*) {
+    return aver_fw_state_set(static_cast<i32>(e), name, data, dataLen);
+}
+
 aver::save::Host saveHost() {
     aver::save::Host h;
     h.spawnClass    = &saveSpawnClass;
@@ -180,6 +197,9 @@ aver::save::Host saveHost() {
     h.graphVarCount = &saveGraphVarCount;
     h.graphVarAt    = &saveGraphVarAt;
     h.graphVarSet   = &saveGraphVarSet;
+    h.stateCount    = &saveStateCount;
+    h.stateAt       = &saveStateAt;
+    h.stateSet      = &saveStateSet;
     return h;
 }
 
@@ -412,6 +432,7 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--warp") == 0)        { c.useWarp = true; }
         else if (std::strcmp(a, "--debug-layer") == 0) { c.debugLayer = true; }
         else if (std::strcmp(a, "--project") == 0)     { c.projectPath = valueAfter(argc, argv, i, ""); ++i; }
+        else if (std::strcmp(a, "--culture") == 0)     { c.culture = valueAfter(argc, argv, i, ""); ++i; }
         else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
         else if (std::strcmp(a, "--trace-opens") == 0) { c.traceOpens = true; }
         // Prints scene contents for verification (both hosts match)
@@ -1039,6 +1060,8 @@ void GameApp::enableChunkStreaming() {
 #endif
 }
 
+static std::string gameSettingsPath(const fmt::ProjectDesc& project);   // defined beside initScripting
+
 void GameApp::openProject(Engine& e) {
     installLevelHooks(e);
     // Look beside executable for Game.ocproject (not working directory)
@@ -1077,6 +1100,17 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Load order is critical: index -> meshes -> levels
     content_.adopt(project_);
+    {
+        // String and data-table stores, and the active culture (--culture > saved setting > OS language > LOCALE.DEFAULT).
+        game::LocalizationInit li;
+        li.project = &project_;
+        li.settingsPath = gameSettingsPath(project_);
+        li.cultureOverride = cfg_.culture;
+        game::initLocalization(li);
+#if AVER_WITH_UI_ABI && AVER_MODULE_FRAMEWORK
+        aver_ui_set_text_resolver(&aver_fw_loc_resolve, &aver_fw_loc_epoch);
+#endif
+    }
 #if AVER_MODULE_SCENE
     if (rhi::IDevice* dev = e.device()) {
         content_.registerBuiltins(*dev);
@@ -1123,7 +1157,6 @@ void GameApp::openProject(Engine& e) {
 #endif
 }
 
-#if AVER_MODULE_SCRIPTING
 // Convert project name to filesystem-safe directory name
 static std::string filesystemSafeProjectName(const std::string& name) {
     std::string out;
@@ -1139,7 +1172,11 @@ static std::string filesystemSafeProjectName(const std::string& name) {
     out = (b == std::string::npos) ? std::string() : out.substr(b, e - b + 1);
     return out.empty() ? "Project" : out;
 }
-#endif
+
+// The player's Settings.ini: scripting opens it for input bindings, localization reads the saved culture from it.
+static std::string gameSettingsPath(const fmt::ProjectDesc& project) {
+    return userDataDir() + "\\" + filesystemSafeProjectName(project.name) + "\\Settings.ini";
+}
 
 void GameApp::initScripting() {
 #if AVER_MODULE_SCRIPTING
@@ -1168,8 +1205,7 @@ void GameApp::initScripting() {
                 schemePath.clear();
             }
 
-            const std::string settingsPath =
-                userDataDir() + "\\" + filesystemSafeProjectName(project_.name) + "\\Settings.ini";
+            const std::string settingsPath = gameSettingsPath(project_);
 
             const i32 actions = scripts_.configureInput(schemePath, settingsPath);
             if (actions > 0)
@@ -1750,6 +1786,10 @@ void GameApp::onInit(Engine& e) {
                                      &ragdoll::ragdollSystem());
 #endif
     }
+#endif
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Montages: the framework relays PlayMontage and friends to AnimSystem's montage players.
+    aver_fw_set_anim_provider(&anim::montageProvider, &anim::animSystem());
 #endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();

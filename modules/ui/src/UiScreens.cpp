@@ -70,20 +70,21 @@ UiSettingsModel uiDefaultSettingsModel() {
     UiSettingItem quality;
     quality.type = UiSettingItem::Type::Choice;
     quality.key = "graphics.quality";
-    quality.label = "Quality";
-    quality.tab = "Graphics";
-    quality.choices = {"Low", "Medium", "High", "Ultra"};
+    quality.label = "@UI:settings.quality=Quality";
+    quality.tab = "@UI:settings.tab.graphics=Graphics";
+    quality.choices = {"@UI:settings.quality.low=Low", "@UI:settings.quality.medium=Medium", "@UI:settings.quality.high=High",
+                       "@UI:settings.quality.ultra=Ultra"};
     quality.value = 2.0f;
     m.items.push_back(quality);
-    m.items.push_back(slider("graphics.renderScale", "Render scale", "Graphics", 1.0f, 0.5f, 1.0f, 0.05f));
-    m.items.push_back(toggle("graphics.taa", "Anti-aliasing (TAA)", "Graphics", true));
-    m.items.push_back(toggle("graphics.vsync", "VSync", "Graphics", true));
-    m.items.push_back(toggle("graphics.fullscreen", "Fullscreen", "Graphics", false));
-    m.items.push_back(slider("graphics.uiScale", "UI scale", "Graphics", 1.0f, 0.75f, 1.5f, 0.05f));
-    m.items.push_back(slider("audio.master", "Master volume", "Audio", 1.0f, 0.0f, 1.0f, 0.05f));
-    m.items.push_back(slider("audio.music", "Music volume", "Audio", 0.8f, 0.0f, 1.0f, 0.05f));
-    m.items.push_back(slider("audio.sfx", "Effects volume", "Audio", 1.0f, 0.0f, 1.0f, 0.05f));
-    m.items.push_back(slider("audio.voice", "Voice volume", "Audio", 1.0f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(slider("graphics.renderScale", "@UI:settings.renderScale=Render scale", "@UI:settings.tab.graphics=Graphics", 1.0f, 0.5f, 1.0f, 0.05f));
+    m.items.push_back(toggle("graphics.taa", "@UI:settings.taa=Anti-aliasing (TAA)", "@UI:settings.tab.graphics=Graphics", true));
+    m.items.push_back(toggle("graphics.vsync", "@UI:settings.vsync=VSync", "@UI:settings.tab.graphics=Graphics", true));
+    m.items.push_back(toggle("graphics.fullscreen", "@UI:settings.fullscreen=Fullscreen", "@UI:settings.tab.graphics=Graphics", false));
+    m.items.push_back(slider("graphics.uiScale", "@UI:settings.uiScale=UI scale", "@UI:settings.tab.graphics=Graphics", 1.0f, 0.75f, 1.5f, 0.05f));
+    m.items.push_back(slider("audio.master", "@UI:settings.master=Master volume", "@UI:settings.tab.audio=Audio", 1.0f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(slider("audio.music", "@UI:settings.music=Music volume", "@UI:settings.tab.audio=Audio", 0.8f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(slider("audio.sfx", "@UI:settings.sfx=Effects volume", "@UI:settings.tab.audio=Audio", 1.0f, 0.0f, 1.0f, 0.05f));
+    m.items.push_back(slider("audio.voice", "@UI:settings.voice=Voice volume", "@UI:settings.tab.audio=Audio", 1.0f, 0.0f, 1.0f, 0.05f));
     return m;
 }
 
@@ -101,7 +102,7 @@ UiWidgetId UiSettingsScreen::build(std::string_view rootName) {
     if (listener_) { tree_.removeListener(listener_); listener_ = 0; }
 
     tabNames_ = settings_.tabs();
-    if (rebind_) tabNames_.push_back("Controls");
+    if (rebind_) tabNames_.push_back("@UI:settings.tab.controls=Controls");
 
     UiWidget& root = make(tree_, 0, UiWidgetKind::Panel, rootName);
     root_ = root.id;
@@ -122,7 +123,7 @@ UiWidgetId UiSettingsScreen::build(std::string_view rootName) {
     const UiWidgetId winId = win.id;
 
     UiWidget& title = make(tree_, winId, UiWidgetKind::Text, "Title");
-    title.text = "Settings";
+    title.text = "@UI:settings.title=Settings";
     title.style = "title";
 
     UiWidget& bar = makeBox(tree_, winId, "TabBar", UiLayoutMode::HStack, 8);
@@ -204,11 +205,11 @@ UiWidgetId UiSettingsScreen::build(std::string_view rootName) {
     const UiWidgetId footerId = footer.id;
     if (rebind_) {
         UiWidget& reset = make(tree_, footerId, UiWidgetKind::Button, "ResetControls");
-        reset.text = "Reset controls";
+        reset.text = "@UI:settings.resetControls=Reset controls";
         reset.command = "rebind.reset";
     }
     UiWidget& back = make(tree_, footerId, UiWidgetKind::Button, "Back");
-    back.text = "Back";
+    back.text = "@UI:common.back=Back";
     back.command = "ui.close";
     back.width = 160;
 

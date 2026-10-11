@@ -285,6 +285,113 @@ std::string asmConditionText(const AsmCondition& c) {
     return s;
 }
 
+namespace {
+
+// The slot a node consumes, or null (an additive or layered node fed by a clip or blend space).
+const std::string* consumedSlotOf(const anim::PipeNode& n) {
+    if (n.kind == anim::PipeNodeKind::Slot) return &n.slot;
+    return n.source.kind == anim::PipeSourceKind::Slot ? &n.source.slot : nullptr;
+}
+
+std::string uniqueSlotName(const AnimStateMachineAsset& a, const std::string& base) {
+    const std::vector<std::string> used = asmPipelineSlotNames(a);
+    auto taken = [&](const std::string& s) { return std::find(used.begin(), used.end(), s) != used.end(); };
+    if (!taken(base)) return base;
+    for (int n = 2;; ++n) {
+        const std::string cand = base + " " + std::to_string(n);
+        if (!taken(cand)) return cand;
+    }
+}
+
+} // namespace
+
+i32 asmAddPipelineNode(AnimStateMachineAsset& a, anim::PipeNodeKind kind) {
+    anim::PipeNode n;
+    n.kind = kind;
+    switch (kind) {
+        case anim::PipeNodeKind::Slot:
+            n.slot = uniqueSlotName(a, "DefaultSlot");
+            break;
+        case anim::PipeNodeKind::Layered:
+            n.source.kind = anim::PipeSourceKind::Slot;
+            n.source.slot = uniqueSlotName(a, "UpperBody");
+            n.branches = {{"spine_01", 0, 1.0f}};
+            break;
+        case anim::PipeNodeKind::Additive:
+            n.source.kind = anim::PipeSourceKind::Clip;
+            break;
+    }
+    a.pipeline.push_back(std::move(n));
+    return static_cast<i32>(a.pipeline.size()) - 1;
+}
+
+bool asmRemovePipelineNode(AnimStateMachineAsset& a, i32 index) {
+    if (index < 0 || static_cast<usize>(index) >= a.pipeline.size()) return false;
+    a.pipeline.erase(a.pipeline.begin() + index);
+    return true;
+}
+
+i32 asmMovePipelineNode(AnimStateMachineAsset& a, i32 index, i32 delta) {
+    const i32 n = static_cast<i32>(a.pipeline.size());
+    if (index < 0 || index >= n) return -1;
+    const i32 to = std::clamp(index + delta, 0, n - 1);
+    if (to == index) return index;
+    anim::PipeNode node = std::move(a.pipeline[static_cast<usize>(index)]);
+    a.pipeline.erase(a.pipeline.begin() + index);
+    a.pipeline.insert(a.pipeline.begin() + to, std::move(node));
+    return to;
+}
+
+std::vector<std::string> asmPipelineSlotNames(const AnimStateMachineAsset& a) {
+    std::vector<std::string> out;
+    for (const anim::PipeNode& n : a.pipeline) {
+        const std::string* s = consumedSlotOf(n);
+        if (s && !s->empty() && std::find(out.begin(), out.end(), *s) == out.end()) out.push_back(*s);
+    }
+    return out;
+}
+
+std::vector<std::string> asmPipelineProblems(const AnimStateMachineAsset& a) {
+    std::vector<std::string> out;
+    std::vector<std::string> seen, reported;
+    for (usize i = 0; i < a.pipeline.size(); ++i) {
+        const anim::PipeNode& n = a.pipeline[i];
+        const std::string who = "node " + std::to_string(i + 1);
+        const std::string* slot = consumedSlotOf(n);
+        if (slot) {
+            if (slot->empty()) {
+                out.push_back(who + " has no slot name");
+            } else if (std::find(seen.begin(), seen.end(), *slot) != seen.end()) {
+                if (std::find(reported.begin(), reported.end(), *slot) == reported.end()) {
+                    out.push_back("slot '" + *slot + "' is used by more than one node");
+                    reported.push_back(*slot);
+                }
+            } else {
+                seen.push_back(*slot);
+            }
+        }
+        if (n.kind != anim::PipeNodeKind::Slot) {
+            if (n.source.kind == anim::PipeSourceKind::Clip && n.source.asset.empty()) out.push_back(who + " has no clip");
+            if (n.source.kind == anim::PipeSourceKind::BlendSpace && n.source.asset.empty()) out.push_back(who + " has no blend space");
+            if (n.source.kind == anim::PipeSourceKind::None) out.push_back(who + " has no source");
+            if (n.source.kind == anim::PipeSourceKind::BlendSpace) {
+                for (const std::string* p : {&n.source.xParam, &n.source.yParam})
+                    if (!p->empty() && a.paramIndex(*p) < 0) out.push_back(who + " names unknown parameter '" + *p + "'");
+            }
+        }
+        if (n.kind == anim::PipeNodeKind::Layered) {
+            if (n.branches.empty()) out.push_back(who + " (layered) has no branches");
+            for (const anim::BranchEntry& b : n.branches)
+                if (b.bone.empty()) out.push_back(who + " has a branch with no bone name");
+        }
+        if (n.kind == anim::PipeNodeKind::Additive && n.ref.kind == anim::PipeRefKind::Clip && n.ref.asset.empty())
+            out.push_back(who + " has no reference clip");
+        if (!n.weightParam.empty() && a.paramIndex(n.weightParam) < 0)
+            out.push_back(who + " names unknown parameter '" + n.weightParam + "'");
+    }
+    return out;
+}
+
 AsmPt asmRectAnchor(f32 cx, f32 cy, f32 hw, f32 hh, f32 tx, f32 ty) {
     const f32 dx = tx - cx, dy = ty - cy;
     if (std::fabs(dx) < 1e-6f && std::fabs(dy) < 1e-6f) return {cx, cy};
@@ -351,6 +458,29 @@ void AnimStateMachineEditor::onFileChanged() {
         return;
     }
     loadFromDisk();
+}
+
+const std::vector<std::string>& AnimStateMachineEditor::boneNames() {
+    if (bonesScanned_) return bones_;
+    bonesScanned_ = true;
+    // The project's content root is the nearest ancestor folder named Content, else this file's folder.
+    namespace fs = std::filesystem;
+    fs::path root = fs::path(path_).parent_path();
+    for (fs::path d = root; !d.empty(); d = d.parent_path()) {
+        std::string n = d.filename().string();
+        std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (n == "content") { root = d; break; }
+        if (d == d.parent_path()) break;
+    }
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".ocskel") continue;
+        fmt::OcSkeleton skel;
+        if (!fmt::loadOcSkel(it->path().string(), skel)) continue;
+        for (const fmt::OcBone& b : skel.bones) bones_.push_back(b.name);
+        break;
+    }
+    return bones_;
 }
 
 void AnimStateMachineEditor::openMachine(i32 m) {
@@ -810,11 +940,157 @@ void AnimStateMachineEditor::drawDetails() {
         if (ImGui::Button("New Any-state transition")) linkFrom_ = anim::kAsmAny;
     }
 
+    drawPipeline();
+
     std::string why;
     if (!asset_.valid(&why)) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Invalid: %s", why.c_str());
     if (ended) gesture_ = false;
 
     drawSimulator();
+}
+
+void AnimStateMachineEditor::drawPipeline() {
+    if (!ImGui::CollapsingHeader("Pipeline (slots, layered and additive blends)")) return;
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const AnimStateMachineAsset before = asset_;
+    bool ended = false;
+    auto touch = [&](bool changed) {
+        if (changed) {
+            if (!gesture_) { history_.push(before); gesture_ = true; }
+            markDirty();
+        }
+        if (ImGui::IsItemDeactivated()) ended = true;
+    };
+    char buf[256];
+    auto text = [&](const char* label, std::string& v) {
+        std::snprintf(buf, sizeof buf, "%s", v.c_str());
+        const bool c = ImGui::InputText(label, buf, sizeof buf);
+        if (c) v = buf;
+        touch(c);
+    };
+    auto paramPick = [&](const char* label, std::string& field) {
+        if (ImGui::BeginCombo(label, field.empty() ? "(none)" : field.c_str())) {
+            if (ImGui::Selectable("(none)", field.empty())) { pushUndo(); field.clear(); markDirty(); }
+            for (const anim::AsmParam& p : asset_.params)
+                if (ImGui::Selectable(p.name.c_str(), field == p.name)) { pushUndo(); field = p.name; markDirty(); }
+            ImGui::EndCombo();
+        }
+    };
+
+    ImGui::TextWrapped("Nodes run in order on the machine's pose. A slot node applies the montages played in that slot; "
+                       "layered blends a source over the running pose through a bone filter; additive adds a source's "
+                       "difference from a reference frame. Weights are machine parameters, driven like any other.");
+    int removeAt = -1, moveAt = -1, moveBy = 0;
+    static const char* kKinds[] = {"Slot", "Layered", "Additive"};
+    for (usize i = 0; i < asset_.pipeline.size(); ++i) {
+        anim::PipeNode& n = asset_.pipeline[i];
+        ImGui::PushID(static_cast<int>(i) + 1);
+        ImGui::SeparatorText((std::to_string(i + 1) + ". " + kKinds[static_cast<int>(n.kind)]).c_str());
+        if (ImGui::SmallButton("^")) { moveAt = static_cast<int>(i); moveBy = -1; }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("v")) { moveAt = static_cast<int>(i); moveBy = 1; }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) removeAt = static_cast<int>(i);
+
+        if (n.kind == anim::PipeNodeKind::Slot) {
+            text("Slot", n.slot);
+        } else {
+            anim::PipeSource& src = n.source;
+            int sk = src.kind == anim::PipeSourceKind::Clip ? 1 : src.kind == anim::PipeSourceKind::BlendSpace ? 2 : 0;
+            ImGui::SetNextItemWidth(120.0f * dpi);
+            if (ImGui::Combo("Source", &sk, "slot\0clip\0blend space\0")) {
+                pushUndo();
+                src.kind = sk == 1 ? anim::PipeSourceKind::Clip : sk == 2 ? anim::PipeSourceKind::BlendSpace : anim::PipeSourceKind::Slot;
+                markDirty();
+            }
+            if (src.kind == anim::PipeSourceKind::Slot) {
+                text("Slot", src.slot);
+            } else {
+                text(src.kind == anim::PipeSourceKind::Clip ? "Clip" : "Blend space (.ocblend)", src.asset);
+                touch(ImGui::DragFloat("Speed", &src.speed, 0.01f, 0.0f, 8.0f));
+                if (src.kind == anim::PipeSourceKind::Clip) touch(ImGui::Checkbox("Loop", &src.loop));
+                else {
+                    paramPick("X parameter", src.xParam);
+                    paramPick("Y parameter", src.yParam);
+                }
+            }
+
+            if (n.kind == anim::PipeNodeKind::Layered) {
+                const std::vector<std::string>& bones = boneNames();
+                int removeBranch = -1;
+                for (usize b = 0; b < n.branches.size(); ++b) {
+                    anim::BranchEntry& br = n.branches[b];
+                    ImGui::PushID(static_cast<int>(b) + 100);
+                    std::snprintf(buf, sizeof buf, "%s", br.bone.c_str());
+                    ImGui::SetNextItemWidth(130.0f * dpi);
+                    const bool c = ImGui::InputText("##bone", buf, sizeof buf);
+                    if (c) br.bone = buf;
+                    touch(c);
+                    if (!bones.empty()) {
+                        ImGui::SameLine(0, 2);
+                        if (ImGui::BeginCombo("##pick", "", ImGuiComboFlags_NoPreview)) {
+                            for (const std::string& name : bones)
+                                if (ImGui::Selectable(name.c_str(), br.bone == name)) { pushUndo(); br.bone = name; markDirty(); }
+                            ImGui::EndCombo();
+                        }
+                    }
+                    ImGui::SameLine();
+                    int depth = br.depth;
+                    ImGui::SetNextItemWidth(50.0f * dpi);
+                    if (ImGui::DragInt("##depth", &depth, 0.1f, 0, 64)) { br.depth = depth; touch(true); } else touch(false);
+                    ImGui::SetItemTooltip("Blend depth: 0 = the whole subtree at full weight; n ramps the weight in over n bones.");
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(60.0f * dpi);
+                    touch(ImGui::DragFloat("##bw", &br.weight, 0.01f, 0.0f, 1.0f, "%.2f"));
+                    ImGui::SetItemTooltip("Branch weight. 0 carves a hole out of a wider branch.");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("x")) removeBranch = static_cast<int>(b);
+                    ImGui::PopID();
+                }
+                if (removeBranch >= 0) {
+                    pushUndo();
+                    n.branches.erase(n.branches.begin() + removeBranch);
+                    markDirty();
+                }
+                if (ImGui::SmallButton("Add branch")) {
+                    pushUndo();
+                    n.branches.push_back({bones.empty() ? std::string("spine_01") : bones.front(), 0, 1.0f});
+                    markDirty();
+                }
+            } else {
+                int rk = static_cast<int>(n.ref.kind);
+                ImGui::SetNextItemWidth(120.0f * dpi);
+                if (ImGui::Combo("Reference", &rk, "first frame\0rest pose\0clip frame\0")) {
+                    pushUndo();
+                    n.ref.kind = static_cast<anim::PipeRefKind>(rk);
+                    markDirty();
+                }
+                if (n.ref.kind == anim::PipeRefKind::Clip) {
+                    text("Reference clip", n.ref.asset);
+                    touch(ImGui::DragFloat("Reference time", &n.ref.time, 0.01f, 0.0f, 600.0f, "%.2f s"));
+                }
+            }
+            touch(ImGui::DragFloat("Weight", &n.weight, 0.01f, 0.0f, 1.0f));
+            paramPick("Weight parameter", n.weightParam);
+        }
+        ImGui::PopID();
+    }
+    if (moveAt >= 0) {
+        pushUndo();
+        if (asmMovePipelineNode(asset_, moveAt, moveBy) >= 0) markDirty(); else history_.cancelPush();
+    }
+    if (removeAt >= 0) {
+        pushUndo();
+        asmRemovePipelineNode(asset_, removeAt);
+        markDirty();
+    }
+    if (ImGui::Button("Add slot")) { pushUndo(); asmAddPipelineNode(asset_, anim::PipeNodeKind::Slot); markDirty(); }
+    ImGui::SameLine();
+    if (ImGui::Button("Add layered")) { pushUndo(); asmAddPipelineNode(asset_, anim::PipeNodeKind::Layered); markDirty(); }
+    ImGui::SameLine();
+    if (ImGui::Button("Add additive")) { pushUndo(); asmAddPipelineNode(asset_, anim::PipeNodeKind::Additive); markDirty(); }
+    for (const std::string& p : asmPipelineProblems(asset_)) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", p.c_str());
+    if (ended) gesture_ = false;
 }
 
 void AnimStateMachineEditor::drawSimulator() {

@@ -181,6 +181,10 @@ In C#, `UiGameSettings.Create()` (Aver.Framework) wires the screen to the engine
 (`FrameworkRebindProvider.FromContext(context)` lists a context's bindings). Call `ApplyAll()` at startup to
 restore saved values. Keyboard and mouse bindings are rebindable; gamepad bindings are listed greyed out.
 
+## Localized text
+
+Any text field (`text`, `items`, `placeholder`, menu and settings labels) may hold a reference `@Table:Key=Default` instead of literal text; `UiTree::shown(raw)` is what layout and drawing read. A host installs the resolver with `aver_ui_set_text_resolver(aver_fw_loc_resolve, aver_fw_loc_epoch)`; without one a reference shows its inline default. Typed text and event payloads stay raw. The built-in screens use `@UI:...` references with English defaults. The shipped font covers Latin with accents, Greek and Cyrillic. See [LOCALIZATION.md](LOCALIZATION.md).
+
 ## C ABI
 
 `ui_widget_abi.h`. The host's per-frame protocol:

@@ -10,6 +10,11 @@ namespace {
 
 bool isContinuation(char c) { return (static_cast<unsigned char>(c) & 0xC0) == 0x80; }
 
+bool isRefChar(char c, bool key) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
+           (key && (c == '.' || c == '-'));
+}
+
 // Byte length of the code point starting at s[i].
 usize cpLen(std::string_view s, usize i) {
     usize n = 1;
@@ -55,6 +60,22 @@ void wrapParagraph(const UiTextMetrics& m, std::string_view para, f32 px, f32 ma
 }
 
 } // namespace
+
+bool uiParseTextRef(std::string_view s, UiTextRef& out) {
+    if (s.size() < 4 || s[0] != '@' || s[1] == '@') return false;
+    usize i = 1;
+    while (i < s.size() && isRefChar(s[i], false)) ++i;
+    if (i == 1 || i >= s.size() || s[i] != ':') return false;
+    const usize tableEnd = i++;
+    const usize keyStart = i;
+    while (i < s.size() && isRefChar(s[i], true)) ++i;
+    if (i == keyStart || (i < s.size() && s[i] != '=')) return false;
+    out.table = std::string(s.substr(1, tableEnd - 1));
+    out.key = std::string(s.substr(keyStart, i - keyStart));
+    out.hasDefault = i < s.size();
+    out.defaultText = out.hasDefault ? std::string(s.substr(i + 1)) : std::string();
+    return true;
+}
 
 usize uiUtf8Length(std::string_view s) {
     usize n = 0;

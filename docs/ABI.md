@@ -252,7 +252,7 @@ AVER_SCENE_ABI const char* aver_scene_material_name(int32_t token);   /* "" for 
 
 ## 4. `Aver.Framework` — `framework_abi.h`
 
-Three further headers ship in the same DLL, each with its own version constant so `framework_abi.h`'s major/minor are unchanged: `framework_timers_abi.h` (timers and the event bus, `AVER_FW_TIMERS_ABI_VERSION`, [GAME_TIMERS_EVENTS.md](GAME_TIMERS_EVENTS.md)), and `framework_blackboard_abi.h` (the host-installed blackboard relay, [BLACKBOARD_BT.md](BLACKBOARD_BT.md)). Two more DLLs follow the same shape as `Aver.UI.Abi`: `Aver.Synapse.Abi` (`synapse_ai_abi.h`, [AI_CROWDS_HEARING_COVER.md](AI_CROWDS_HEARING_COVER.md)) and `Aver.Prefab.Abi` (`prefab_abi.h`, host-installed function pointers, [PREFABS.md](PREFABS.md)). `Aver.Scene.dll` exports `decal_abi.h` ([rendering/DECALS.md](rendering/DECALS.md)) and `Aver.UI.Abi` the widget tree in `ui_widget_abi.h` ([GAME_UI.md](GAME_UI.md)).
+Three further headers ship in the same DLL, each with its own version constant so `framework_abi.h`'s major/minor are unchanged: `framework_timers_abi.h` (timers and the event bus, `AVER_FW_TIMERS_ABI_VERSION`, [GAME_TIMERS_EVENTS.md](GAME_TIMERS_EVENTS.md)), `framework_blackboard_abi.h` (the host-installed blackboard relay, [BLACKBOARD_BT.md](BLACKBOARD_BT.md)), `framework_loc_abi.h` (string tables per culture, text references, `AVER_FW_LOC_ABI_VERSION` = 1, [LOCALIZATION.md](LOCALIZATION.md)) and `framework_table_abi.h` (`.csv`/`.json` data tables, `AVER_FW_TABLE_ABI_VERSION` = 1, [DATA_TABLES.md](DATA_TABLES.md)). Two more DLLs follow the same shape as `Aver.UI.Abi`: `Aver.Synapse.Abi` (`synapse_ai_abi.h`, [AI_CROWDS_HEARING_COVER.md](AI_CROWDS_HEARING_COVER.md)) and `Aver.Prefab.Abi` (`prefab_abi.h`, host-installed function pointers, [PREFABS.md](PREFABS.md)). `Aver.Scene.dll` exports `decal_abi.h` ([rendering/DECALS.md](rendering/DECALS.md)) and `Aver.UI.Abi` the widget tree in `ui_widget_abi.h` ([GAME_UI.md](GAME_UI.md)), including `aver_ui_set_text_resolver`, the hook a host points at `aver_fw_loc_resolve` so widget text may be a localization reference.
 
 **Header** `modules/framework/include/aver/framework/framework_abi.h` · **DLL** `Aver.Framework` (SHARED, links `PUBLIC Aver.Core Aver.Assets Aver.Scene Aver.Formats` — `modules/framework/CMakeLists.txt:12, 17`) · **Version** `AVER_FW_ABI_VERSION` = `(1 << 16) | 8` (`framework_abi.h:38, 55`) · **100 entry points** (was 46/48 at minor 1; see below for what minors 2–8 added — minor 6 added no new entry point, only two constants; minor 7 added ten, the INPUT SCHEME section; minor 8 added five, the HOST CONTROL section).
 
@@ -420,6 +420,52 @@ AVER_FW_ABI const char* aver_fw_input_scheme_binding_key(int32_t index);
 **String lifetime is wider here than elsewhere in this header.** Every other `const char*` in `framework_abi.h` is valid until the next call the caller must not free; this section's strings (`error`, `context_name`, `action_name`, `binding_key`) stay valid **until the next `aver_fw_input_scheme_load`**, because a caller here is expected to walk a whole scheme — dozens of names — across many calls, not decode one string per call the way `aver_fw_class_name`'s callers do.
 
 Pinned by `tests/framework/src/FrameworkTest.cpp`'s `testInputScheme` — a real file loaded through `aver_fw_input_scheme_load`, every getter read back (including the `outActionIndex`/`outSource` mapping above and both gamepad sources), the out-of-range and load-failure paths — beside `tests/formats/src/OcInputTest.cpp`'s own coverage of the parser underneath it (round-trip and malformed-input checks for the two new `BIND` sources, `gamepadbutton`/`gamepadaxis` — `OcInput.hpp`/`OcInput.cpp`). C# coverage, if any, lives beside `InputScheme.cs`.
+
+### Input triggers and modifiers (minor 11)
+
+Additive on top of NAMED ACTIONS; an action with no triggers and no modifiers answers `held`/`pressed`/`released`/`value2` exactly as before. A trigger (when the action fires) or modifier (how its value is shaped) is one whitespace-free **spec token** (`hold:0.5:once`, `deadzone:0.2:1:radial`), parsed by the single `aver::fmt::parseTriggerSpec`/`parseModifierSpec` (`OcInput.hpp`; grammar in `OcInput.cpp`'s header comment), and attaches to a binding or to the action. C# builds specs with typed factories and never parses them.
+
+```c
+int32_t     aver_fw_action_bind_ex(action, source, key, scale, component, contextPriority);   /* binding id or -1 */
+int32_t     aver_fw_action_add_trigger (int32_t action, int32_t binding, const char* spec);   /* binding -1 = the action */
+int32_t     aver_fw_action_add_modifier(int32_t action, int32_t binding, const char* spec);
+const char* aver_fw_action_config_error(void);
+void        aver_fw_action_clear_config(int32_t action);     /* action-level only */
+void        aver_fw_action_update(float dt);                 /* once per gameplay frame, after the input is published */
+void        aver_fw_action_reset_state(void);
+int32_t     aver_fw_action_state(int32_t action);            /* AVER_FW_TRIGGER_STATE_NONE/ONGOING/TRIGGERED */
+int32_t     aver_fw_action_events(int32_t action);           /* AVER_FW_INPUT_EVENT_STARTED|ONGOING|TRIGGERED|COMPLETED|CANCELED */
+float       aver_fw_action_elapsed(int32_t action);
+float       aver_fw_action_triggered_time(int32_t action);
+void        aver_fw_action_value3(int32_t action, float* out3);
+int32_t     aver_fw_action_count(void);                      /* registry readback: handles run 1..count */
+const char* aver_fw_action_name(int32_t action);
+int32_t     aver_fw_action_value_type(int32_t action);
+int32_t     aver_fw_action_event_count(void);                /* actions that raised an event in the last update */
+int32_t     aver_fw_action_event_at(int32_t index, int32_t* outAction, int32_t* outMask);
+/* scheme getters: owner >= 0 is a binding index, owner < 0 is action (-1 - owner) */
+int32_t     aver_fw_input_scheme_trigger_count (int32_t owner);
+const char* aver_fw_input_scheme_trigger_spec  (int32_t owner, int32_t index);
+int32_t     aver_fw_input_scheme_modifier_count(int32_t owner);
+const char* aver_fw_input_scheme_modifier_spec (int32_t owner, int32_t index);
+```
+
+**Time lives in one call.** Time-based triggers and `smooth` need a `dt` and per-action memory, so they advance in `aver_fw_action_update`, which `game::tickGameplayGroups` calls first each frame (both hosts); `dt` is clamped to 0.25 s. There is deliberately no lazy update on query, so a host that never calls it still gets every legacy query and reads `None`/`0` from `state`/`events`/`elapsed`/`triggered_time`. A paused game does not tick, so trigger state freezes. **Events** come from the `prev -> now` transition of the three states (None/Ongoing/Triggered); `EnhancedInput.PumpEvents` (called from `HostBridge.DispTickAll` group 0) turns the event list into C# events and the bus events `Input.<Action>.<Event>`. **Chords and combos** name other actions by text and resolve by name, retrying each update until the action exists; a cycle reads the previous update's state instead of hanging. Pinned by `FrameworkTest.cpp` (`testActionTriggers` ... `testInputSchemeTriggers`), `InputBridgeTest.cpp` (the tick wiring) and `OcInputTest.cpp` (`testTriggerModifierGrammar`). Note the older paragraphs above still describe the minor 7 surface; the header is the source of truth.
+
+### Managed entity state — `framework_state_abi.h`
+
+A save is native and cannot see managed memory, so state that lives in C# (the gameplay ability system, [GAMEPLAY_ABILITIES.md](GAMEPLAY_ABILITIES.md), is the first user) reaches a save through one more provider seam. Own header and own version (`AVER_FW_STATE_ABI_VERSION` = 1), so `framework_abi.h`'s major/minor are untouched. Same conventions as `framework_timers_abi.h`: `int32_t`/`char` only, UTF-8, the framework holds function pointers and links nothing; with no provider every call answers `0`/`-1`.
+
+```c
+int32_t aver_fw_state_abi_version(void);
+int32_t aver_fw_set_state_provider(count_fn, at_fn, set_fn, void* user);          /* always 1 */
+int32_t aver_fw_state_count(int32_t entity);                                      /* channels the entity carries; 0 with no provider */
+int32_t aver_fw_state_at(int32_t entity, int32_t index, char* nameBuf, int32_t nameCap,
+                         char* dataBuf, int32_t dataCap);                         /* FULL payload length, or -1 */
+int32_t aver_fw_state_set(int32_t entity, const char* name, const char* data, int32_t dataLen); /* 1 accepted, 0 refused */
+```
+
+A **channel** is a named blob of text per entity (GAS uses `gas`; a later Smart Objects or quest system can use another name). `state_at` copies the NUL-terminated channel name into `nameBuf` and up to `dataCap` payload bytes (not terminated) into `dataBuf`, and returns the payload's *full* length, which may exceed `dataCap`; the caller retries with a bigger buffer. `aver::save::Host` gains `stateCount`/`stateAt`/`stateSet` (null: nothing captured; a restored `$State` field is counted as dropped), and both composition roots relay them to these entry points. A save stores one synthetic `$State` component per entity with one `STRING` field per channel (`name` = channel, the string = payload), payloads capped at 1 MiB (over: skipped with a warning). `$State` is delivered after the entity is spawned and before `beginPlay`, like the graph VARs. Pinned by `tests/save` `SaveWorldTest` (the plumbing against a fake provider) and `GasPersistTest` (the real CLR).
 
 ---
 

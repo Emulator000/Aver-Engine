@@ -15,11 +15,30 @@
 #if AVER_WITH_IMGUI
 #  include "EditorIcons.hpp"
 #  include "imgui.h"
+#  if AVER_MODULE_FRAMEWORK
+#    include "aver/framework/framework_abi.h"   // the live State/Elapsed column while playing
+#  endif
 #endif
 
 namespace aver::editor {
 namespace {
 InputSchemeEditorHooks g_hooks;
+
+// A name a chord/combo can refer to: the spec grammar splits on ':' and ',' and a file on whitespace.
+bool safeRefName(const std::string& n) {
+    if (n.empty()) return false;
+    for (char c : n)
+        if (c == ':' || c == ',' || c == '#' || c == ';' || std::isspace(static_cast<unsigned char>(c))) return false;
+    return true;
+}
+
+// True for a spec that is a chord/combo naming `name`.
+bool triggerRefersTo(const std::string& spec, const std::string& name) {
+    fmt::OcTriggerSpec t;
+    if (!fmt::parseTriggerSpec(spec, t)) return false;
+    if (t.kind != fmt::OcTriggerKind::Chord && t.kind != fmt::OcTriggerKind::Combo) return false;
+    return std::find(t.refs.begin(), t.refs.end(), name) != t.refs.end();
+}
 } // namespace
 
 void setInputSchemeEditorHooks(InputSchemeEditorHooks hooks) { g_hooks = std::move(hooks); }
@@ -121,6 +140,8 @@ void InputSchemeEditor::removeAction(usize index) {
     pushUndo();
     const std::string name = data_.actions[index].name;
     data_.actions.erase(data_.actions.begin() + static_cast<isize>(index));
+    // A chord/combo naming the removed action would make the file unreloadable, so it goes too.
+    rewriteRefs(name, std::string());
     // CASCADE -- see this method's own header comment for why an orphaned binding cannot be left.
     data_.bindings.erase(
         std::remove_if(data_.bindings.begin(), data_.bindings.end(),
@@ -132,10 +153,24 @@ void InputSchemeEditor::removeAction(usize index) {
 void InputSchemeEditor::renameAction(usize index, std::string newName) {
     if (!loaded_ || index >= data_.actions.size()) return;
     if (newName.empty() || data_.actions[index].name == newName) return;
-    pushUndo();
     const std::string oldName = data_.actions[index].name;
+    // A referenced action must stay nameable inside a spec token.
+    if (!safeRefName(newName)) {
+        bool referenced = false;
+        const auto scan = [&](const std::vector<std::string>& l) {
+            for (const std::string& sp : l) if (triggerRefersTo(sp, oldName)) referenced = true;
+        };
+        for (const auto& a : data_.actions) scan(a.triggers);
+        for (const auto& b : data_.bindings) scan(b.triggers);
+        if (referenced) {
+            specError_ = "\"" + oldName + "\" is used by a chord or combo; its name cannot contain : , # ; or spaces";
+            return;
+        }
+    }
+    pushUndo();
     data_.actions[index].name = newName;
     for (auto& b : data_.bindings) if (b.action == oldName) b.action = newName;
+    rewriteRefs(oldName, newName);
     dirty_ = true;
 }
 
@@ -212,6 +247,112 @@ void InputSchemeEditor::setBindingComponent(usize index, i32 component) {
     dirty_ = true;
 }
 
+// ---- triggers and modifiers -------------------------------------------------------------------------
+
+std::vector<std::string>* InputSchemeEditor::specList(SpecOwner owner, SpecKind kind) {
+    const bool trig = kind == SpecKind::Trigger;
+    if (owner.isAction) {
+        if (owner.index >= data_.actions.size()) return nullptr;
+        fmt::OcInputAction& a = data_.actions[owner.index];
+        return trig ? &a.triggers : &a.modifiers;
+    }
+    if (owner.index >= data_.bindings.size()) return nullptr;
+    fmt::OcInputBinding& b = data_.bindings[owner.index];
+    return trig ? &b.triggers : &b.modifiers;
+}
+
+std::string InputSchemeEditor::ownerActionName(SpecOwner owner) const {
+    if (owner.isAction) return owner.index < data_.actions.size() ? data_.actions[owner.index].name : std::string();
+    return owner.index < data_.bindings.size() ? data_.bindings[owner.index].action : std::string();
+}
+
+bool InputSchemeEditor::validateSpec(SpecOwner owner, SpecKind kind, const std::string& spec, std::string& canonical) {
+    std::string err;
+    if (kind == SpecKind::Trigger) {
+        fmt::OcTriggerSpec t;
+        if (!fmt::parseTriggerSpec(spec, t, &err)) { specError_ = err; return false; }
+        const std::string own = ownerActionName(owner);
+        for (const std::string& r : t.refs) {
+            bool declared = false;
+            for (const auto& a : data_.actions) if (a.name == r) { declared = true; break; }
+            if (!declared) { specError_ = "\"" + r + "\" is not a declared action"; return false; }
+            if (t.kind == fmt::OcTriggerKind::Chord && r == own) {
+                specError_ = "a chord cannot name its own action";
+                return false;
+            }
+        }
+        canonical = fmt::formatTriggerSpec(t);
+    } else {
+        fmt::OcModifierSpec m;
+        if (!fmt::parseModifierSpec(spec, m, &err)) { specError_ = err; return false; }
+        canonical = fmt::formatModifierSpec(m);
+    }
+    specError_.clear();
+    return true;
+}
+
+bool InputSchemeEditor::addSpec(SpecOwner owner, SpecKind kind, std::string spec) {
+    if (!loaded_) return false;
+    if (!specList(owner, kind)) { specError_ = "no such action or binding"; return false; }
+    std::string canonical;
+    if (!validateSpec(owner, kind, spec, canonical)) return false;
+    pushUndo();
+    specList(owner, kind)->push_back(std::move(canonical));
+    dirty_ = true;
+    return true;
+}
+
+bool InputSchemeEditor::setSpec(SpecOwner owner, SpecKind kind, usize i, std::string spec) {
+    if (!loaded_) return false;
+    std::vector<std::string>* list = specList(owner, kind);
+    if (!list || i >= list->size()) { specError_ = "no such entry"; return false; }
+    std::string canonical;
+    if (!validateSpec(owner, kind, spec, canonical)) return false;
+    if ((*list)[i] == canonical) return true;
+    pushUndo();
+    (*specList(owner, kind))[i] = std::move(canonical);
+    dirty_ = true;
+    return true;
+}
+
+void InputSchemeEditor::removeSpec(SpecOwner owner, SpecKind kind, usize i) {
+    if (!loaded_) return;
+    std::vector<std::string>* list = specList(owner, kind);
+    if (!list || i >= list->size()) return;
+    pushUndo();
+    list->erase(list->begin() + static_cast<isize>(i));
+    dirty_ = true;
+}
+
+void InputSchemeEditor::moveSpec(SpecOwner owner, SpecKind kind, usize i, int delta) {
+    if (!loaded_) return;
+    std::vector<std::string>* list = specList(owner, kind);
+    if (!list || i >= list->size() || delta == 0) return;
+    const isize target = static_cast<isize>(i) + delta;
+    if (target < 0 || target >= static_cast<isize>(list->size())) return;
+    pushUndo();
+    std::swap((*list)[i], (*list)[static_cast<usize>(target)]);
+    dirty_ = true;
+}
+
+void InputSchemeEditor::rewriteRefs(const std::string& oldName, const std::string& newName) {
+    const auto fix = [&](std::vector<std::string>& list) {
+        for (usize i = 0; i < list.size();) {
+            fmt::OcTriggerSpec t;
+            if (!fmt::parseTriggerSpec(list[i], t) ||
+                (t.kind != fmt::OcTriggerKind::Chord && t.kind != fmt::OcTriggerKind::Combo)) { ++i; continue; }
+            bool hit = false;
+            for (std::string& r : t.refs) if (r == oldName) { r = newName; hit = true; }
+            if (!hit) { ++i; continue; }
+            if (newName.empty()) { list.erase(list.begin() + static_cast<isize>(i)); continue; }
+            list[i] = fmt::formatTriggerSpec(t);
+            ++i;
+        }
+    };
+    for (auto& a : data_.actions) fix(a.triggers);
+    for (auto& b : data_.bindings) fix(b.triggers);
+}
+
 // ---- context ------------------------------------------------------------------------------------
 
 void InputSchemeEditor::setContextName(std::string name) {
@@ -252,6 +393,178 @@ constexpr fmt::OcInputSource kAllSources[] = {
     fmt::OcInputSource::Key,        fmt::OcInputSource::MouseX,        fmt::OcInputSource::MouseY,
     fmt::OcInputSource::MouseWheel, fmt::OcInputSource::GamepadButton, fmt::OcInputSource::GamepadAxis,
 };
+
+// ---- trigger / modifier entry editors -------------------------------------------------------------
+
+const char* const kTriggerKindNames[] = {"Down", "Pressed", "Released", "Hold", "Hold And Release", "Tap", "Pulse", "Chord", "Combo"};
+const char* const kModifierKindNames[] = {"Dead Zone", "Scale", "Negate", "Swizzle", "Smooth", "Response Curve"};
+const char* const kSwizzleNames[] = {"XYZ", "YXZ", "ZYX", "XZY", "YZX", "ZXY"};
+
+// What one editor frame did to the entry: `changed` is a new value, `drag` says it came from a drag
+// widget (so the editor coalesces a whole drag into one undo step), `activated` is a drag starting.
+struct EditResult {
+    bool changed = false, drag = false, activated = false;
+};
+
+bool dragFloat(EditResult& r, const char* label, float* v, float speed, float lo, float hi, float width = 70.0f) {
+    ImGui::SetNextItemWidth(width);
+    const bool ch = ImGui::DragFloat(label, v, speed, lo, hi, "%.3f");
+    if (ImGui::IsItemActivated()) r.activated = true;
+    if (ch) { r.changed = true; r.drag = true; }
+    return ch;
+}
+
+fmt::OcTriggerSpec defaultTrigger(fmt::OcTriggerKind kind, const std::vector<std::string>& names, const std::string& own) {
+    fmt::OcTriggerSpec t;
+    t.kind = kind;
+    switch (kind) {
+        case fmt::OcTriggerKind::Hold:
+        case fmt::OcTriggerKind::HoldRelease: t.time = 0.5f; break;
+        case fmt::OcTriggerKind::Tap:         t.time = 0.2f; break;
+        case fmt::OcTriggerKind::Pulse:       t.time = 0.25f; break;
+        case fmt::OcTriggerKind::Chord:
+            for (const std::string& n : names) if (n != own) { t.refs.push_back(n); break; }
+            break;
+        case fmt::OcTriggerKind::Combo:
+            t.time = 0.4f;
+            if (!names.empty()) { t.refs.push_back(names[0]); t.refs.push_back(names[names.size() > 1 ? 1 : 0]); }
+            break;
+        default: break;
+    }
+    return t;
+}
+
+fmt::OcModifierSpec defaultModifier(fmt::OcModifierKind kind) {
+    fmt::OcModifierSpec m;
+    m.kind = kind;
+    switch (kind) {
+        case fmt::OcModifierKind::Scale:
+        case fmt::OcModifierKind::Curve:  m.v[0] = m.v[1] = m.v[2] = 1.0f; break;
+        case fmt::OcModifierKind::Smooth: m.v[0] = 0.05f; break;
+        default: break;
+    }
+    return m;
+}
+
+bool actionCombo(const char* label, std::string& value, const std::vector<std::string>& names, const std::string& skip, float width) {
+    bool ch = false;
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::BeginCombo(label, value.empty() ? "(pick one)" : value.c_str())) {
+        for (const std::string& n : names) {
+            if (n == skip) continue;
+            if (ImGui::Selectable(n.c_str(), n == value)) { value = n; ch = true; }
+        }
+        ImGui::EndCombo();
+    }
+    return ch;
+}
+
+EditResult editTrigger(fmt::OcTriggerSpec& t, const std::vector<std::string>& names, const std::string& own) {
+    EditResult r;
+    const auto actuation = [&] { dragFloat(r, "act", &t.actuation, 0.01f, 0.0f, 1.0f, 60.0f); };
+    switch (t.kind) {
+        case fmt::OcTriggerKind::Down:
+        case fmt::OcTriggerKind::Pressed:
+        case fmt::OcTriggerKind::Released:
+            actuation();
+            break;
+        case fmt::OcTriggerKind::Hold:
+            dragFloat(r, "sec", &t.time, 0.01f, 0.0f, 60.0f);
+            ImGui::SameLine(); actuation();
+            ImGui::SameLine();
+            if (ImGui::Checkbox("once", &t.once)) r.changed = true;
+            break;
+        case fmt::OcTriggerKind::HoldRelease:
+            dragFloat(r, "sec", &t.time, 0.01f, 0.0f, 60.0f);
+            ImGui::SameLine(); actuation();
+            break;
+        case fmt::OcTriggerKind::Tap:
+            dragFloat(r, "max sec", &t.time, 0.01f, 0.0f, 10.0f);
+            ImGui::SameLine(); actuation();
+            break;
+        case fmt::OcTriggerKind::Pulse: {
+            dragFloat(r, "interval", &t.time, 0.01f, 0.01f, 60.0f);
+            ImGui::SameLine();
+            int limit = t.limit;
+            ImGui::SetNextItemWidth(60.0f);
+            if (ImGui::DragInt("limit", &limit, 0.2f, 0, 1000)) { t.limit = limit < 0 ? 0 : limit; r.changed = true; r.drag = true; }
+            if (ImGui::IsItemActivated()) r.activated = true;
+            ImGui::SameLine(); actuation();
+            ImGui::SameLine();
+            if (ImGui::Checkbox("on start", &t.onStart)) r.changed = true;
+            break;
+        }
+        case fmt::OcTriggerKind::Chord: {
+            if (t.refs.empty()) t.refs.emplace_back();
+            if (actionCombo("##chord", t.refs[0], names, own, 160.0f)) r.changed = true;
+            break;
+        }
+        case fmt::OcTriggerKind::Combo:
+            dragFloat(r, "window", &t.time, 0.01f, 0.01f, 10.0f);
+            for (usize k = 0; k < t.refs.size(); ++k) {
+                ImGui::SameLine();
+                ImGui::PushID(static_cast<int>(k));
+                if (actionCombo("##step", t.refs[k], names, std::string(), 110.0f)) r.changed = true;
+                ImGui::PopID();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("+ step") && !names.empty()) { t.refs.push_back(names[0]); r.changed = true; }
+            if (t.refs.size() > 2) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("- step")) { t.refs.pop_back(); r.changed = true; }
+            }
+            break;
+    }
+    return r;
+}
+
+EditResult editModifier(fmt::OcModifierSpec& m) {
+    EditResult r;
+    switch (m.kind) {
+        case fmt::OcModifierKind::DeadZone: {
+            dragFloat(r, "lower", &m.v[0], 0.01f, 0.0f, 0.99f, 60.0f);
+            ImGui::SameLine();
+            dragFloat(r, "upper", &m.v[1], 0.01f, 0.01f, 1.0f, 60.0f);
+            if (m.v[0] >= m.v[1]) m.v[0] = m.v[1] - 0.01f;   // the format needs lower < upper
+            ImGui::SameLine();
+            int mode = m.mode == 1 ? 1 : 0;
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::Combo("##dzmode", &mode, "Radial\0Axial\0")) { m.mode = mode; r.changed = true; }
+            break;
+        }
+        case fmt::OcModifierKind::Scale:
+        case fmt::OcModifierKind::Curve: {
+            const bool curve = m.kind == fmt::OcModifierKind::Curve;
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::DragFloat3(curve ? "exponent xyz" : "scale xyz", m.v, 0.01f, curve ? 0.05f : -100.0f, 100.0f, "%.3f")) {
+                r.changed = true; r.drag = true;
+            }
+            if (ImGui::IsItemActivated()) r.activated = true;
+            break;
+        }
+        case fmt::OcModifierKind::Negate: {
+            bool x = (m.mask & 1) != 0, y = (m.mask & 2) != 0, z = (m.mask & 4) != 0;
+            bool ch = ImGui::Checkbox("X", &x);
+            ImGui::SameLine(); ch |= ImGui::Checkbox("Y", &y);
+            ImGui::SameLine(); ch |= ImGui::Checkbox("Z", &z);
+            if (ch) {
+                m.mask = static_cast<u8>((x ? 1 : 0) | (y ? 2 : 0) | (z ? 4 : 0));
+                r.changed = true;
+            }
+            break;
+        }
+        case fmt::OcModifierKind::Swizzle: {
+            int mode = m.mode;
+            ImGui::SetNextItemWidth(80.0f);
+            if (ImGui::Combo("##swizzle", &mode, kSwizzleNames, IM_ARRAYSIZE(kSwizzleNames))) { m.mode = mode; r.changed = true; }
+            break;
+        }
+        case fmt::OcModifierKind::Smooth:
+            dragFloat(r, "time constant", &m.v[0], 0.005f, 0.0f, 5.0f, 90.0f);
+            break;
+    }
+    return r;
+}
 } // namespace
 
 void InputSchemeEditor::drawContext() {
@@ -273,10 +586,21 @@ void InputSchemeEditor::drawContext() {
 void InputSchemeEditor::drawActions() {
     ImGui::SeparatorText("Actions");
     static const char* kTypeNames[] = {"Digital", "Axis1D", "Axis2D"};
-    if (ImGui::BeginTable("inputActions", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
-                                             ImGuiTableFlags_SizingStretchProp)) {
+#if AVER_MODULE_FRAMEWORK
+    // While the editor is playing, show each action's trigger state and how long it has been active.
+    const bool playing = aver_fw_play_state() == AVER_FW_PLAY_PLAYING;
+    constexpr int kColumns = 5;
+#else
+    constexpr int kColumns = 4;
+#endif
+    if (ImGui::BeginTable("inputActions", kColumns, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
+                                                    ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+        ImGui::TableSetupColumn("Config", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+#if AVER_MODULE_FRAMEWORK
+        ImGui::TableSetupColumn("Live", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+#endif
         ImGui::TableSetupColumn("##del", ImGuiTableColumnFlags_WidthFixed, 28.0f);
         ImGui::TableHeadersRow();
         // Direct in-loop removal, size checked fresh each iteration -- GraphEditor's own function-
@@ -301,6 +625,27 @@ void InputSchemeEditor::drawActions() {
                 setActionType(i, static_cast<fmt::OcInputValueType>(typeIdx));
 
             ImGui::TableNextColumn();
+            const usize nT = data_.actions[i].triggers.size(), nM = data_.actions[i].modifiers.size();
+            if (nT + nM == 0) ImGui::TextDisabled("-");
+            else ImGui::Text("%zuT %zuM", nT, nM);
+
+#if AVER_MODULE_FRAMEWORK
+            ImGui::TableNextColumn();
+            if (playing) {
+                const int32_t h = aver_fw_action_find(data_.actions[i].name.c_str());
+                const int32_t st = h ? aver_fw_action_state(h) : AVER_FW_TRIGGER_STATE_NONE;
+                const ImVec4 col = st == AVER_FW_TRIGGER_STATE_TRIGGERED ? ImVec4(0.4f, 0.9f, 0.4f, 1.0f)
+                                 : st == AVER_FW_TRIGGER_STATE_ONGOING   ? ImVec4(0.95f, 0.8f, 0.3f, 1.0f)
+                                                                         : ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+                const char* label = st == AVER_FW_TRIGGER_STATE_TRIGGERED ? "Triggered"
+                                  : st == AVER_FW_TRIGGER_STATE_ONGOING   ? "Ongoing" : "None";
+                ImGui::TextColored(col, "%s %.2fs", label, h ? aver_fw_action_elapsed(h) : 0.0f);
+            } else {
+                ImGui::TextDisabled("-");
+            }
+#endif
+
+            ImGui::TableNextColumn();
             if (ImGui::SmallButton(ICON_DELETE)) removeAction(i);
 
             ImGui::PopID();
@@ -308,6 +653,17 @@ void InputSchemeEditor::drawActions() {
         ImGui::EndTable();
     }
     if (ImGui::Button(ICON_ADD " Add Action")) addAction();
+
+    // Triggers (when the action fires) and modifiers (how its value is shaped) on the action itself.
+    for (usize i = 0; i < data_.actions.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        const std::string label = data_.actions[i].name + "  (triggers and modifiers)###cfg";
+        if (ImGui::TreeNode(label.c_str())) {
+            drawSpecs(SpecOwner{true, i});
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
 }
 
 void InputSchemeEditor::drawBindings() {
@@ -390,6 +746,124 @@ void InputSchemeEditor::drawBindings() {
         ImGui::EndTable();
     }
     if (ImGui::Button(ICON_ADD " Add Binding")) addBinding();
+
+    // A binding's own triggers and modifiers act on that binding's value alone, before the action sums
+    // it. A radial dead zone belongs on the action instead: a binding carries a single channel.
+    for (usize i = 0; i < data_.bindings.size(); ++i) {
+        const fmt::OcInputBinding& b = data_.bindings[i];
+        ImGui::PushID(static_cast<int>(i));
+        std::string label = b.action + "  " + bindingSourceLabel(b.source);
+        if (!b.key.empty()) label += " " + b.key;
+        if (!b.triggers.empty() || !b.modifiers.empty())
+            label += "  (" + std::to_string(b.triggers.size()) + "T " + std::to_string(b.modifiers.size()) + "M)";
+        label += "###bcfg";
+        if (ImGui::TreeNode(label.c_str())) {
+            drawSpecs(SpecOwner{false, i});
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
+}
+
+void InputSchemeEditor::drawSpecs(SpecOwner owner) {
+    std::vector<std::string> names;
+    for (const auto& a : data_.actions) names.push_back(a.name);
+    const std::string own = ownerActionName(owner);
+
+    for (const SpecKind kind : {SpecKind::Trigger, SpecKind::Modifier}) {
+        const bool trig = kind == SpecKind::Trigger;
+        ImGui::PushID(trig ? 0 : 1);
+        ImGui::TextDisabled(trig ? "Triggers (an action with none fires while held)" : "Modifiers (applied in order)");
+
+        for (usize i = 0;; ) {
+            const std::vector<std::string>* list = specList(owner, kind);
+            if (!list || i >= list->size()) break;
+            const std::string spec = (*list)[i];
+            ImGui::PushID(static_cast<int>(i));
+
+            std::string replacement;
+            EditResult res;
+            if (trig) {
+                fmt::OcTriggerSpec t;
+                if (fmt::parseTriggerSpec(spec, t)) {
+                    int k = static_cast<int>(t.kind);
+                    ImGui::SetNextItemWidth(130.0f);
+                    if (ImGui::Combo("##kind", &k, kTriggerKindNames, IM_ARRAYSIZE(kTriggerKindNames))) {
+                        t = defaultTrigger(static_cast<fmt::OcTriggerKind>(k), names, own);
+                        res.changed = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", spec.c_str());
+                    ImGui::SameLine();
+                    const EditResult e = editTrigger(t, names, own);
+                    res.changed |= e.changed; res.drag |= e.drag; res.activated |= e.activated;
+                    if (res.changed) replacement = fmt::formatTriggerSpec(t);
+                } else {
+                    ImGui::TextDisabled("%s (unreadable)", spec.c_str());
+                }
+            } else {
+                fmt::OcModifierSpec m;
+                if (fmt::parseModifierSpec(spec, m)) {
+                    int k = static_cast<int>(m.kind);
+                    ImGui::SetNextItemWidth(130.0f);
+                    if (ImGui::Combo("##kind", &k, kModifierKindNames, IM_ARRAYSIZE(kModifierKindNames))) {
+                        m = defaultModifier(static_cast<fmt::OcModifierKind>(k));
+                        res.changed = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", spec.c_str());
+                    ImGui::SameLine();
+                    const EditResult e = editModifier(m);
+                    res.changed |= e.changed; res.drag |= e.drag; res.activated |= e.activated;
+                    if (res.changed) replacement = fmt::formatModifierSpec(m);
+                } else {
+                    ImGui::TextDisabled("%s (unreadable)", spec.c_str());
+                }
+            }
+
+            ImGui::SameLine();
+            int move = 0;
+            bool remove = false;
+            if (ImGui::SmallButton("Up")) move = -1;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Dn")) move = 1;
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_DELETE)) remove = true;
+            ImGui::PopID();
+
+            if (res.activated) specDragUndone_ = false;
+            if (!replacement.empty()) {
+                if (res.drag) {
+                    // One undo step for a whole drag; the value still lands every frame.
+                    std::string canonical;
+                    if (validateSpec(owner, kind, replacement, canonical) && (*specList(owner, kind))[i] != canonical) {
+                        if (!specDragUndone_) { pushUndo(); specDragUndone_ = true; }
+                        (*specList(owner, kind))[i] = std::move(canonical);
+                        dirty_ = true;
+                    }
+                } else {
+                    setSpec(owner, kind, i, replacement);
+                }
+            }
+            if (remove) { removeSpec(owner, kind, i); continue; }
+            if (move != 0) moveSpec(owner, kind, i, move);
+            ++i;
+        }
+
+        const char* popup = trig ? "addTrigger" : "addModifier";
+        if (ImGui::SmallButton(trig ? ICON_ADD " Trigger" : ICON_ADD " Modifier")) ImGui::OpenPopup(popup);
+        if (ImGui::BeginPopup(popup)) {
+            if (trig) {
+                for (int k = 0; k < IM_ARRAYSIZE(kTriggerKindNames); ++k)
+                    if (ImGui::Selectable(kTriggerKindNames[k]))
+                        addSpec(owner, kind, fmt::formatTriggerSpec(defaultTrigger(static_cast<fmt::OcTriggerKind>(k), names, own)));
+            } else {
+                for (int k = 0; k < IM_ARRAYSIZE(kModifierKindNames); ++k)
+                    if (ImGui::Selectable(kModifierKindNames[k]))
+                        addSpec(owner, kind, fmt::formatModifierSpec(defaultModifier(static_cast<fmt::OcModifierKind>(k))));
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
 }
 
 void InputSchemeEditor::drawProjectSchemeLine() {
@@ -453,6 +927,7 @@ void InputSchemeEditor::draw(Engine& e) {
     drawActions();
     ImGui::Dummy(ImVec2(0, 6.0f));
     drawBindings();
+    if (!specError_.empty()) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", specError_.c_str());
     drawProjectSchemeLine();
 }
 

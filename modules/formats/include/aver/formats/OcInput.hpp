@@ -16,15 +16,12 @@
 //
 // NO ENGINE DEPENDENCY, DELIBERATELY. Unlike .ocparticle (which parses straight into
 // particles::ParticleEffect -- see modules/formats.particles/include/aver/formats/OcParticle.hpp's
-// own comment on why), Aver.Framework is C#-only: there is no C++ InputAction/InputBinding type to
-// parse into. So this format defines its own plain POD structs below, and a C# loader (not written
-// as part of this change -- see the integration note on writeOcinput/OcInputData) is what turns them
-// into real InputAction/InputMappingContext instances, the same division of labour
-// scripting/csharp/Aver.Graph/OcGraphParser.cs already has with this module's C++ OcGraph reader for
-// a different format. That keeps this header inside the BASE Aver.Formats target with zero new
-// dependencies -- the same reasoning OcLand.hpp/OcBt.hpp/OcSound.hpp already state for their own
-// "just a struct and a string table" formats (see modules/formats/CMakeLists.txt's own comments on
-// each).
+// own comment on why), Aver.Framework's input layer has no C++ InputAction/InputBinding type to
+// parse into. So this format defines its own plain POD structs below; the framework ABI's INPUT
+// SCHEME section hands them to scripting/csharp/Aver.Framework/InputScheme.cs, which builds the real
+// InputAction/InputMappingContext instances. That keeps this header inside the BASE Aver.Formats
+// target with zero new dependencies -- the same reasoning OcLand.hpp/OcBt.hpp/OcSound.hpp state for
+// their own "just a struct and a string table" formats.
 //
 // KEY NAMES ARE OPAQUE STRINGS, NOT A VALIDATED ENUM -- the same choice OcGraph.hpp's
 // OcGraphComponent::kind makes ("KIND IS AN OPAQUE STRING HERE, deliberately", OcGraph.hpp:111) and
@@ -75,6 +72,9 @@ enum class OcInputSource { Key, MouseX, MouseY, MouseWheel, GamepadButton, Gamep
 struct OcInputAction {
     std::string name;
     OcInputValueType type = OcInputValueType::Digital;
+    // `trigger`/`modifier` pairs on the ACTION line, in file order, as CANONICAL spec text (already
+    // validated by parseTriggerSpec/parseModifierSpec; the format never stores half-parsed data).
+    std::vector<std::string> triggers, modifiers;
 };
 
 // One binding, feeding exactly one declared action: `BIND <action> <source> [<key>] [scale <f32>]
@@ -106,7 +106,41 @@ struct OcInputBinding {
     // 103) but Accumulate's `default:` branch still honours. This format allows every value BindKey's
     // callers have always been able to pass, not only the two its doc comment happens to mention.
     i32 component = 0;
+    // Per-binding triggers/modifiers, canonical spec text, file order (see OcInputAction).
+    std::vector<std::string> triggers, modifiers;
 };
+
+// ---- TRIGGER AND MODIFIER SPECS ---------------------------------------------------------------
+// One whitespace-free token per trigger/modifier, e.g. `hold:0.5:once`, `deadzone:0.2:1`. This one
+// parser/formatter serves the file reader/writer, the framework ABI (aver_fw_action_add_trigger) and
+// the editor; C# only builds spec text with typed factories and never parses it. Grammar in
+// OcInput.cpp's header comment.
+enum class OcTriggerKind : i32 { Down, Pressed, Released, Hold, HoldRelease, Tap, Pulse, Chord, Combo };
+struct OcTriggerSpec {
+    OcTriggerKind kind = OcTriggerKind::Down;
+    f32  actuation = 0.15f;
+    f32  time = 0.0f;              // hold/holdrelease: seconds; tap: max; pulse: interval; combo: window
+    i32  limit = 0;                // pulse (0 = unlimited)
+    bool once = false;             // hold
+    bool onStart = true;           // pulse
+    std::vector<std::string> refs; // chord: 1 action name; combo: the step names
+    bool operator==(const OcTriggerSpec&) const = default;
+};
+enum class OcModifierKind : i32 { DeadZone, Scale, Negate, Swizzle, Smooth, Curve };
+struct OcModifierSpec {
+    OcModifierKind kind = OcModifierKind::DeadZone;
+    f32 v[3] = {0.2f, 1.0f, 0.0f}; // deadzone lo,hi; scale/curve xyz; smooth tau in v[0]
+    u8  mask = 7;                  // negate: bit0 x, bit1 y, bit2 z
+    i32 mode = 0;                  // deadzone 0 radial 1 axial; swizzle 0..5 = xyz,yxz,zyx,xzy,yzx,zxy
+    bool operator==(const OcModifierSpec&) const = default;
+};
+// Parse one spec token. False with *err (naming the offending field) on anything malformed; `out` is
+// untouched on failure.
+bool parseTriggerSpec (std::string_view spec, OcTriggerSpec&  out, std::string* err = nullptr);
+bool parseModifierSpec(std::string_view spec, OcModifierSpec& out, std::string* err = nullptr);
+// Canonical text: lowercase kind, %.6g numbers, trailing defaults omitted. parse(format(x)) == x.
+std::string formatTriggerSpec (const OcTriggerSpec&);
+std::string formatModifierSpec(const OcModifierSpec&);
 
 // A complete binding scheme. One file replaces one hand-written InputMappingContext subclass.
 struct OcInputData {
@@ -154,14 +188,10 @@ bool loadOcinput(const std::string& path, OcInputData& out, std::string* err = n
 // record this format does not model -- is copied through untouched, at its original position. Pass
 // an empty string_view (the default) to produce a fresh file. Round-trips through parseOcinput.
 //
-// INTEGRATION NOTE: OcInputData now DOES reach a real Aver.Framework.InputMappingContext --
-// modules/framework/include/aver/framework/framework_abi.h's own INPUT SCHEME section
-// (aver_fw_input_scheme_load and its count/index getters) exposes exactly this parser
-// (aver::fmt::parseOcinput, via loadOcinput) across the C ABI, one file-static parsed scheme at a
-// time, and scripting/csharp/Aver.Framework/InputScheme.cs is the C# loader that walks it into a
-// live InputMappingContext (InputAction.Digital/Axis1D/Axis2D, then bindings by key name) and pushes
-// it onto EnhancedInput. This header and OcInput.cpp still only make the data representable and
-// round-trippable -- the ABI section is what makes it LIVE.
+// INTEGRATION NOTE: framework_abi.h's INPUT SCHEME section (aver_fw_input_scheme_load and its
+// count/index getters) exposes this parser across the C ABI, one file-static parsed scheme at a
+// time, and scripting/csharp/Aver.Framework/InputScheme.cs walks it into a live InputMappingContext
+// (actions, bindings by key name, triggers and modifiers) and pushes it onto EnhancedInput.
 std::string writeOcinput(const OcInputData& d, std::string_view existing = "");
 
 } // namespace aver::fmt

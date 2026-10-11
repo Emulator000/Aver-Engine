@@ -4,6 +4,8 @@
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_hooks.h"
 
+#include "ActionEngine.hpp"
+
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcInput.hpp"
 #include "aver/scene/scene_abi.h"
@@ -14,6 +16,7 @@
 #include "aver/scene/Fields.hpp"
 #include "aver/scene/World.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -1253,11 +1256,28 @@ float aver_fw_input_gamepad_axis(int32_t pad, int32_t axis) {
 // identical key. Only the declaration itself needs to persist: `name` for find-by-name, `valueType`
 // kept for a future consumer that wants to know an action's declared shape (nothing enforces it
 // today, matching EnhancedInput.cs's own ValueType, which is documentation, not a gate, there too).
+//
+// TRIGGERS AND MODIFIERS (minor 11) add per-action config plus the result of the last
+// aver_fw_action_update. The action-level lists reshape/gate the SUMMED value; each binding carries its own
+// (ActionBinding below). Semantics: docs/plans/wave2/ENHANCED_INPUT.md section 2, engine in ActionEngine.cpp.
 struct ActionDef {
     std::string name;
     int32_t     valueType;
+    std::vector<fmt::OcTriggerSpec>      triggers;
+    std::vector<fmt::OcModifierSpec>     modifiers;
+    std::vector<fwinput::TriggerRuntime> trigRt;       // parallel to triggers
+    std::vector<fwinput::ModRuntime>     modRt;        // parallel to modifiers
+    fwinput::Rank state = fwinput::Rank::None, prevState = fwinput::Rank::None;
+    float         elapsed = 0.0f, triggeredTime = 0.0f;
+    fwinput::V3   value, prevValue;                    // modified value of the last two updates
+    int32_t       events = 0;
+    bool          updated = false;                     // an update has run (smooth actions then read the cache)
+    bool          busy = false;                        // mid-evaluation: the chord/combo cycle guard
+    uint32_t      evalSeq = 0;                         // update number this action was last evaluated in
 };
 std::vector<ActionDef>& actionDefs() { static std::vector<ActionDef> v; return v; }
+// Names live in a deque so aver_fw_action_name's pointer survives later registrations.
+std::deque<std::string>& actionNames() { static std::deque<std::string> v; return v; }
 
 // One binding: an action, a source, and the slot it reads -- an AVER_FW_KEY_* for AVER_FW_ACTION_SRC_
 // KEY, an AVER_FW_GAMEPAD_* button or AVER_FW_GAMEPAD_AXIS_* axis for the two GAMEPAD_* sources,
@@ -1271,6 +1291,10 @@ struct ActionBinding {
     float   scale;
     int32_t component;
     int32_t priority;
+    std::vector<fmt::OcTriggerSpec>      triggers;
+    std::vector<fmt::OcModifierSpec>     modifiers;
+    std::vector<fwinput::TriggerRuntime> trigRt;
+    std::vector<fwinput::ModRuntime>     modRt;
 };
 std::vector<ActionBinding>& actionBindings() { static std::vector<ActionBinding> v; return v; }
 
@@ -1289,64 +1313,79 @@ bool actionKeyConsumedByHigherPriority(int32_t key, int32_t priority) {
     return false;
 }
 
-// Sums every binding of `action` into out[3], reading CURRENT input state when useCurrent, or the
+// One binding's sample (source value times scale), reading CURRENT input state when useCurrent, or the
 // PREVIOUS frame's when not -- the two evaluations aver_fw_action_pressed/_released compare, exactly
 // as EnhancedInput.cs's Update() compares this frame's freshly-recomputed Raw against the Prev it
 // snapshotted a moment before recomputing.
-void actionAccumulate(int32_t action, bool useCurrent, float out[3]) {
-    out[0] = out[1] = out[2] = 0.0f;
+float actionBindingSample(const ActionBinding& b, bool useCurrent) {
     const InputState& s = inputState();
     const GamepadState& g = gamepadState();
+    float v = 0.0f;
+    switch (b.source) {
+        case AVER_FW_ACTION_SRC_KEY:
+            // A key consumed by a higher-priority binding contributes nothing to THIS action,
+            // whether or not that higher binding's own action happens to be active right now --
+            // EnhancedInput.cs consumes by KEY, not by whether the consumer read a nonzero value.
+            if (!actionKeyConsumedByHigherPriority(b.key, b.priority)) {
+                const bool down = useCurrent ? s.cur[b.key] != 0 : s.prev[b.key] != 0;
+                v = down ? b.scale : 0.0f;
+            }
+            break;
+        case AVER_FW_ACTION_SRC_MOUSE_X:
+            v = (useCurrent ? s.mouse[0] : s.prevMouse[0]) * b.scale;
+            break;
+        case AVER_FW_ACTION_SRC_MOUSE_Y:
+            v = (useCurrent ? s.mouse[1] : s.prevMouse[1]) * b.scale;
+            break;
+        case AVER_FW_ACTION_SRC_MOUSE_WHEEL:
+            v = (useCurrent ? s.mouse[2] : s.prevMouse[2]) * b.scale;
+            break;
+        case AVER_FW_ACTION_SRC_GAMEPAD_BUTTON: {
+            // Same 0/1-times-scale shape as KEY just above, reading GamepadState's own cur/prev
+            // pair instead of InputState's -- but NOT run through actionKeyConsumedByHigherPriority:
+            // that check is scoped to AVER_FW_ACTION_SRC_KEY bindings only (its own name says so),
+            // and this change does not widen it to a second physical-input space. A context stack
+            // that binds the same gamepad button at two priorities gets both, the same as it always
+            // has for two MOUSE_* bindings sharing a channel.
+            const bool down = useCurrent ? g.buttons[b.key] != 0 : g.prevButtons[b.key] != 0;
+            v = down ? b.scale : 0.0f;
+            break;
+        }
+        case AVER_FW_ACTION_SRC_GAMEPAD_AXIS:
+            // Same shape as the MOUSE_* cases above: the raw axis value times scale. Any dead zone
+            // is a `deadzone` modifier, or the 0.15 actuation gate on held/pressed/released.
+            v = (useCurrent ? g.axes[b.key] : g.prevAxes[b.key]) * b.scale;
+            break;
+        default:
+            break;
+    }
+    return v;
+}
+
+// The sample placed in its channel (0=X, 1=Y, anything else=Z -- EnhancedInput.cs's own Accumulate()
+// switch, verbatim), then the binding's own modifiers. `rt` lets `smooth` advance (update only).
+fwinput::V3 actionBindingVec(const ActionBinding& b, bool useCurrent, float dt,
+                             std::vector<fwinput::ModRuntime>* rt) {
+    fwinput::V3 v;
+    const float s = actionBindingSample(b, useCurrent);
+    v.c[b.component == 0 ? 0 : (b.component == 1 ? 1 : 2)] = s;
+    return b.modifiers.empty() ? v : fwinput::applyModifiers(b.modifiers, v, dt, rt);
+}
+
+// Sums every binding of `action` into out[3] (modifiers applied, `smooth` passing through).
+void actionAccumulate(int32_t action, bool useCurrent, float out[3]) {
+    fwinput::V3 sum;
     const std::vector<ActionBinding>& bindings = actionBindings();
     for (usize i = 0; i < bindings.size(); ++i) {
         const ActionBinding& b = bindings[i];
         if (b.action != action) continue;
-
-        float v = 0.0f;
-        switch (b.source) {
-            case AVER_FW_ACTION_SRC_KEY:
-                // A key consumed by a higher-priority binding contributes nothing to THIS action,
-                // whether or not that higher binding's own action happens to be active right now --
-                // EnhancedInput.cs consumes by KEY, not by whether the consumer read a nonzero value.
-                if (!actionKeyConsumedByHigherPriority(b.key, b.priority)) {
-                    const bool down = useCurrent ? s.cur[b.key] != 0 : s.prev[b.key] != 0;
-                    v = down ? b.scale : 0.0f;
-                }
-                break;
-            case AVER_FW_ACTION_SRC_MOUSE_X:
-                v = (useCurrent ? s.mouse[0] : s.prevMouse[0]) * b.scale;
-                break;
-            case AVER_FW_ACTION_SRC_MOUSE_Y:
-                v = (useCurrent ? s.mouse[1] : s.prevMouse[1]) * b.scale;
-                break;
-            case AVER_FW_ACTION_SRC_MOUSE_WHEEL:
-                v = (useCurrent ? s.mouse[2] : s.prevMouse[2]) * b.scale;
-                break;
-            case AVER_FW_ACTION_SRC_GAMEPAD_BUTTON: {
-                // Same 0/1-times-scale shape as KEY just above, reading GamepadState's own cur/prev
-                // pair instead of InputState's -- but NOT run through actionKeyConsumedByHigherPriority:
-                // that check is scoped to AVER_FW_ACTION_SRC_KEY bindings only (its own name says so),
-                // and this change does not widen it to a second physical-input space. A context stack
-                // that binds the same gamepad button at two priorities gets both, the same as it always
-                // has for two MOUSE_* bindings sharing a channel.
-                const bool down = useCurrent ? g.buttons[b.key] != 0 : g.prevButtons[b.key] != 0;
-                v = down ? b.scale : 0.0f;
-                break;
-            }
-            case AVER_FW_ACTION_SRC_GAMEPAD_AXIS:
-                // Same shape as the MOUSE_* cases above: the raw axis value times scale, no dead zone
-                // (that only ever gates held/pressed/released, via actionActive below).
-                v = (useCurrent ? g.axes[b.key] : g.prevAxes[b.key]) * b.scale;
-                break;
-            default:
-                break;
-        }
-
-        // 0=X, 1=Y, anything else=Z -- EnhancedInput.cs's own Accumulate() switch, verbatim.
-        if (b.component == 0)      out[0] += v;
-        else if (b.component == 1) out[1] += v;
-        else                        out[2] += v;
+        const fwinput::V3 v = actionBindingVec(b, useCurrent, 0.0f, nullptr);
+        for (int k = 0; k < 3; ++k) sum.c[k] += v.c[k];
     }
+    const std::vector<ActionDef>& defs = actionDefs();
+    if (action >= 1 && static_cast<usize>(action) <= defs.size() && !defs[static_cast<usize>(action) - 1].modifiers.empty())
+        sum = fwinput::applyModifiers(defs[static_cast<usize>(action) - 1].modifiers, sum, 0.0f, nullptr);
+    out[0] = sum.c[0]; out[1] = sum.c[1]; out[2] = sum.c[2];
 }
 
 // True when any channel exceeds the dead zone -- EnhancedInput.cs's own Active(), pinned at 0.15
@@ -1381,32 +1420,72 @@ int32_t aver_fw_action_register(const char* name, int32_t valueType) {
     const int32_t existing = aver_fw_action_find(name);
     if (existing) return existing;
     std::vector<ActionDef>& defs = actionDefs();
-    defs.push_back(ActionDef{name, valueType});
+    ActionDef def{};
+    def.name = name;
+    def.valueType = valueType;
+    defs.push_back(std::move(def));
+    actionNames().push_back(name);
     return static_cast<int32_t>(defs.size());   // 1-based handle, 0 stays invalid
 }
 
-// Adds one binding. See framework_abi.h's own comment for every parameter's meaning.
+// Adds one binding and returns its id. See framework_abi.h's own comment for every parameter's meaning.
+int32_t aver_fw_action_bind_ex(int32_t action, int32_t source, int32_t key, float scale,
+                               int32_t component, int32_t contextPriority) {
+    if (!actionHandleValid(action)) return -1;
+    if (source < AVER_FW_ACTION_SRC_KEY || source > AVER_FW_ACTION_SRC_GAMEPAD_AXIS) return -1;
+    if (source == AVER_FW_ACTION_SRC_KEY && (key < 0 || key >= AVER_FW_KEY_COUNT)) return -1;
+    if (source == AVER_FW_ACTION_SRC_GAMEPAD_BUTTON &&
+        (key < 0 || key >= AVER_FW_GAMEPAD_BUTTON_COUNT)) return -1;
+    if (source == AVER_FW_ACTION_SRC_GAMEPAD_AXIS &&
+        (key < 0 || key >= AVER_FW_GAMEPAD_AXIS_COUNT)) return -1;
+    ActionBinding b{};
+    b.action = action; b.source = source; b.key = key; b.scale = scale;
+    b.component = component; b.priority = contextPriority;
+    std::vector<ActionBinding>& bindings = actionBindings();
+    bindings.push_back(std::move(b));
+    return static_cast<int32_t>(bindings.size() - 1);
+}
+
+// Adds one binding, ignoring the id; out-of-range arguments are silently dropped.
 void aver_fw_action_bind(int32_t action, int32_t source, int32_t key, float scale,
                          int32_t component, int32_t contextPriority) {
-    if (!actionHandleValid(action)) return;
-    if (source < AVER_FW_ACTION_SRC_KEY || source > AVER_FW_ACTION_SRC_GAMEPAD_AXIS) return;
-    if (source == AVER_FW_ACTION_SRC_KEY && (key < 0 || key >= AVER_FW_KEY_COUNT)) return;
-    if (source == AVER_FW_ACTION_SRC_GAMEPAD_BUTTON &&
-        (key < 0 || key >= AVER_FW_GAMEPAD_BUTTON_COUNT)) return;
-    if (source == AVER_FW_ACTION_SRC_GAMEPAD_AXIS &&
-        (key < 0 || key >= AVER_FW_GAMEPAD_AXIS_COUNT)) return;
-    actionBindings().push_back(ActionBinding{action, source, key, scale, component, contextPriority});
+    aver_fw_action_bind_ex(action, source, key, scale, component, contextPriority);
 }
 
 // Drops every binding. Registrations survive -- see framework_abi.h's own comment.
 void aver_fw_action_clear_bindings(void) { actionBindings().clear(); }
+
+// True when the action's value goes through a `smooth` modifier (its own or a binding's).
+bool actionHasSmooth(int32_t action) {
+    const auto has = [](const std::vector<fmt::OcModifierSpec>& m) {
+        for (const fmt::OcModifierSpec& x : m) if (x.kind == fmt::OcModifierKind::Smooth) return true;
+        return false;
+    };
+    if (has(actionDefs()[static_cast<usize>(action) - 1].modifiers)) return true;
+    for (const ActionBinding& b : actionBindings())
+        if (b.action == action && has(b.modifiers)) return true;
+    return false;
+}
+
+// The modified value the plain queries below work from. Stateless modifiers evaluate on demand; a
+// smoothed action reads the last two updates' values (smoothing only advances in aver_fw_action_update),
+// falling back to a pass-through evaluation until the first update. `action` must be a valid handle.
+void actionValueNow(int32_t action, bool useCurrent, float out[3]) {
+    const ActionDef& def = actionDefs()[static_cast<usize>(action) - 1];
+    if (def.updated && actionHasSmooth(action)) {
+        const fwinput::V3& v = useCurrent ? def.value : def.prevValue;
+        out[0] = v.c[0]; out[1] = v.c[1]; out[2] = v.c[2];
+        return;
+    }
+    actionAccumulate(action, useCurrent, out);
+}
 
 // Writes {X, Y} of the action's current value. {0, 0} for an invalid handle.
 void aver_fw_action_value2(int32_t action, float* out2) {
     if (!out2) return;
     if (!actionHandleValid(action)) { out2[0] = out2[1] = 0.0f; return; }
     float raw[3];
-    actionAccumulate(action, /*useCurrent=*/true, raw);
+    actionValueNow(action, /*useCurrent=*/true, raw);
     out2[0] = raw[0]; out2[1] = raw[1];
 }
 
@@ -1414,7 +1493,7 @@ void aver_fw_action_value2(int32_t action, float* out2) {
 int32_t aver_fw_action_held(int32_t action) {
     if (!actionHandleValid(action)) return 0;
     float raw[3];
-    actionAccumulate(action, true, raw);
+    actionValueNow(action, true, raw);
     return actionActive(raw) ? 1 : 0;
 }
 
@@ -1422,8 +1501,8 @@ int32_t aver_fw_action_held(int32_t action) {
 int32_t aver_fw_action_pressed(int32_t action) {
     if (!actionHandleValid(action)) return 0;
     float raw[3], prev[3];
-    actionAccumulate(action, true, raw);
-    actionAccumulate(action, false, prev);
+    actionValueNow(action, true, raw);
+    actionValueNow(action, false, prev);
     return (actionActive(raw) && !actionActive(prev)) ? 1 : 0;
 }
 
@@ -1431,9 +1510,221 @@ int32_t aver_fw_action_pressed(int32_t action) {
 int32_t aver_fw_action_released(int32_t action) {
     if (!actionHandleValid(action)) return 0;
     float raw[3], prev[3];
-    actionAccumulate(action, true, raw);
-    actionAccumulate(action, false, prev);
+    actionValueNow(action, true, raw);
+    actionValueNow(action, false, prev);
     return (!actionActive(raw) && actionActive(prev)) ? 1 : 0;
+}
+
+// ---- TRIGGERS AND MODIFIERS (minor 11) -------------------------------------------------------------
+// See framework_abi.h's own section for the contract and ActionEngine.cpp for the per-trigger rules.
+
+std::string& actionConfigError() { static std::string s; return s; }
+std::vector<std::pair<int32_t, int32_t>>& actionEventList() {
+    static std::vector<std::pair<int32_t, int32_t>> v;
+    return v;
+}
+
+// The running update: its (clamped) dt and number. evalSeq == seq means "evaluated this update".
+struct ActionRun {
+    float    dt = 0.0f;
+    uint32_t seq = 0;
+};
+ActionRun& actionRun() { static ActionRun r; return r; }
+
+void actionEval(int32_t handle);
+
+// What a chord/combo sees of other actions while one update runs.
+struct ActionTriggerCtx final : fwinput::TriggerContext {
+    int32_t find(const std::string& name) override { return aver_fw_action_find(name.c_str()); }
+    fwinput::Rank stateOf(int32_t h) override {
+        actionEval(h);
+        return actionDefs()[static_cast<usize>(h) - 1].state;   // a cycle reads the previous update's
+    }
+    bool rose(int32_t h) override {
+        actionEval(h);
+        const ActionDef& a = actionDefs()[static_cast<usize>(h) - 1];
+        return !a.busy && a.state == fwinput::Rank::Triggered && a.prevState != fwinput::Rank::Triggered;
+    }
+};
+
+// Evaluates one action for the running update, once (memoised by evalSeq). Chords and combos recurse
+// into the actions they name; `busy` stops a cycle, which then reads the busy action's old state.
+void actionEval(int32_t handle) {
+    std::vector<ActionDef>& defs = actionDefs();
+    if (handle < 1 || static_cast<usize>(handle) > defs.size()) return;
+    ActionDef& a = defs[static_cast<usize>(handle) - 1];
+    const ActionRun& run = actionRun();
+    if (a.busy || a.evalSeq == run.seq) return;
+    a.busy = true;
+    a.prevState = a.state;
+    a.prevValue = a.value;
+
+    using fwinput::Rank;
+    ActionTriggerCtx ctx;
+    std::vector<ActionBinding>& bindings = actionBindings();
+    const bool ownTriggers = !a.triggers.empty();
+    bool anyBindingTriggers = false;
+    for (const ActionBinding& b : bindings)
+        if (b.action == handle && !b.triggers.empty()) { anyBindingTriggers = true; break; }
+
+    fwinput::V3 sum;
+    Rank bState = Rank::None;
+    for (ActionBinding& b : bindings) {
+        if (b.action != handle) continue;
+        if (b.modRt.size() != b.modifiers.size()) b.modRt.resize(b.modifiers.size());
+        const fwinput::V3 v = actionBindingVec(b, /*useCurrent=*/true, run.dt, &b.modRt);
+        for (int k = 0; k < 3; ++k) sum.c[k] += v.c[k];
+        Rank r = Rank::None;
+        if (!b.triggers.empty()) r = fwinput::combineTriggers(b.triggers, b.trigRt, v, run.dt, ctx);
+        else if (anyBindingTriggers && !ownTriggers) r = fwinput::actuated(v, 0.15f) ? Rank::Triggered : Rank::None;
+        if (static_cast<int>(r) > static_cast<int>(bState)) bState = r;
+    }
+
+    if (a.modRt.size() != a.modifiers.size()) a.modRt.resize(a.modifiers.size());
+    const fwinput::V3 V = a.modifiers.empty() ? sum : fwinput::applyModifiers(a.modifiers, sum, run.dt, &a.modRt);
+    Rank aState = Rank::None;
+    if (ownTriggers) aState = fwinput::combineTriggers(a.triggers, a.trigRt, V, run.dt, ctx);
+    else if (!anyBindingTriggers) aState = fwinput::actuated(V, 0.15f) ? Rank::Triggered : Rank::None;
+    const Rank now = static_cast<int>(aState) > static_cast<int>(bState) ? aState : bState;
+
+    a.value = V;
+    a.state = now;
+    a.events = fwinput::eventsFor(a.prevState, now);
+    a.elapsed = now != Rank::None ? a.elapsed + run.dt : 0.0f;
+    a.triggeredTime = now == Rank::Triggered ? a.triggeredTime + run.dt : 0.0f;
+    a.updated = true;
+    a.evalSeq = run.seq;
+    a.busy = false;
+}
+
+// Appends a trigger or modifier spec to a binding (binding >= 0) or the action (-1).
+int32_t actionAddSpec(int32_t action, int32_t binding, const char* spec, bool trigger) {
+    std::string& e = actionConfigError();
+    if (!actionHandleValid(action)) { e = "invalid action handle"; return 0; }
+    if (!spec) { e = "null spec"; return 0; }
+    ActionDef& def = actionDefs()[static_cast<usize>(action) - 1];
+    ActionBinding* b = nullptr;
+    if (binding >= 0) {
+        std::vector<ActionBinding>& bindings = actionBindings();
+        if (static_cast<usize>(binding) >= bindings.size() || bindings[static_cast<usize>(binding)].action != action) {
+            e = "binding does not belong to this action";
+            return 0;
+        }
+        b = &bindings[static_cast<usize>(binding)];
+    } else if (binding != -1) {
+        e = "invalid binding id";
+        return 0;
+    }
+    std::string err;
+    if (trigger) {
+        fmt::OcTriggerSpec t;
+        if (!fmt::parseTriggerSpec(spec, t, &err)) { e = err; return 0; }
+        if (t.kind == fmt::OcTriggerKind::Chord && !t.refs.empty() && t.refs[0] == def.name) {
+            e = "a chord cannot name the action itself";
+            return 0;
+        }
+        (b ? b->triggers : def.triggers).push_back(std::move(t));
+        (b ? b->trigRt : def.trigRt).emplace_back();
+    } else {
+        fmt::OcModifierSpec m;
+        if (!fmt::parseModifierSpec(spec, m, &err)) { e = err; return 0; }
+        (b ? b->modifiers : def.modifiers).push_back(m);
+        (b ? b->modRt : def.modRt).emplace_back();
+    }
+    e.clear();
+    return 1;
+}
+
+int32_t aver_fw_action_add_trigger(int32_t action, int32_t binding, const char* spec) {
+    return actionAddSpec(action, binding, spec, true);
+}
+int32_t aver_fw_action_add_modifier(int32_t action, int32_t binding, const char* spec) {
+    return actionAddSpec(action, binding, spec, false);
+}
+const char* aver_fw_action_config_error(void) { return actionConfigError().c_str(); }
+
+// Drops the action-level triggers and modifiers.
+void aver_fw_action_clear_config(int32_t action) {
+    if (!actionHandleValid(action)) return;
+    ActionDef& def = actionDefs()[static_cast<usize>(action) - 1];
+    def.triggers.clear(); def.trigRt.clear();
+    def.modifiers.clear(); def.modRt.clear();
+}
+
+// Advances every action once (dt clamped to [0, 0.25] so a hitch is not read as a long hold).
+void aver_fw_action_update(float dt) {
+    if (!(dt > 0.0f)) dt = 0.0f;   // also catches NaN
+    if (dt > 0.25f) dt = 0.25f;
+    ActionRun& run = actionRun();
+    run.dt = dt;
+    ++run.seq;
+    const int32_t n = static_cast<int32_t>(actionDefs().size());
+    for (int32_t h = 1; h <= n; ++h) actionEval(h);
+    std::vector<std::pair<int32_t, int32_t>>& list = actionEventList();
+    list.clear();
+    for (int32_t h = 1; h <= n; ++h) {
+        const int32_t ev = actionDefs()[static_cast<usize>(h) - 1].events;
+        if (ev) list.emplace_back(h, ev);
+    }
+}
+
+// Zeroes every trigger/modifier memory, state, elapsed time and the event list; config survives.
+void aver_fw_action_reset_state(void) {
+    for (ActionDef& a : actionDefs()) {
+        for (fwinput::TriggerRuntime& r : a.trigRt) r = fwinput::TriggerRuntime{};
+        for (fwinput::ModRuntime& r : a.modRt) r = fwinput::ModRuntime{};
+        a.state = a.prevState = fwinput::Rank::None;
+        a.elapsed = a.triggeredTime = 0.0f;
+        a.value = a.prevValue = fwinput::V3{};
+        a.events = 0;
+        a.updated = false;
+        a.busy = false;
+    }
+    for (ActionBinding& b : actionBindings()) {
+        for (fwinput::TriggerRuntime& r : b.trigRt) r = fwinput::TriggerRuntime{};
+        for (fwinput::ModRuntime& r : b.modRt) r = fwinput::ModRuntime{};
+    }
+    actionEventList().clear();
+}
+
+// Results of the last update; 0 for an invalid handle.
+int32_t aver_fw_action_state(int32_t action) {
+    return actionHandleValid(action) ? static_cast<int32_t>(actionDefs()[static_cast<usize>(action) - 1].state) : 0;
+}
+int32_t aver_fw_action_events(int32_t action) {
+    return actionHandleValid(action) ? actionDefs()[static_cast<usize>(action) - 1].events : 0;
+}
+float aver_fw_action_elapsed(int32_t action) {
+    return actionHandleValid(action) ? actionDefs()[static_cast<usize>(action) - 1].elapsed : 0.0f;
+}
+float aver_fw_action_triggered_time(int32_t action) {
+    return actionHandleValid(action) ? actionDefs()[static_cast<usize>(action) - 1].triggeredTime : 0.0f;
+}
+
+// Writes {X, Y, Z} of the modified value. Zeros for an invalid handle.
+void aver_fw_action_value3(int32_t action, float* out3) {
+    if (!out3) return;
+    if (!actionHandleValid(action)) { out3[0] = out3[1] = out3[2] = 0.0f; return; }
+    actionValueNow(action, true, out3);
+}
+
+// Registry readback.
+int32_t aver_fw_action_count(void) { return static_cast<int32_t>(actionDefs().size()); }
+const char* aver_fw_action_name(int32_t action) {
+    return actionHandleValid(action) ? actionNames()[static_cast<usize>(action) - 1].c_str() : nullptr;
+}
+int32_t aver_fw_action_value_type(int32_t action) {
+    return actionHandleValid(action) ? actionDefs()[static_cast<usize>(action) - 1].valueType : -1;
+}
+
+// The actions that raised an event in the last update.
+int32_t aver_fw_action_event_count(void) { return static_cast<int32_t>(actionEventList().size()); }
+int32_t aver_fw_action_event_at(int32_t index, int32_t* outAction, int32_t* outMask) {
+    const std::vector<std::pair<int32_t, int32_t>>& list = actionEventList();
+    if (index < 0 || static_cast<usize>(index) >= list.size()) return 0;
+    if (outAction) *outAction = list[static_cast<usize>(index)].first;
+    if (outMask)   *outMask   = list[static_cast<usize>(index)].second;
+    return 1;
 }
 
 // The camera a possessed character asks for.
@@ -1667,5 +1958,34 @@ const char* aver_fw_input_scheme_binding_key(int32_t index) {
     if (index < 0 || static_cast<usize>(index) >= bindings.size()) return nullptr;
     return bindings[static_cast<usize>(index)].key.c_str();
 }
+
+// The trigger or modifier list of a scheme owner: owner >= 0 a binding, owner < 0 the action (-1 - owner).
+const std::vector<std::string>* schemeSpecList(int32_t owner, bool triggers) {
+    const fmt::OcInputData& d = inputScheme();
+    if (owner >= 0) {
+        if (static_cast<usize>(owner) >= d.bindings.size()) return nullptr;
+        const fmt::OcInputBinding& b = d.bindings[static_cast<usize>(owner)];
+        return triggers ? &b.triggers : &b.modifiers;
+    }
+    const int32_t ai = -1 - owner;
+    if (static_cast<usize>(ai) >= d.actions.size()) return nullptr;
+    const fmt::OcInputAction& a = d.actions[static_cast<usize>(ai)];
+    return triggers ? &a.triggers : &a.modifiers;
+}
+int32_t schemeSpecCount(int32_t owner, bool triggers) {
+    const std::vector<std::string>* l = schemeSpecList(owner, triggers);
+    return l ? static_cast<int32_t>(l->size()) : 0;
+}
+const char* schemeSpecAt(int32_t owner, int32_t index, bool triggers) {
+    const std::vector<std::string>* l = schemeSpecList(owner, triggers);
+    if (!l || index < 0 || static_cast<usize>(index) >= l->size()) return nullptr;
+    return (*l)[static_cast<usize>(index)].c_str();
+}
+
+// Binding/action `owner`'s trigger and modifier specs (canonical text); 0 / nullptr out of range.
+int32_t     aver_fw_input_scheme_trigger_count (int32_t owner) { return schemeSpecCount(owner, true); }
+const char* aver_fw_input_scheme_trigger_spec  (int32_t owner, int32_t index) { return schemeSpecAt(owner, index, true); }
+int32_t     aver_fw_input_scheme_modifier_count(int32_t owner) { return schemeSpecCount(owner, false); }
+const char* aver_fw_input_scheme_modifier_spec (int32_t owner, int32_t index) { return schemeSpecAt(owner, index, false); }
 
 }  // extern "C"

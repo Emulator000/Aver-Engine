@@ -9,7 +9,9 @@
 #include "aver/scene/World.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -60,9 +62,13 @@ CAnimGraph* AnimGraphSystem::attach(scene::World& world, scene::Entity e, u64 ma
 void AnimGraphSystem::install(AnimSystem& anim, scene::World&) {
     anim_ = &anim;
     anim.setPoseSource(&AnimGraphSystem::sourceThunk, this);
+    anim.setSlotRootWeight(&AnimGraphSystem::rootWeightThunk, this);
 }
 
-void AnimGraphSystem::uninstall(AnimSystem& anim) { anim.setPoseSource(nullptr, nullptr); }
+void AnimGraphSystem::uninstall(AnimSystem& anim) {
+    anim.setPoseSource(nullptr, nullptr);
+    anim.setSlotRootWeight(nullptr, nullptr);
+}
 
 void AnimGraphSystem::clear() {
     instances_.clear();
@@ -135,9 +141,24 @@ void AnimGraphSystem::tick(scene::World& world, f32 dt) {
                 inst.sm->bind(&loaded->asset,
                               [this](const std::string& r) { return clipFor(r); },
                               [this](const std::string& r) { return spaceFor(r); });
+                inst.pipe = AnimPipeline{};
+                inst.pipeSkel = nullptr;
             }
             inst.stamp = stamp_;
             AnimStateMachine& sm = *inst.sm;
+
+            // The pipeline binds against the entity's skeleton as soon as one resolves (and again if the
+            // entity is pointed at another rig).
+            if (!loaded->asset.pipeline.empty()) {
+                const auto* skm = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
+                const fmt::OcSkeleton* sk = (skm && skm->skeleton) ? anim_->skeleton(skm->skeleton) : nullptr;
+                if (sk && inst.pipeSkel != sk) {
+                    inst.pipe.bind(&loaded->asset.pipeline, sk,
+                                   [this](const std::string& r) { return clipFor(r); },
+                                   [this](const std::string& r) { return spaceFor(r); });
+                    inst.pipeSkel = sk;
+                }
+            }
 
             for (u32 s = 0; s < kAnimGraphSlots; ++s) {
                 if (c->paramHash[s] == 0) continue;
@@ -145,7 +166,21 @@ void AnimGraphSystem::tick(scene::World& world, f32 dt) {
                 if (sm.setByHash(c->paramHash[s], c->paramValue[s]) && trigger) c->paramValue[s] = 0.0f;   // one-shot: zero tells the script it was taken
             }
 
-            if (!(c->flags & kAnimGraphPaused)) sm.tick(dt * (c->playRate == 0.0f ? 1.0f : c->playRate));
+            // Root motion is extracted only when the entity's CRootMotion asks for it from the graph.
+            RootSpec rootSpec;
+            sm.setRootMotion(anim_->rootSpec(world, e, kRootSrcGraph, rootSpec) ? &rootSpec : nullptr);
+
+            if (!(c->flags & kAnimGraphPaused)) {
+                const f32 step = dt * (c->playRate == 0.0f ? 1.0f : c->playRate);
+                sm.tick(step);
+                if (inst.pipe.bound() && !inst.pipe.empty()) {
+                    const AnimStateMachineAsset& asset = loaded->asset;
+                    inst.pipe.tick(step, [&sm, &asset](const std::string& n) {
+                        return asset.paramIndex(n) < 0 ? std::numeric_limits<f32>::quiet_NaN() : sm.value(n);
+                    });
+                }
+                anim_->addRootMotion(e, sm.consumeRootDelta());
+            }
 
             events_.clear();
             sm.drainEvents(events_);
@@ -166,8 +201,28 @@ bool AnimGraphSystem::sourceThunk(scene::Entity e, const fmt::OcSkeleton& skel, 
     auto* self = static_cast<AnimGraphSystem*>(user);
     const auto it = self->instances_.find(e);
     if (it == self->instances_.end() || !it->second.sm) return false;
-    it->second.sm->evaluate(skel, pose);
+    Instance& inst = it->second;
+    inst.sm->evaluate(skel, pose);
+    if (inst.pipe.bound() && !inst.pipe.empty() && inst.pipeSkel == &skel) {
+        const AnimStateMachineAsset* asset = nullptr;
+        if (const auto m = self->machines_.find(inst.machine); m != self->machines_.end()) asset = &m->second.asset;
+        const AnimStateMachine& sm = *inst.sm;
+        inst.pipe.evaluate(
+            [&sm, asset](const std::string& n) {
+                return (!asset || asset->paramIndex(n) < 0) ? std::numeric_limits<f32>::quiet_NaN() : sm.value(n);
+            },
+            [self, e, &skel](u64 slotHash, const Pose& base, Pose& out, f32& coverage) {
+                return self->anim_->evaluateSlot(e, slotHash, skel, base, out, coverage);
+            },
+            pose);
+    }
     return true;
+}
+
+f32 AnimGraphSystem::rootWeightThunk(scene::Entity e, u64 slotHash, void* user) {
+    auto* self = static_cast<AnimGraphSystem*>(user);
+    const auto it = self->instances_.find(e);
+    return it == self->instances_.end() ? 1.0f : it->second.pipe.rootWeight(slotHash);
 }
 
 AnimGraphSystem& animGraphSystem() {

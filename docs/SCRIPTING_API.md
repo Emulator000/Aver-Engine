@@ -411,6 +411,53 @@ public sealed class OnFoot : InputMappingContext
 }
 ```
 
+#### Triggers, modifiers and events
+
+A **trigger** decides *when* an action fires; a **modifier** reshapes its *value*. With neither, an action
+behaves exactly as above (fires while any channel is past the 0.15 actuation). Both attach to a single
+binding (`BindKey(...).Trigger(...)`) or to the action itself (`action.AddTrigger(...)`, evaluated on the
+summed value), and apply in the order added. The same text works in a `.ocinput` file
+(`ACTION Charge digital trigger hold:0.6`, `BIND Look mousex scale 0.5 modifier curve:1.4`).
+
+| Trigger | Fires |
+|---|---|
+| `InputTrigger.Down()` | every update the input is actuated (the default) |
+| `Pressed()` / `Released()` | on the update it becomes actuated / is let go |
+| `Hold(seconds, once)` | after `seconds` held: every update, or for one update with `once` |
+| `HoldAndRelease(seconds)` | on release, if it was held at least `seconds` |
+| `Tap(maxSeconds)` | on release, if it was held no longer than `maxSeconds` |
+| `Pulse(interval, limit, triggerOnStart)` | every `interval` seconds while held, `limit` times at most |
+| `Chorded(otherAction)` | only while `otherAction` is also triggering |
+| `Combo(window, steps...)` | once the step actions have triggered in order, each within `window` seconds |
+
+| Modifier | Effect |
+|---|---|
+| `DeadZone(lower, upper, type)` | zero below `lower`, remap `lower..upper` to `0..1`; radial belongs on the action (a binding carries one channel) |
+| `Scale(x, y, z)` / `Negate(x, y, z)` | multiply / negate channels |
+| `Swizzle(order)` | reorder channels (`XYZ`, `YXZ`, `ZYX`, `XZY`, `YZX`, `ZXY`) |
+| `Smooth(tau)` | exponential smoothing, advanced once per gameplay update |
+| `ResponseCurve(exponent)` | `sign(v) * abs(v)^exponent` per channel |
+
+Where a trigger leaves an action: `action.State` is `None`, `Ongoing` or `Triggered`, and `action.Events`
+is the transition mask from the last update (`Started`, `Ongoing`, `Triggered`, `Completed`, `Canceled`);
+`WasStarted`, `IsOngoing`, `IsTriggered`, `WasCompleted`, `WasCanceled`, `ElapsedSeconds` and
+`TriggeredSeconds` read it. `IsHeld`/`WasPressed`/`WasReleased` stay raw actuation of the modified value
+and ignore triggers. C# can subscribe (`action.Triggered += a => ...`); a graph hears the bus event
+`Input.<Action>.<Event>` through an `OnInputAction` (or `AN_OnEvent`) entry, with payload x, y, elapsed
+seconds, triggered seconds. `InputAction.Find(name)` now returns any registered action, and `Value3D`
+carries all three channels.
+
+```csharp
+GameActions.Jump.AddTrigger(InputTrigger.Tap());
+GameActions.Charge.AddTrigger(InputTrigger.Hold(0.6f));
+GameActions.Move.AddModifier(InputModifier.DeadZone(0.2f));
+GameActions.Charge.Triggered += a => Charging = true;
+```
+
+Triggers and modifiers are authored data: a player's saved rebind changes the key only and keeps them.
+Trigger state advances once a gameplay frame (`aver_fw_action_update`, called from
+`tickGameplayGroups`), so it freezes while the game is paused.
+
 ---
 
 ## 9. Spawning and destroying

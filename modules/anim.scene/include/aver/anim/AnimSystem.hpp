@@ -8,13 +8,16 @@
 // is therefore somebody else's job, and this is that somebody.
 #pragma once
 
+#include "aver/anim/AnimMontages.hpp"
 #include "aver/anim/AnimSampler.hpp"
+#include "aver/anim/RootMotion.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
 
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace aver::anim {
@@ -55,9 +58,34 @@ using PoseModifierFn = void (*)(scene::Entity e, const fmt::OcSkeleton& skel, Po
 // runs on the result, so a control rig layers on a state machine exactly as it does on a clip.
 using PoseSourceFn = bool (*)(scene::Entity e, const fmt::OcSkeleton& skel, Pose& pose, void* user);
 
+// ROOT MOTION on an entity, read by AnimSystem. REGISTERED DYNAMICALLY like CAnimGraph (see
+// AnimSystem::registerComponents), so Components.hpp and the scene ABI stay put. Zero-filled storage
+// reads as mode None: attaching it raw changes nothing.
+inline constexpr i32 kRootMotionNone = 0, kRootMotionIgnore = 1, kRootMotionApply = 2, kRootMotionAccumulate = 3;
+inline constexpr u32 kRootSrcGraph = 1, kRootSrcMontage = 2;      // CRootMotion::sources; 0 reads as both
+// CRootMotion::flags: the caller (a physics character) consumes the accumulator, so Apply leaves CLocal alone.
+inline constexpr u32 kRootMotionExternal = 0x1;
+struct CRootMotion {
+    i32 mode = 0;          // kRootMotion*
+    u32 sources = 0;       // 0 reads as kRootSrcGraph | kRootSrcMontage
+    u32 axes = 0;          // kRootAxis* bits; 0 reads as X | Y | Yaw
+    u32 flags = 0;
+    f32 scale = 0.0f;      // multiplier on translation; 0 reads as 1
+    f32 accumX = 0.0f, accumY = 0.0f, accumZ = 0.0f;   // cm, in the entity's own frame at the START of the accumulation
+    f32 accumYaw = 0.0f;   // radians
+    f32 accumSeconds = 0.0f;  // simulated time the accumulator covers
+    u32 reserved = 0;
+};
+static_assert(sizeof(CRootMotion) == 44, "CRootMotion must be padding-free");
+
 // Owns the loaded rigs and clips, and the pose of every animated entity.
 class AnimSystem {
 public:
+    // Registers CRootMotion (idempotent) and returns its type id.
+    static u32 registerComponents(scene::World& world);
+    // Attaches CRootMotion with a fresh value over the zero-filled bytes.
+    static CRootMotion* attach(scene::World& world, scene::Entity e, i32 mode, u32 axes = 0, f32 scale = 1.0f);
+
     // Installs the resolver. Without one nothing loads and tick() is a no-op that still advances
     // clocks, so a scrubbing editor works before any asset path is known.
     void setResolver(AssetPathFn fn, void* user) { resolve_ = fn; user_ = user; }
@@ -88,6 +116,22 @@ public:
     // The installed modifier, so a second one can chain it (RagdollSystem runs after the control rig).
     PoseModifierFn poseModifier() const { return poseMod_; }
     void* poseModifierUser() const { return poseModUser_; }
+
+    // ---- montages and root motion (docs/ANIM_MONTAGES.md) ----
+    MontageSystem& montages() { return montages_; }
+    // Fills `out` from the entity's CRootMotion and skeleton; false when mode is None, the source bit is
+    // off, or there is no root bone.
+    bool rootSpec(const scene::World& world, scene::Entity e, u32 sourceBit, RootSpec& out);
+    // The state machine's per-tick root delta, fed by AnimGraphSystem before tick() and consumed by it.
+    void addRootMotion(scene::Entity e, const RootDelta& d);
+    // Slot lookup for pipeline nodes: the montage pose over `base` and its coverage. False when nothing
+    // plays in that slot. Marks the slot consumed for this entity's tick.
+    bool evaluateSlot(scene::Entity e, u64 slotHash, const fmt::OcSkeleton& skel, const Pose& base, Pose& out,
+                      f32& coverage);
+    // How much of a slot's root motion a pipeline node keeps (AnimGraphSystem installs
+    // AnimPipeline::rootWeight); default 1.
+    using SlotRootWeightFn = f32 (*)(scene::Entity e, u64 slotHash, void* user);
+    void setSlotRootWeight(SlotRootWeightFn fn, void* user) { slotRootW_ = fn; slotRootWUser_ = user; }
 
     // How many notifies this system has delivered since the last clear(). Exists so a test can
     // assert on the COUNT without installing a sink that records, and so a host can see at a glance
@@ -349,6 +393,26 @@ private:
     bool clearing_ = false;
     // Reused across entities and ticks so a frame of notifies costs no allocation after the first.
     std::vector<u32> crossed_;
+
+    // Montages, and root motion per entity.
+    MontageSystem montages_;
+    MontageSystem::Sink montageSink();
+    // Where a CAnimator clip's root clock was last tick, so an external write to CAnimator.time (a
+    // scrub) is not integrated as motion. Kept only for entities with root motion on.
+    struct RootClock {
+        u64 clip = 0;
+        f32 time = 0.0f;
+        bool valid = false;
+        u32 seen = 0;
+    };
+    std::unordered_map<scene::Entity, RootClock> rootClocks_;
+    std::unordered_map<scene::Entity, RootDelta> pendingBase_;
+    std::vector<u64> consumedSlots_, slotScratch_;
+    std::unordered_set<u64> warnedSlots_;
+    Pose slotPose_, mixPose_;
+    u32 rootStamp_ = 0;
+    SlotRootWeightFn slotRootW_ = nullptr;
+    void* slotRootWUser_ = nullptr;
 };
 
 // The process-global system, matching scene::World::instance().

@@ -138,19 +138,21 @@ f32 clipTime(const fmt::OcAnimation& clip, f32 seconds) {
     return seconds < 0.0f ? 0.0f : (seconds > clip.duration ? clip.duration : seconds);
 }
 
+void sampleTrack(const fmt::OcTrack& t, f32 seconds, Transform& x) {
+    f32 v[4] = {};
+    if (sampleChannel(t, fmt::kOcChannelTranslation, seconds, v, 3))
+        x.position = Vec3{v[0], v[1], v[2]};
+    if (sampleChannel(t, fmt::kOcChannelRotation, seconds, v, 4))
+        x.rotation = Quat{v[0], v[1], v[2], v[3]}.normalized();
+    if (sampleChannel(t, fmt::kOcChannelScale, seconds, v, 3))
+        x.scale = Vec3{v[0], v[1], v[2]};
+}
+
 void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut) {
     for (const fmt::OcTrack& t : clip.tracks) {
         const usize bone = t.boneIndex;
         if (bone >= inOut.local.size()) continue;   // a track for a bone this skeleton does not have
-        Transform& x = inOut.local[bone];
-
-        f32 v[4] = {};
-        if (sampleChannel(t, fmt::kOcChannelTranslation, seconds, v, 3))
-            x.position = Vec3{v[0], v[1], v[2]};
-        if (sampleChannel(t, fmt::kOcChannelRotation, seconds, v, 4))
-            x.rotation = Quat{v[0], v[1], v[2], v[3]}.normalized();
-        if (sampleChannel(t, fmt::kOcChannelScale, seconds, v, 3))
-            x.scale = Vec3{v[0], v[1], v[2]};
+        sampleTrack(t, seconds, inOut.local[bone]);
     }
 }
 
@@ -188,13 +190,13 @@ f32 sampleCurve(const fmt::OcCurve& c, f32 seconds, f32 fallback) {
     return c.values[lo] + (c.values[hi] - c.values[lo]) * a;
 }
 
-void notifiesCrossed(const fmt::OcAnimation& clip, const ClipStep& step, std::vector<u32>& outIndices) {
-    if (clip.notifies.empty()) return;
-    const f32 dur = clip.duration;
+namespace {
 
-    for (usize i = 0; i < clip.notifies.size(); ++i) {
-        const f32 t = dur > 0.0f ? std::min(std::max(clip.notifies[i].time, 0.0f), dur)
-                                 : 0.0f;
+// ONE crossing rule for clip notifies and montage notifies, so the two cannot drift apart.
+template <class TimeAt>
+void crossedImpl(usize count, TimeAt timeAt, f32 dur, const ClipStep& step, std::vector<u32>& outIndices) {
+    for (usize i = 0; i < count; ++i) {
+        const f32 t = dur > 0.0f ? std::min(std::max(timeAt(i), 0.0f), dur) : 0.0f;
         bool hit;
         if (step.sweptWholeClip) {
             // ONE STEP, ONE FIRING, however many times round the clip it went. A frame that lost a
@@ -218,6 +220,24 @@ void notifiesCrossed(const fmt::OcAnimation& clip, const ClipStep& step, std::ve
         }
         if (hit) outIndices.push_back(static_cast<u32>(i));
     }
+}
+
+} // namespace
+
+void notifiesCrossedIn(const std::vector<fmt::OcNotify>& notifies, f32 duration, const ClipStep& step,
+                       std::vector<u32>& outIndices) {
+    if (notifies.empty()) return;
+    crossedImpl(notifies.size(), [&](usize i) { return notifies[i].time; }, duration, step, outIndices);
+}
+
+void notifiesCrossedTimes(const std::vector<f32>& times, f32 duration, const ClipStep& step,
+                          std::vector<u32>& outIndices) {
+    if (times.empty()) return;
+    crossedImpl(times.size(), [&](usize i) { return times[i]; }, duration, step, outIndices);
+}
+
+void notifiesCrossed(const fmt::OcAnimation& clip, const ClipStep& step, std::vector<u32>& outIndices) {
+    notifiesCrossedIn(clip.notifies, clip.duration, step, outIndices);
 }
 
 void AnimPlayer::play(const fmt::OcAnimation* clip, f32 fadeSeconds) {

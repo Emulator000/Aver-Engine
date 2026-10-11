@@ -5,6 +5,7 @@
 #pragma once
 
 #include "aver/anim/Pose.hpp"
+#include "aver/anim/RootMotion.hpp"
 
 #include <array>
 #include <string>
@@ -94,6 +95,11 @@ public:
 
     void advance(f32 dt);
 
+    // Root motion: with a spec set, advance() sums each flagged sample's root delta (weighted) and
+    // evaluate() locks that root in each sample's pose. Null = off. The spec is copied.
+    void setRootMotion(const RootSpec* spec);
+    RootDelta consumeRootDelta();                       // since the last call; resets
+
     f32 x() const { return x_; }
     f32 y() const { return y_; }
     f32 phase() const { return phase_; }
@@ -117,6 +123,10 @@ private:
     f32 phase_ = 0.0f;
     f32 elapsed_ = 0.0f;
     f32 blendedDuration_ = 1.0f;
+    RootSpec rootSpec_;
+    bool hasRoot_ = false;
+    RootDelta rootAcc_;
+    std::vector<f32> rootT0_;     // per-sample clip time before the step; scratch for advance()
 };
 
 } // namespace aver::anim

@@ -3,6 +3,10 @@
 // verbatim; the class itself is declared in SandboxApp.hpp.
 
 #include "SandboxApp.hpp"
+#include "aver/game/GameLocalization.hpp"
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_loc_abi.h"
+#endif
 
 #include <algorithm>
 
@@ -823,6 +827,63 @@ void SandboxApp::buildProjectSettings() {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Used by every level whose World Settings leave Game Mode empty.\n"
                                   "Declaring a GameMode class does not make it the default; this does.");
+#endif
+#if AVER_MODULE_FRAMEWORK
+            // LOCALE.DEFAULT: the culture a missing translation falls back to; and the editor-only preview culture
+            // (docs/LOCALIZATION.md). Both list the culture folders under Content/Localization.
+            {
+                const auto reloadLoc = [&](const std::string& previewTag) {
+                    game::LocalizationInit li;
+                    li.project = &project_;
+                    li.cultureOverride = previewTag;
+                    li.readSavedCulture = false;
+                    game::initLocalization(li);
+                };
+                const std::string curDefault = project_.localeDefault.empty() ? std::string("en") : project_.localeDefault;
+                if (ImGui::BeginCombo("Default Culture", curDefault.c_str())) {
+                    for (int i = 0; i < aver_fw_loc_culture_count(); ++i) {
+                        const std::string tag = aver_fw_loc_culture_at(i);
+                        if (ImGui::Selectable(tag.c_str(), tag == curDefault)) {
+                            project_.localeDefault = tag;
+                            projectDirty_ = true;
+                            reloadLoc(aver_fw_loc_culture());
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                uiReg_.track("project.localeDefault");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("LOCALE.DEFAULT: the culture every missing translation falls back to.\n"
+                                      "Cultures are the folders under Content/Localization.");
+                static char freeCulture[32] = {};
+                ImGui::SetNextItemWidth(120.0f * dpi_);
+                if (ImGui::InputTextWithHint("##localeDefaultFree", "other, e.g. pt-BR", freeCulture, sizeof freeCulture,
+                                             ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    const std::string tag = fmt::normalizeCulture(freeCulture);
+                    if (!tag.empty()) {
+                        project_.localeDefault = tag;
+                        projectDirty_ = true;
+                        freeCulture[0] = '\0';
+                        reloadLoc(aver_fw_loc_culture());
+                    }
+                }
+                const std::string curPreview = aver_fw_loc_culture();
+                if (ImGui::BeginCombo("Preview Culture", curPreview.c_str())) {
+                    for (int i = 0; i < aver_fw_loc_culture_count(); ++i) {
+                        const std::string tag = aver_fw_loc_culture_at(i);
+                        if (ImGui::Selectable(tag.c_str(), tag == curPreview)) {
+                            editor::setPrefString("loc.previewCulture", tag);
+                            editor::flushEditorPrefs();
+                            aver_fw_loc_set_culture(tag.c_str());
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                uiReg_.track("project.previewCulture");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Editor only: which culture the viewport, UI layout previews and Play show.\n"
+                                      "A built game picks the player's saved language, then the OS language.");
+            }
 #endif
             ImGui::PopItemWidth();
 

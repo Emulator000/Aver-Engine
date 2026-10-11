@@ -28,3 +28,14 @@ add_executable(UiLayoutEditorTest
 target_include_directories(UiLayoutEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(UiLayoutEditorTest PRIVATE Aver.UI Aver.Core Aver.Platform)
 set_target_properties(UiLayoutEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# UiLocalizeTest / UiLocalizeAbiTest -- localized widget text: UiTree::shown(), the resolver and its epoch, layout and
+# draw using the resolved string, typed text and events staying raw; and the C ABI hook a host installs
+# (docs/plans/wave2/DATA_TABLES_LOCALIZATION.md 4.3). No device. The ABI test links the DLL the C# side loads.
+add_executable(UiLocalizeTest src/UiLocalizeTest.cpp)
+target_link_libraries(UiLocalizeTest PRIVATE Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiLocalizeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(UiLocalizeAbiTest src/UiLocalizeAbiTest.cpp)
+target_link_libraries(UiLocalizeAbiTest PRIVATE Aver.UI.Abi Aver.UI Aver.Core Aver.Platform)
+set_target_properties(UiLocalizeAbiTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

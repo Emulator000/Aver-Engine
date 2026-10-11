@@ -31,4 +31,15 @@ if(TARGET Aver.Scripting.Host AND TARGET Aver.Framework)
                                                      Aver.Core Aver.Platform)
   set_target_properties(GraphVarPersistTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   add_dependencies(GraphVarPersistTest Aver.Scripting.Host)
+
+  # GasPersistTest — a gameplay ability system rides in a save. Real CLR: proves the bridge installed the
+  # managed-state provider (GameplayAbilities.Startup), loaded the project's *.ocgas at the per-Play-start
+  # call (ConfigureInput -> BeginSession), and that capture -> file -> restore carries the state through
+  # aver_fw_state_*. The managed logic itself is Aver.Framework.Tests (tests/gas).
+  add_executable(GasPersistTest src/GasPersistTest.cpp)
+  target_link_libraries(GasPersistTest PRIVATE Aver.Save Aver.Scene Aver.Formats
+                                               Aver.Framework Aver.Scripting.Host
+                                               Aver.Core Aver.Platform)
+  set_target_properties(GasPersistTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_dependencies(GasPersistTest Aver.Scripting.Host)
 endif()
