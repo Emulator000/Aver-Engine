@@ -34,3 +34,21 @@ foreach(t Montage RootMotion AnimPipeline)
   target_link_libraries(${t}Test PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
+
+# Chain IK (FABRIK / CCD with limits), the .ocikrig asset, the pure rig stack (priorities, body, foot placement)
+# and the retargeter (docs/plans/wave5/IK_RETARGETING.md). Same link set and the same reason: reach, bone lengths,
+# bend side, limits and foot offsets are arithmetic on structs, so a device would only hide a wrong answer.
+foreach(t IkSolvers IkRigAsset IkRigSolve Retarget)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()
+
+# Motion matching (docs/ANIM_MOTION_MATCHING.md): the .ocmotion asset, the pose database and its sidecar, exact
+# search, trajectory prediction, inertialization and the matcher itself. Same link set and the same reason:
+# synthetic clips with closed-form root travel make every property a number, and a device would hide a wrong one.
+foreach(t MotionAsset PoseDatabase PoseSearch Trajectory Inertializer MotionMatcher)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

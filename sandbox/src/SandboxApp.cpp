@@ -6,6 +6,7 @@
 #include "SandboxApp.hpp"
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_anim_abi.h"   // aver_fw_set_anim_provider (montages)
+#  include "aver/framework/framework_ik_abi.h"     // [wave5/ik-retarget] aver_fw_set_ik_provider
 #endif
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"    // the UI layout editor's culture preview
@@ -17,8 +18,10 @@
 #include "TextureEditor.hpp"   // makeTextureEditor; SandboxApp.hpp does not pull this one in
 #include "InstanceSetEditor.hpp"   // makeInstanceSetEditor (.ocinst); not pulled in by SandboxApp.hpp
 #include "aver/game/GameCamera.hpp"
+#include "aver/game/GameIkProbe.hpp"   // [wave5/ik-retarget] the foot-IK ground probe
 #include "aver/game/GameTick.hpp"
 #include "aver/game/GameSystemsWiring.hpp"
+#include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] the ABI provider
 #include "aver/game/GameUiInput.hpp"
 #include "aver/platform/FileSystem.hpp"   // userDataDir: where the trajectory network's weights live
 #if AVER_MODULE_VOXI
@@ -460,6 +463,20 @@ void SandboxApp::onInit(Engine& e)  {
     assetEditors_.registerFactory(&editor::makeBlendSpaceEditor);          // .ocblend
     assetEditors_.registerFactory(&editor::makeAnimStateMachineEditor);    // .ocasm
     assetEditors_.registerFactory(&editor::makeMontageEditor);             // .ocmontage
+    // [wave5/ik-retarget] IK Rig, IK Retargeter, Control Rig; the skeleton tab offers to create the first two.
+    assetEditors_.registerFactory(&editor::makeIkRigEditor);               // .ocikrig
+    assetEditors_.registerFactory(&editor::makeRetargetEditor);            // .ocretarget
+    assetEditors_.registerFactory(&editor::makeRigEditor);                 // .ocrig
+#if AVER_WITH_IMGUI   // the Content Browser's create members are ImGui-side
+    {
+        editor::AnimEditorRigHooks hooks;
+        hooks.createIkRig = [this](const std::string& skel) { cbCreateIkRig(skel); };
+        hooks.createRetarget = [this](const std::string& skel) { cbCreateRetarget(skel); };
+        hooks.openRetargetFor = [this](const std::string& skel) { return cbOpenRetargetFor(skel); };
+        editor::setAnimEditorRigHooks(std::move(hooks));
+    }
+#endif
+    assetEditors_.registerFactory(&editor::makeMotionDbEditor);            // .ocmotion
     // Append SoundEditor (claims .ocsnd).
     assetEditors_.registerFactory(&editor::makeSoundEditor);
 #if AVER_MODULE_PARTICLES
@@ -599,6 +616,7 @@ void SandboxApp::onInit(Engine& e)  {
     // Control rig: register and install before project opens (needs no level).
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
+    game::installIkGroundProbe();   // [wave5/ik-retarget] foot IK casts through physics; a no-op without it
 #endif
 #if AVER_MODULE_RAGDOLL
     // Ragdolls: installed AFTER the control rig so it chains it (the rig runs first, the ragdoll sees its pose).
@@ -613,6 +631,10 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Montages: the framework relays PlayMontage and friends to AnimSystem's montage players.
     aver_fw_set_anim_provider(&anim::montageProvider, &anim::animSystem());
+    // [wave5/ik-retarget] IK goals, foot-IK weights and rig inputs.
+    aver_fw_set_ik_provider(&anim::ikProvider, &anim::controlRigSystem());
+    // [wave5/sequencer] Level sequences: LevelSequences.Play and friends reach the director Play runs.
+    aver_fw_set_sequence_provider(&game::sequenceProvider, seqEditor_.director());
 #endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();
@@ -2218,6 +2240,9 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // Set every frame from play state so Stop or level change never leaves it stuck.
     anim::animSystem().setObjectAnimationPaused(aver_fw_play_state() == AVER_FW_PLAY_PAUSED);
 #endif
+    // [wave5/sequencer] The sequence's Pre phase first: a pose chosen by the render queue, the clock, and the
+    // property / visibility / animation / audio / event tracks, so a driven montage lands in the tick below.
+    tickSequencePre(e, t.dt);
     playProf_.begin(editor::PlayPhase::ObjectAnim);
     game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
 #if AVER_MODULE_RAGDOLL
@@ -2226,8 +2251,8 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     anim::animSystem().tick(scene::World::instance(), t.dt);
     playProf_.end(editor::PlayPhase::ObjectAnim);
     hm.mark("objectAnim");
-    // The level sequence (Animate preview, Play), after the clips so a sequenced actor wins.
-    tickSequence(e, t.dt);
+    // The level sequence's Post phase (Animate preview, Play), after the clips so a sequenced actor wins.
+    tickSequencePost();
     hm.mark("sequence");
 #if AVER_MODULE_PHYSICS
     // After the tick that moved them: animated placement's kinematic body follows it (carries standing characters).

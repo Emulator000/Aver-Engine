@@ -363,6 +363,64 @@ static void pipelineEdits() {
     std::filesystem::remove_all(dir, ec);
 }
 
+static void motionMatchStates() {
+    AVER_INFO("motion-matching states");
+    anim::AnimStateMachineAsset a = asmStarterMachine();
+    anim::AsmMachine& m = a.machines[0];
+    check(asmMotionProblems(a).empty() && asmProblems(a).empty(), "a starter has no motion-matching problems");
+
+    const i32 mm = asmAddState(m, anim::AsmStateKind::MotionMatch, "Move", 0.0f, 0.0f);
+    check(m.states[static_cast<usize>(mm)].kind == anim::AsmStateKind::MotionMatch, "a motion-matching state can be added");
+    check(asmMotionProblems(a).size() == 1, "one with no database is flagged");
+    check(asmSetStateMotionMatch(a, 0, mm, "Motion/Loco.ocmotion") && m.states[static_cast<usize>(mm)].asset == "Motion/Loco.ocmotion",
+          "naming a database sets it");
+    check(asmMotionProblems(a).empty(), "and clears the flag");
+
+    // A Clip state converts, keeping its other fields; a sub-machine does not.
+    const i32 clip = asmAddState(m, anim::AsmStateKind::Clip, "Walk", 0.0f, 0.0f);
+    m.states[static_cast<usize>(clip)].speed = 1.5f;
+    m.states[static_cast<usize>(clip)].asset = "walk.ocanim";
+    check(asmSetStateMotionMatch(a, 0, clip, "Motion/Loco.ocmotion") && m.states[static_cast<usize>(clip)].kind == anim::AsmStateKind::MotionMatch &&
+          m.states[static_cast<usize>(clip)].speed == 1.5f, "a clip state converts and keeps its speed");
+    const i32 sub = asmAddSubMachine(a, 0, "Sub", 0.0f, 0.0f);
+    check(!asmSetStateMotionMatch(a, 0, sub, "x.ocmotion") && !asmSetStateMotionMatch(a, 0, 99, "x") && !asmSetStateMotionMatch(a, 9, 0, "x"),
+          "a sub-machine and bad indices are refused");
+    anim::AsmMachine& root = a.machines[0];   // the sub-machine grew a.machines, so m dangles
+
+    // The exit-time trap.
+    anim::AsmTransition t;
+    t.from = mm;
+    t.to = 0;
+    t.hasExitTime = true;
+    t.conditions.clear();
+    root.transitions.push_back(t);
+    const std::vector<std::string> bad = asmMotionProblems(a);
+    check(bad.size() == 1 && bad[0].find("exit-time") != std::string::npos, "an exit-time transition out of a motion-matching state is flagged");
+    std::string why;
+    check(!a.valid(&why) && why.find("exit time") != std::string::npos, "and the asset itself refuses it: " + why);
+    check(asmProblems(a).size() >= 1, "asmProblems includes it");
+    root.transitions.back().hasExitTime = false;
+    root.transitions.back().conditions.push_back({a.params.empty() ? "speed" : a.params[0].name, anim::AsmOp::Greater, 0.5f});
+    check(asmMotionProblems(a).empty(), "a condition-driven transition out of it is fine");
+
+    root.states[static_cast<usize>(mm)].tagsRequired = {"walk", ""};
+    check(asmMotionProblems(a).size() == 1, "a blank required tag is flagged");
+    root.states[static_cast<usize>(mm)].tagsRequired.clear();
+
+    check(asmTagsFromText(" walk ,stop,, walk , run") == std::vector<std::string>({"walk", "stop", "run"}), "tag text: trimmed, blanks and repeats dropped");
+    check(asmTagsFromText("").empty() && asmTagsToText({"a", "b"}) == "a, b", "and round-trips");
+
+    // A saved copy keeps the state kind and its tags.
+    root.states[static_cast<usize>(mm)].tagsExcluded = {"stop"};
+    const std::string file = (std::filesystem::temp_directory_path() / "aver-asm-mm.ocasm").string();
+    anim::AnimStateMachineAsset back;
+    check(anim::saveStateMachine(file, a, &why) && anim::loadStateMachine(file, back, &why) &&
+          back.machines[0].states[static_cast<usize>(mm)].kind == anim::AsmStateKind::MotionMatch &&
+          back.machines[0].states[static_cast<usize>(mm)].tagsExcluded == std::vector<std::string>{"stop"}, "it survives a save and load " + why);
+    std::error_code ec;
+    std::filesystem::remove(file, ec);
+}
+
 int main() {
     AVER_INFO("AnimGraphEditorTest");
     blendSpaceEdits();
@@ -372,6 +430,7 @@ int main() {
     geometry();
     stateMachineTab();
     pipelineEdits();
+    motionMatchStates();
     AVER_INFO(g_failures == 0 ? "AnimGraphEditorTest: PASS" : "AnimGraphEditorTest: FAIL");
     return g_failures == 0 ? 0 : 1;
 }

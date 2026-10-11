@@ -494,8 +494,10 @@ struct OcWorldEnv {
 // LEVEL SEQUENCE (docs/formats/FORMAT_SPECS.md section 11): keyframed tracks stored in the level
 // itself, not as an asset. game::SequencePlayer plays it in the editor's Animate mode, in Play and in
 // the packaged game.
-enum class OcSeqTrackKind : u8 { Transform, Camera, Material };
-enum class OcSeqInterp : u8 { Smooth, Linear, Step };   // from this key to the next
+// [wave5/sequencer begin]
+// Kinds past Material are appended so the existing values keep their numbers (docs/plans/wave5/SEQUENCER_TRACKS.md).
+enum class OcSeqTrackKind : u8 { Transform, Camera, Material, Property, Event, Audio, Animation, Visibility, CameraCut, SubSequence };
+enum class OcSeqInterp : u8 { Smooth, Linear, Step, Cubic };   // from this key to the next
 
 struct OcSeqKey {
     f64 t = 0;   // seconds from the sequence's start
@@ -503,17 +505,25 @@ struct OcSeqKey {
     //            sx sy sz.
     // Camera:    x y z (cm, world) yaw pitch (degrees; the editor camera's convention).
     // Material:  r g b intensity -- the actor's emissive is multiplied by rgb * intensity.
+    // The other kinds: docs/formats/FORMAT_SPECS.md. A missing value is neutral (slots 6-8 default 1).
     f64 v[9] = {0, 0, 0, 0, 0, 0, 1, 1, 1};
     OcSeqInterp interp = OcSeqInterp::Smooth;
+    f64 dur = 0;                  // section length (audio, animation, sub-sequence); 0 for a point key
+    std::string text, arg;        // event name / asset path / sequence name / camera name; event string argument
+    std::vector<f64> tan;         // Cubic only: [arrive0, leave0, arrive1, leave1, ...] slopes in value/second; empty = automatic
 };
 
 struct OcSeqTrack {
     OcSeqTrackKind kind = OcSeqTrackKind::Transform;
-    // Index into OcWorldData::placements (Transform, Material); -1 for Camera. The writer renumbers
-    // it to the order it emits placements in, so it always names the placement it was saved with.
+    // Index into OcWorldData::placements (Transform, Material and the other bound kinds); -1 for a free
+    // Camera. The writer renumbers it to the order it emits placements in, so it always names the
+    // placement it was saved with.
     i32 target = -1;
+    std::string bind, name, property;   // bind = actor by name; name = display / camera name; property = "Component.field"
+    bool mute = false;
     std::vector<OcSeqKey> keys;   // sorted by t
 };
+// [wave5/sequencer end]
 
 struct OcSequence {
     std::string name;

@@ -4,6 +4,7 @@
 
 #include "SandboxApp.hpp"
 #include "LightLevelIo.hpp"
+#include "SequenceTrackOps.hpp"   // [wave5/sequencer]
 // applyLevelSky below calls assets::applyLevelEnv, and the only thing that brings that declaration
 // in is SandboxApp.hpp's AVER_MODULE_PBR include block -- so a PBR-off build lost the header while
 // the call, guarded on AVER_MODULE_SCENE, stayed compiled in. Named here rather than left to the
@@ -450,20 +451,35 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
             const usize pi = static_cast<usize>(inst.placementIndex[k]);
             if (pi < byPlacement.size()) byPlacement[pi] = inst.entities[k];
         }
-        // A streamed level's objects are not loaded yet: their tracks are kept aside and written back by
-        // saveLevel (appendStreamedSequenceTracks); the camera track is edited as usual.
+        // A streamed level's objects are not loaded yet: the tracks that name a placement by index are kept aside
+        // (per sequence) and written back by saveLevel (appendStreamedSequenceTracks); cameras, events, cuts and
+        // tracks bound by name are edited as usual and resolve if their actor is loaded. [wave5/sequencer]
         streamSeqTracks_.clear();
+        streamSeqOwner_.clear();
+        streamSeqHeaders_.clear();
+        // A name is an outliner label (what the level saves for a placement, light or class actor) or the entity's own name.
+        const std::function<scene::Entity(const std::string&)> findByName = [this](const std::string& name) -> scene::Entity {
+            scene::World& sw = scene::World::instance();
+            for (const auto& kv : entityLabels_)
+                if (kv.second == name && sw.valid(static_cast<scene::Entity>(kv.first))) return static_cast<scene::Entity>(kv.first);
+            return sw.find(name);
+        };
         if (level_.streaming().active() && !w.sequences.empty()) {
-            std::vector<fmt::OcSequence> camOnly = w.sequences;
-            streamSeqHeader_ = camOnly.front();
-            streamSeqHeader_.tracks.clear();
-            std::vector<fmt::OcSeqTrack> keep;
-            for (fmt::OcSeqTrack& tr : camOnly.front().tracks)
-                (tr.target >= 0 ? streamSeqTracks_ : keep).push_back(tr);
-            camOnly.front().tracks = std::move(keep);
-            seqEditor_.load(camOnly, byPlacement);
+            std::vector<fmt::OcSequence> kept = w.sequences;
+            for (fmt::OcSequence& s : kept) {
+                fmt::OcSequence header = s;
+                header.tracks.clear();
+                streamSeqHeaders_.push_back(std::move(header));
+                std::vector<fmt::OcSeqTrack> aside;
+                editor::seqSplitStreamed(s, aside);
+                for (fmt::OcSeqTrack& tr : aside) {
+                    streamSeqTracks_.push_back(std::move(tr));
+                    streamSeqOwner_.push_back(s.name);
+                }
+            }
+            seqEditor_.load(kept, byPlacement, findByName);
         } else {
-            seqEditor_.load(w.sequences, byPlacement);
+            seqEditor_.load(w.sequences, byPlacement, findByName);
         }
         levelHeader_.sequences.clear();
     }
@@ -990,6 +1006,8 @@ void SandboxApp::unloadLevel(Engine& eng) {
     streamPlayWas_ = false;
     streamSeenCount_ = 0;
     streamSeqTracks_.clear();
+    streamSeqOwner_.clear();
+    streamSeqHeaders_.clear();
 #endif
 #if AVER_MODULE_PBR
     // LEVEL-SCOPED MATERIAL RESIDENCY (docs: PACKAGE level-materials): every way OUT of a level goes

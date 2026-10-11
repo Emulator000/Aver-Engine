@@ -82,7 +82,7 @@ void SandboxApp::sequenceRunStep(Engine& e) {
 #if AVER_MODULE_VOXI
         ready = ready && !voxiRenderer_.accelBuildsPending();
 #endif
-        if (ready && !seqEditor_.hasCameraKeys()) {
+        if (ready && !seqEditor_.anyCamera()) {
             fail("the level has no camera path: key the camera in Animate mode (K) and save the level first");
             return;
         }
@@ -90,6 +90,10 @@ void SandboxApp::sequenceRunStep(Engine& e) {
             r.readyFrames = 0;
             if (r.waited > kGiveUpFrames) fail("the level was not ready after 6000 frames");
             return;
+        }
+        {   // [wave5/sequencer] the first sequence of the level that has a camera
+            std::string selWhy;
+            if (!seqEditor_.running() && !seqEditor_.selectRunSequence(std::string(), &selWhy)) { fail(selWhy.c_str()); return; }
         }
         // Frame 0's pose is held through the warmup, so the temporal histories settle on the first view
         // instead of meeting a camera jump at frame 0. A level reload during the wait drops the run
@@ -204,7 +208,7 @@ bool SandboxApp::startRenderJob(const fmt::RenderJob& job, const std::string& ba
     if (anyPlayActive()) { why = "stop Play before rendering"; return false; }
 #endif
     if (job.level.empty() && levelPath_.empty()) { why = "open a level first"; return false; }
-    if (job.level.empty() && !seqEditor_.hasCameraKeys()) {
+    if (job.level.empty() && !seqEditor_.anyCamera()) {
         why = "the level has no camera path: key the camera in Animate mode (K) and save the level first";
         return false;
     }
@@ -229,7 +233,7 @@ void SandboxApp::cancelRenderJob() {
 
 editor::RenderQueueHost SandboxApp::renderQueueHost() {
     editor::RenderQueueHost h;
-    h.hasSequence = seqEditor_.hasCameraKeys();
+    h.hasSequence = seqEditor_.anyCamera();
     h.sequenceName = seqEditor_.sequenceName();
     h.sequenceLength = seqEditor_.runLength();
     h.sequenceFps = seqEditor_.runFps();
@@ -372,7 +376,7 @@ void SandboxApp::renderJobStep(Engine& e) {
 #if AVER_MODULE_VOXI
         ready = ready && !voxiRenderer_.accelBuildsPending();
 #endif
-        if (ready && !seqEditor_.hasCameraKeys()) {
+        if (ready && !seqEditor_.anyCamera()) {
             fail("the level has no camera path: key the camera in Animate mode (K) and save the level first");
             return;
         }
@@ -382,11 +386,10 @@ void SandboxApp::renderJobStep(Engine& e) {
             return;
         }
         if (!r.planned) {
-            if (!r.job.sequence.empty() && seqEditor_.sequenceName() != r.job.sequence) {
-                fail("the level's sequence is '" + seqEditor_.sequenceName() + "', not '" + r.job.sequence + "'");
-                return;
-            }
+            // [wave5/sequencer] The job's `sequence` selects a level sequence by name (empty = the first with a camera).
             std::string why;
+            if (!seqEditor_.running() && !seqEditor_.selectRunSequence(r.job.sequence, &why)) { fail(why); return; }
+            why.clear();
             if (!renderRun_.begin(r.job, r.jobDir, seqEditor_.runLength(), seqEditor_.runFps(), why)) { fail(why); return; }
             r.planned = true;
             r.samplesTotal = renderRun_.frameCount() * renderRun_.samples();

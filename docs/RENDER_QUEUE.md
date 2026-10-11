@@ -45,7 +45,7 @@ JSON. Every key is optional; unknown keys are ignored. Values are clamped into r
 | Key | Default | Meaning |
 |---|---|---|
 | `level` | open level | Level to open first. Relative paths are tried as given, then next to the job file, then in the project. |
-| `sequence` | the level's | The sequence's name; the run refuses if the level's sequence has another name. A level has one sequence today. |
+| `sequence` | the first with a camera | Selects a level sequence by name; the run refuses, listing the level's sequences, when there is none of that name. Empty = the first sequence with a camera. |
 | `frameStart`, `frameEnd` | 0, -1 | Output frames to render, inclusive. `frameEnd` < 0 = through the end of the sequence. |
 | `width`, `height` | 1920 x 1080 | Output size (16..16384). MP4 sizes are rounded down to even. |
 | `fps` | 0 | Output frame rate. 0 = the sequence's own. Frame `n` is at `n / fps` seconds; the count is `ceil(length * fps)`. |
@@ -102,7 +102,10 @@ a 4K output use a 4K monitor, or accept the scaled result.
 
 - The editor UI is hidden while a job renders, so the window shows only the render. Esc (with the window
   focused) cancels.
-- A level has one sequence today (`SequenceEditor` loads the first); `sequence` is a name check.
+- **What renders.** A pose at time `t` is exact for every sampled track: transform, emissive, camera and camera cuts (with their blends),
+  property and visibility tracks, animation tracks (driven montage players, placed rather than played, so a frame never lags the pose),
+  and sub-sequences, recursively. Events and audio never run in a render (the player is in `Offline` mode): a shot that needs a gameplay
+  event has to be played, not rendered. The sequencer evaluates before the animation tick, so the frame captured after a pose shows it.
 - The camera track must exist: the job fails with "the level has no camera path" otherwise.
 - Temporal denoisers and TAA see the pose change between samples. That is what a moving shutter is, but a
   large `shutter` with few samples looks stepped; raise `temporalSamples`, not `shutter`.

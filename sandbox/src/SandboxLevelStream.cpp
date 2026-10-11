@@ -272,14 +272,32 @@ void SandboxApp::buildStreamedPlacements(fmt::OcWorldData& w,
 
 // A streamed level's sequence tracks on objects that were not loaded when it opened: kept aside at load
 // and written back here, renumbered to where their placements were saved.
+std::string SandboxApp::sequenceBindName(scene::Entity ent) const {
+    const auto it = entityLabels_.find(static_cast<u32>(ent));
+    if (it == entityLabels_.end() || it->second.empty()) return {};
+    int n = 0;
+    for (const auto& kv : entityLabels_) n += kv.second == it->second ? 1 : 0;
+    return n == 1 ? it->second : std::string();   // a shared name cannot say which actor
+}
+
 void SandboxApp::appendStreamedSequenceTracks(fmt::OcWorldData& w) {
     if (streamSeqTracks_.empty()) return;
-    if (w.sequences.empty()) w.sequences.push_back(streamSeqHeader_);
-    for (fmt::OcSeqTrack tr : streamSeqTracks_) {
+    for (usize i = 0; i < streamSeqTracks_.size(); ++i) {
+        fmt::OcSeqTrack tr = streamSeqTracks_[i];
         if (tr.target < 0 || static_cast<usize>(tr.target) >= streamOutSlot_.size() || streamOutSlot_[static_cast<usize>(tr.target)] < 0)
             continue;   // its placement was deleted
         tr.target = streamOutSlot_[static_cast<usize>(tr.target)];
-        w.sequences.front().tracks.push_back(std::move(tr));
+        // Back into the sequence it came from; one the editor wrote nothing for is rebuilt from its header.
+        const std::string& owner = i < streamSeqOwner_.size() ? streamSeqOwner_[i] : std::string();
+        fmt::OcSequence* seq = nullptr;
+        for (fmt::OcSequence& s : w.sequences)
+            if (s.name == owner) { seq = &s; break; }
+        if (!seq) {
+            for (const fmt::OcSequence& h : streamSeqHeaders_)
+                if (h.name == owner) { w.sequences.push_back(h); seq = &w.sequences.back(); break; }
+        }
+        if (!seq) continue;
+        seq->tracks.push_back(std::move(tr));
     }
 }
 

@@ -22,6 +22,16 @@ add_executable(LevelSequenceTest src/LevelSequenceTest.cpp)
 target_link_libraries(LevelSequenceTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
 set_target_properties(LevelSequenceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# [wave5/sequencer] SequenceTracksTest -- what each track kind writes into a real World (properties through the
+# field registry, visibility, the base store, actor cameras and cuts, sub-sequences, events and audio with
+# recording hooks); SequenceDirectorTest -- several sequences, script controls, lifecycle events, the camera owner.
+add_executable(SequenceTracksTest src/SequenceTracksTest.cpp)
+target_link_libraries(SequenceTracksTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
+set_target_properties(SequenceTracksTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_executable(SequenceDirectorTest src/SequenceDirectorTest.cpp)
+target_link_libraries(SequenceDirectorTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Core)
+set_target_properties(SequenceDirectorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # PostVolumesTest -- the post-process volume blend: weights, per-field lerp, priority, the grading-LUT
 # crossfade (against a fake resolver), and that every POSTVOLUME key reads back and re-applies as a no-op.
 # Arithmetic over rhi::PostSettings only: no device, no window.

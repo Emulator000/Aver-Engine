@@ -11,6 +11,7 @@
 
 #include "aver/anim/AnimStateMachine.hpp"
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -81,6 +82,21 @@ std::vector<std::string> asmPipelineSlotNames(const anim::AnimStateMachineAsset&
 // with no branch, a name the machine does not have, a node with nothing to play. Empty when sound.
 std::vector<std::string> asmPipelineProblems(const anim::AnimStateMachineAsset& a);
 
+// ---- motion-matching states (docs/ANIM_MOTION_MATCHING.md) ----
+
+// Turns a Clip / BlendSpace / MotionMatch state into a motion-matching state on `assetRef` (an .ocmotion
+// path; may be empty until chosen). Its other fields stay. False for a Sub-machine state (it owns machines),
+// or an index out of range.
+bool asmSetStateMotionMatch(anim::AnimStateMachineAsset& a, i32 machine, i32 state, const std::string& assetRef);
+// What would silently misbehave in a motion-matching state: no database named, an exit-time transition out of
+// it (it never ends, so that transition can never fire), a blank or an over-long tag list.
+std::vector<std::string> asmMotionProblems(const anim::AnimStateMachineAsset& a);
+// Everything the editor flags: the motion-matching problems, then the pipeline's.
+std::vector<std::string> asmProblems(const anim::AnimStateMachineAsset& a);
+// "walk, stop" <-> {"walk", "stop"}: trimmed, blanks and repeats dropped.
+std::vector<std::string> asmTagsFromText(const std::string& text);
+std::string asmTagsToText(const std::vector<std::string>& tags);
+
 // Canvas geometry, ImGui-free. The point on the border of the box centred (cx, cy) with half-extents
 // (hw, hh) that faces (tx, ty).
 struct AsmPt {
@@ -128,6 +144,9 @@ public:
     // Bone names of the first .ocskel found under the project's content (the pipeline's branch filters
     // name bones); empty when none is found. Scanned once per tab.
     const std::vector<std::string>& boneNames();
+    // The tags a motion-matching state's .ocmotion declares (read from the file next to / under the project's
+    // content, cached per reference); empty when it cannot be found.
+    const std::vector<std::string>& motionTags(const std::string& assetRef);
 
 private:
     void loadFromDisk();
@@ -151,6 +170,7 @@ private:
 
     std::vector<std::string> bones_;
     bool bonesScanned_ = false;
+    std::map<std::string, std::vector<std::string>> motionTags_;
 
 #if AVER_WITH_IMGUI
     f32 panX_ = 0, panY_ = 0;

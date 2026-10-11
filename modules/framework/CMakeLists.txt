@@ -18,6 +18,9 @@ add_library(Aver.Framework SHARED
   src/TimersEventsAbi.cpp
   src/BlackboardAbi.cpp
   src/AnimAbi.cpp
+  # IK goals, foot-IK weights and control-rig inputs relayed to the rig system (wave 5, docs/ANIM_IK_RETARGET.md).
+  src/IkAbi.cpp
+  src/SequenceAbi.cpp
   src/LocalizationAbi.cpp
   src/DataTableAbi.cpp
   src/EntityStateAbi.cpp

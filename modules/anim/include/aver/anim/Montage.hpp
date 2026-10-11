@@ -68,6 +68,11 @@ public:
     bool setNextSection(i32 from, i32 to);
     void setRate(f32 r);                                     // >= 0, 0 pauses
     void setRootMotion(const RootSpec* spec);                // null = off; copied
+    // [wave5/sequencer] Places the player at `position` montage seconds with weight `w` (linear, no curve):
+    // state Hold, no clock, no events, no notifies, no root motion, no auto blend-out. Sections are not
+    // traversed. Safe to call every tick; the position is whatever the last call said.
+    void drive(f32 position, f32 w);
+    bool driven() const { return driven_; }
     // Clock, section chain, weight, notifies, root delta.
     void advance(f32 dt);
     // Samples ONTO a copy of `base`, so bones the montage does not animate keep the base. An additive
@@ -137,6 +142,7 @@ private:
     bool notifying_ = false;
     bool rootMotion_ = false;
     bool hasSpec_ = false;
+    bool driven_ = false;              // drive() was called: weight() is the raw alpha
     RootSpec spec_;
     RootDelta rootAcc_;
     mutable Pose sampled_, ref_;

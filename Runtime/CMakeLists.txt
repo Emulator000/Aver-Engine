@@ -54,6 +54,10 @@ aver_add_module(Aver.Runtime.Game.Core
     src/MouseCapture.cpp
     src/PlayMobility.cpp
     src/LevelSequence.cpp
+    # [wave5/sequencer begin] the track appliers, base store and sub-sequence library; the director over many sequences.
+    src/SequenceTracks.cpp
+    src/SequenceDirector.cpp
+    # [wave5/sequencer end]
     # Culture choice and string/data-table hot reload over the Aver.Framework stores (guarded on AVER_MODULE_FRAMEWORK).
     src/GameLocalization.cpp
   DEPS

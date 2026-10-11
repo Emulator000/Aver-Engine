@@ -442,8 +442,10 @@ int main() {
         check(!anim::parseStateMachine(unknown, u), "an unknown node type is refused");
         std::string newer = v2;
         const usize vat = newer.find("\"version\": 2");
-        if (vat != std::string::npos) newer.replace(vat, 12, "\"version\": 3");
-        check(!anim::parseStateMachine(newer, u), "a version newer than 2 is refused");
+        if (vat != std::string::npos)
+            newer.replace(vat, 12, "\"version\": " + std::to_string(anim::kStateMachineVersion + 1));
+        check(vat != std::string::npos && !anim::parseStateMachine(newer, u),
+              "a version newer than kStateMachineVersion is refused");
     }
 
     AVER_INFO("pipeline validation");

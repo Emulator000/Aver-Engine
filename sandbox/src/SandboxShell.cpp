@@ -2164,6 +2164,14 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::EndMenu();
             }
             uiReg_.track("view.showAi");
+            if (ImGui::BeginMenu("Show Motion Matching")) {
+                ImGui::MenuItem("Trajectories", nullptr, &motionDebug_.trajectory);
+                ImGui::MenuItem("Matched Frame", nullptr, &motionDebug_.matched);
+                ImGui::MenuItem("Labels", nullptr, &motionDebug_.labels);
+                ImGui::MenuItem("Group Costs", nullptr, &motionDebug_.costs);
+                ImGui::EndMenu();
+            }
+            uiReg_.track("view.showMotionMatching");
 #endif
 #if AVER_MODULE_PHYSICS
             // Toggling forgets the overlay; rebuildColliderOverlay skips unchanged frames.

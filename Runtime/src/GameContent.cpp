@@ -115,6 +115,24 @@ std::vector<std::string> GameContent::pathsWithExtension(std::string_view ext) c
     return out;
 }
 
+std::vector<std::pair<u64, std::string>> GameContent::idsWithExtension(std::string_view ext) const {
+    std::vector<std::pair<u64, std::string>> out;
+    for (const auto& [id, path] : contentIndex_) {
+        if (path.size() < ext.size()) continue;
+        bool match = true;
+        for (usize i = 0; i < ext.size() && match; ++i) {
+            char a = path[path.size() - ext.size() + i];
+            char b = ext[i];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+            match = a == b;
+        }
+        if (match) out.emplace_back(id, path);
+    }
+    std::sort(out.begin(), out.end(), [](const auto& l, const auto& r) { return l.second < r.second; });
+    return out;
+}
+
 std::string GameContent::resolveAnimAsset(u64 id, void* user) {
     auto* self = static_cast<GameContent*>(user);
     return self ? self->pathFor(id) : std::string();

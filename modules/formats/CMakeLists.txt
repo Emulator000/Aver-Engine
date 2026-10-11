@@ -38,6 +38,9 @@ aver_add_module(Aver.Formats
     src/OcMap.cpp
     src/OcMesh.cpp
     src/OcWorld.cpp
+    # [wave5/sequencer begin] the SEQUENCE records and the .ocseq file: text, no Aver.Scene.
+    src/OcSeq.cpp
+    # [wave5/sequencer end]
     # The mesh importers. All three are dependency-free by construction: OBJ and USDA are text
     # formats this tree parses itself, and neither pulls a licence question into the build.
     src/ObjImport.cpp

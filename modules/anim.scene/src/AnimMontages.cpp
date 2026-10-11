@@ -66,7 +66,7 @@ MontageSystem::Player* MontageSystem::find(scene::Entity e, u64 montageId) {
     if (it == players_.end()) return nullptr;
     for (usize i = it->second.size(); i-- > 0;) {
         Player& p = it->second[i];
-        if (p.mp.finished()) continue;
+        if (p.mp.finished() || p.driven) continue;
         if (montageId == 0 || p.montageId == montageId) return &p;
     }
     return nullptr;
@@ -109,7 +109,7 @@ bool MontageSystem::play(AnimSystem& anim, scene::World& w, scene::Entity e, u64
     std::vector<Player>& list = players_[e];
     // A running montage restarts in place and becomes the newest of its slot.
     for (usize i = 0; i < list.size(); ++i) {
-        if (list[i].montageId != montageId) continue;
+        if (list[i].montageId != montageId || list[i].driven) continue;
         Player p = std::move(list[i]);
         list.erase(list.begin() + static_cast<std::ptrdiff_t>(i));
         p.slot = slot;
@@ -123,8 +123,9 @@ bool MontageSystem::play(AnimSystem& anim, scene::World& w, scene::Entity e, u64
     np.montageId = montageId;
     np.slot = slot;
     np.loaded = L;
-    const bool bound = np.mp.bind(&L->asset, [&anim](const std::string& path) {
-        return anim.clip(fnv1a64(std::string_view(path)));
+    // [wave5/ik-retarget] A segment authored for another rig plays as its retargeted bake on this entity.
+    const bool bound = np.mp.bind(&L->asset, [&anim, skel = sm->skeleton](const std::string& path) {
+        return anim.clipFor(fnv1a64(std::string_view(path)), skel);
     });
     if (!bound) {
         AVER_WARN("[Montage] '{}' has no clip that loads", L->label);
@@ -134,12 +135,12 @@ bool MontageSystem::play(AnimSystem& anim, scene::World& w, scene::Entity e, u64
 
     // The previous top of this slot fades out; past the cap the oldest is dropped outright.
     for (usize i = list.size(); i-- > 0;)
-        if (list[i].slot == slot && !list[i].mp.finished()) { list[i].mp.stop(-1.0f); break; }
+        if (list[i].slot == slot && !list[i].mp.finished() && !list[i].driven) { list[i].mp.stop(-1.0f); break; }
     usize inSlot = 0;
-    for (const Player& p : list) inSlot += p.slot == slot ? 1u : 0u;
+    for (const Player& p : list) inSlot += (p.slot == slot && !p.driven) ? 1u : 0u;
     while (inSlot >= kMaxPerSlot) {
         for (usize i = 0; i < list.size(); ++i) {
-            if (list[i].slot != slot) continue;
+            if (list[i].slot != slot || list[i].driven) continue;
             list[i].mp.finish();
             drain(e, list[i], deferred_);
             list.erase(list.begin() + static_cast<std::ptrdiff_t>(i));
@@ -158,7 +159,7 @@ u32 MontageSystem::stop(scene::Entity e, u64 montageId, f32 blendOut) {
     if (it == players_.end()) return 0;
     u32 n = 0;
     for (Player& p : it->second) {
-        if (p.mp.finished() || (montageId != 0 && p.montageId != montageId)) continue;
+        if (p.mp.finished() || p.driven || (montageId != 0 && p.montageId != montageId)) continue;
         p.mp.stop(blendOut);
         ++n;
     }
@@ -170,7 +171,7 @@ u32 MontageSystem::stopSlot(scene::Entity e, u64 slotHash, f32 blendOut) {
     if (it == players_.end()) return 0;
     u32 n = 0;
     for (Player& p : it->second) {
-        if (p.mp.finished() || p.slot != slotHash) continue;
+        if (p.mp.finished() || p.driven || p.slot != slotHash) continue;
         p.mp.stop(blendOut);
         ++n;
     }
@@ -218,7 +219,7 @@ bool MontageSystem::state(scene::Entity e, u64 montageId, f32 out[4], u64* secti
 
 void MontageSystem::stopAll() {
     for (auto& [e, list] : players_)
-        for (Player& p : list) p.mp.finish();
+        for (Player& p : list) if (!p.driven) p.mp.finish();
     players_.clear();
     deferred_.clear();
 }
@@ -232,6 +233,7 @@ void MontageSystem::clear(const Sink& sink) {
     players_.clear();
     for (auto& [e, list] : old)
         for (Player& p : list) {
+            if (p.driven) continue;
             p.mp.finish();
             drain(e, p, events);
         }
@@ -240,6 +242,7 @@ void MontageSystem::clear(const Sink& sink) {
     deferred_.clear();
     old.clear();
     assets_.clear();
+    clipAssets_.clear();
 }
 
 void MontageSystem::prune(const scene::World& w, const Sink& sink) {
@@ -249,6 +252,7 @@ void MontageSystem::prune(const scene::World& w, const Sink& sink) {
         if (w.valid(it->first) && !w.destroyPending(it->first)) { ++it; continue; }
         // The entity is gone: no later tick will close a notify state, so close it now.
         for (Player& p : it->second) {
+            if (p.driven) continue;
             p.mp.finish();
             drain(it->first, p, events);
         }
@@ -267,6 +271,10 @@ void MontageSystem::tick(AnimSystem& anim, scene::World& w, f32 dt, const Sink& 
         RootSpec spec;
         const bool rm = anim.rootSpec(w, e, kRootSrcMontage, spec);
         for (Player& p : it->second) {
+            if (p.driven) {   // the sequencer owns the clock; a lapsed one is dropped without a word
+                if (++p.stale > 2) p.dead = true;
+                continue;
+            }
             p.mp.setRootMotion(rm ? &spec : nullptr);
             p.delta = RootDelta{};
             if (!paused) {
@@ -276,11 +284,99 @@ void MontageSystem::tick(AnimSystem& anim, scene::World& w, f32 dt, const Sink& 
             drain(e, p, events);
         }
         it->second.erase(std::remove_if(it->second.begin(), it->second.end(),
-                                        [](const Player& p) { return p.mp.finished(); }),
+                                        [](const Player& p) { return p.dead || p.mp.finished(); }),
                          it->second.end());
         if (it->second.empty()) it = players_.erase(it); else ++it;
     }
     deliver(events, sink);
+}
+
+// ---- [wave5/sequencer] driven players ----
+
+const MontageSystem::Loaded* MontageSystem::loadClipAsset(AnimSystem& anim, u64 clipId) {
+    if (const auto it = clipAssets_.find(clipId); it != clipAssets_.end()) return it->second.get();
+    const fmt::OcAnimation* c = anim.clip(clipId);
+    if (!c || !(c->duration > 0.0f)) {
+        AVER_WARN("[Montage] clip 0x{:016X} cannot be driven (not loaded or no length)", clipId);
+        clipAssets_.emplace(clipId, nullptr);
+        return nullptr;
+    }
+    auto l = std::make_unique<Loaded>();
+    l->asset.name = "Clip";
+    l->asset.blendIn = l->asset.blendOut = 0.0f;
+    l->asset.segments.push_back(MontageSegment{"@clip", 0.0f, -1.0f, 1.0f});
+    l->label = "Clip";
+    const Loaded* raw = l.get();
+    clipAssets_.emplace(clipId, std::move(l));
+    return raw;
+}
+
+bool MontageSystem::drive(AnimSystem& anim, scene::World& w, scene::Entity e, const Loaded* L, u64 assetId,
+                          f32 position, f32 weight, u64 owner, bool clip) {
+    if (!L) return false;
+    std::vector<Player>& list = players_[e];
+    Player* p = nullptr;
+    for (Player& q : list)
+        if (q.driven && q.owner == owner && q.montageId == assetId && !q.dead) { p = &q; break; }
+    if (!p) {
+        Player np;
+        np.montageId = assetId;
+        np.slot = slotHashOf(L->asset);
+        np.loaded = L;
+        np.driven = true;
+        np.owner = owner;
+        // clipFor, as play() does: a clip retargeted to this entity's skeleton plays its bake.
+        const auto* skm = w.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
+        const u64 skel = skm ? skm->skeleton : 0;
+        const bool bound = np.mp.bind(&L->asset, [&anim, assetId, clip, skel](const std::string& path) -> const fmt::OcAnimation* {
+            return anim.clipFor(clip ? assetId : fnv1a64(std::string_view(path)), skel);
+        });
+        if (!bound) {
+            AVER_WARN("[Montage] '{}' has no clip that loads", L->label);
+            if (list.empty()) players_.erase(e);
+            return false;
+        }
+        list.push_back(std::move(np));
+        p = &list.back();
+    }
+    p->stale = 0;
+    p->mp.drive(position, weight);
+    if (!w.hasComponent(e, scene::kComponentAnimator)) w.addComponent(e, scene::kComponentAnimator);
+    return true;
+}
+
+bool MontageSystem::driveMontage(AnimSystem& anim, scene::World& w, scene::Entity e, u64 montageId, f32 position,
+                                 f32 weight, u64 owner) {
+    if (montageId == 0 || !w.valid(e) || w.destroyPending(e)) return false;
+    const auto* sm = w.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
+    if (!sm || sm->skeleton == 0) return false;
+    return drive(anim, w, e, loadAsset(anim, montageId), montageId, position, weight, owner, false);
+}
+
+bool MontageSystem::driveClip(AnimSystem& anim, scene::World& w, scene::Entity e, u64 clipId, f32 clipTime,
+                              f32 weight, u64 owner) {
+    if (clipId == 0 || !w.valid(e) || w.destroyPending(e)) return false;
+    const auto* sm = w.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
+    if (!sm || sm->skeleton == 0) return false;
+    return drive(anim, w, e, loadClipAsset(anim, clipId), clipId, clipTime, weight, owner, true);
+}
+
+void MontageSystem::releaseDriven(scene::Entity e, u64 owner, u64 assetId) {
+    const auto it = players_.find(e);
+    if (it == players_.end()) return;
+    std::vector<Player>& list = it->second;
+    list.erase(std::remove_if(list.begin(), list.end(), [&](const Player& p) {
+                   return p.driven && p.owner == owner && (assetId == 0 || p.montageId == assetId);
+               }), list.end());
+    if (list.empty()) players_.erase(it);
+}
+
+u32 MontageSystem::drivenCount(scene::Entity e) const {
+    const auto it = players_.find(e);
+    if (it == players_.end()) return 0;
+    u32 n = 0;
+    for (const Player& p : it->second) n += p.driven ? 1u : 0u;
+    return n;
 }
 
 void MontageSystem::slotHashes(scene::Entity e, std::vector<u64>& out) const {
@@ -323,7 +419,7 @@ bool MontageSystem::rootDelta(scene::Entity e, u64 slotHash, RootDelta& out, f32
     bool have = false;
     weight = 0.0f;
     for (const Player& p : it->second) {
-        if (p.slot != slotHash || !p.mp.hasRootMotion()) continue;
+        if (p.slot != slotHash || p.driven || !p.mp.hasRootMotion()) continue;
         const f32 w = p.mp.weight();
         if (!(w > 0.0f)) continue;
         if (!have) { out = p.delta; weight = w; have = true; continue; }

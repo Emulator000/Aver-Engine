@@ -971,45 +971,95 @@ only** (never `VoxiRenderer::draws_`), have no collision and are not individuall
 §11b for why a flat table outside `placements` is what that requires.
 
 **`SEQUENCE` / `SEQTRACK` / `SEQKEY` / `ENDSEQUENCE`** (`OcWorldData::sequences`, `OcSequence` /
-`OcSeqTrack` / `OcSeqKey` in `OcWorld.hpp`) are a **level sequence**: keyframed tracks stored in the
-level itself, not as an asset. The editor's Animate mode authors one; `game::SequencePlayer`
-(`Runtime/include/aver/game/LevelSequence.hpp`) plays it in the editor, in Play and in the packaged game.
-One record per line, percent-encoded `name`, case-insensitive keywords:
+`OcSeqTrack` / `OcSeqKey` in `OcWorld.hpp`; the record code is `modules/formats/{include,src}/OcSeq.{hpp,cpp}`,
+shared with the standalone `.ocseq` file) are a **level sequence**: keyframed tracks stored in the level
+itself, not as an asset. The editor's Animate mode authors them; `game::SequencePlayer` /
+`game::SequenceDirector` (`Runtime/include/aver/game/`) play them in the editor, in Play and in the packaged
+game. The user guide is [`SEQUENCER.md`](../SEQUENCER.md). One record per line, percent-encoded strings,
+case-insensitive keywords:
 
 ```
-SEQUENCE name Fly%20Through length 12 loop 1 autoplay 1 camera 1
+SEQUENCE name Intro length 20 fps 30 loop 0 autoplay 1 camera 1
   SEQTRACK transform target 3
     SEQKEY 0   smooth 0 0 100  0 0 0  1 1 1        # t interp x y z yaw pitch roll sx sy sz
-    SEQKEY 4.5 linear 400 0 100  90 0 0  1 1 1
-  SEQTRACK camera
+    SEQKEY 4.5 cubic 400 0 100  90 0 0  1 1 1 tan 0 0 80 80 0 0 0 0 0 0 0 0 0 0 0 0 0 0   # arrive, leave per channel
+  SEQTRACK camera name Wide                       # a named free camera
     SEQKEY 0   smooth -500 0 150  0 -10            # t interp x y z yaw pitch
+  SEQTRACK camera name Crane target 7             # an actor camera: its pose is the actor's, no keys
+  SEQTRACK cut                                    # at most one
+    SEQKEY 0   step 0 text Wide
+    SEQKEY 6   step 1.5 text Crane                 # v0 = blend seconds INTO this camera
   SEQTRACK material target 5
     SEQKEY 0   step 1 0.5 0.25 4                   # t interp r g b intensity
+  SEQTRACK property bind Lamp%201 prop CLight.intensityLux
+    SEQKEY 0 linear 2000
+    SEQKEY 3 cubic 9000
+  SEQTRACK visibility target 9
+    SEQKEY 2 step 0 1                              # v0 visible 0/1, v1 include children (default 1)
+  SEQTRACK event
+    SEQKEY 4 step 0 1 0.5 text Door_Open arg lever_a   # v0 route (0 bus, 1 graph, 2 both), v1 n numeric args, v2.. the args
+  SEQTRACK audio target 9
+    SEQKEY 1 step 0 0 0 0 0 0 1 1 dur 3.2 text Audio/door_creak.wav
+  SEQTRACK animation target 12
+    SEQKEY 2 step 0 0.2 0.2 0 0 0 1 1 dur 4 text Anims/wave.ocanim
+  SEQTRACK sub name Explosion
+    SEQKEY 10 step 0 0 0 0 0 0 1 dur 3 text Explosion  # a level sequence, or Content/Seq/boom.ocseq[#Name]
 ENDSEQUENCE
 ```
 
 - `SEQUENCE` opens a sequence (`name` omitted when empty; `length` seconds, default 10; `fps` 1..1000, default 60, the step of fixed-step
   playback and of `--sequence-play`, written only when it is not 60; `loop`,
   `autoplay` and `camera` are `0|1`, default 1). `ENDSEQUENCE` closes it; an unclosed one at end of file
-  is kept. A level may carry several. Sequences are written after `FOLIAGE` and before the placements,
-  and nothing is written when there are none, so a level without one is byte-identical to before.
-- `SEQTRACK transform|camera|material [target <n>]` attaches to the open sequence. `target` is a
-  placement index (the placement's position in file order); a camera track has none. A track of an
-  unknown kind, and every `SEQKEY` under it, is ignored.
-- `SEQKEY <t> smooth|linear|step <values...>` attaches to the last `SEQTRACK`: `t` seconds, the
-  interpolation from this key to the next, then 9 values for a transform track (cm, the placement's
-  local frame, degrees as a `PLACE` line), 5 for camera (world cm, editor-camera degrees) or 4 for
-  material (the placement's emissive is multiplied by `rgb * intensity`). A smooth camera key interpolates its
-  position on a centripetal Catmull-Rom spline and yaw / pitch by quaternion squad (`docs/EDITOR.md`, Phase 15).
-  Missing values keep the
-  `OcSeqKey` defaults. Keys are sorted by `t` (stable) after parsing and by the writer.
+  is kept. A level may carry several (each is named; the names are what sub-sequences and scripts address). Sequences are written after
+  `FOLIAGE` and before the placements, and nothing is written when there are none, so a level without one is byte-identical to before.
+- `SEQTRACK <kind> [target <n>] [bind <name>] [name <name>] [prop <Component.field>] [mute 0|1]` attaches to the open sequence.
+  `kind` is `transform camera material property event audio animation visibility cut sub`. `target` is a
+  placement index (the placement's position in file order); `bind` names an actor instead (a placement's `name`, else
+  a light or class actor by name); with both, `bind` wins and `target` is the fallback. A camera track keeps `target`:
+  with one it is an **actor camera**. `name` is a camera's name (default `Camera`) and any track's display name; `mute 1` skips
+  the track. A track of an unknown kind, and every `SEQKEY` under it, is ignored (so a file stays loadable in an older build,
+  which drops the new tracks if it saves it again).
+- `SEQKEY <t> smooth|linear|step|cubic <numbers...> [dur <s>] [text <str>] [arg <str>] [tan <numbers...>]` attaches to the
+  last `SEQTRACK`: `t` seconds, the interpolation from this key to the next (an unknown word reads as `smooth`), then a
+  **numeric run** of up to 9 values that ends at the first non-number, then the tags. The values per kind (a missing one keeps
+  the `OcSeqKey` default, which is neutral: slots 6-8 default to 1):
+
+  | Kind | Values | Tags |
+  |---|---|---|
+  | transform | x y z (cm, the placement's local frame), yaw pitch roll (degrees, as a `PLACE` line), sx sy sz | |
+  | camera | x y z (world cm), yaw pitch (editor-camera degrees) | |
+  | material | r g b intensity (the placement's emissive is multiplied by `rgb * intensity`) | |
+  | property | the field's channels: float 1, vec3 3 (colours too), quat 4 (x y z w), int / bool 1 (forced step, rounded) | |
+  | visibility | v0 visible 0/1, v1 apply to descendants (default 1) | |
+  | event | v0 route 0 bus / 1 graph / 2 both, v1 n numeric args (0..4), v2..v5 the args | `text` event name, `arg` string argument |
+  | audio | v0 fade in s, v1 fade out s, v2 loop, v3 positional (needs an actor), v4 inner cm (0 = 300), v5 outer cm (0 = 3000), v6 volume, v7 pitch | `dur` seconds, `text` sound path |
+  | animation | v0 start offset s, v1 blend in, v2 blend out, v3 loop (clips), v4 after: 0 release / 1 hold, v6 rate, v7 weight | `dur`, `text` `.ocanim` or `.ocmontage` |
+  | cut | v0 blend seconds into the camera (0 = hard cut) | `text` the camera track's name |
+  | sub | v0 start offset s, v1 loop, v2 its camera is live, v6 time scale | `dur`, `text` a level sequence's name or `path.ocseq[#Name]` |
+
+  `cubic` is a cubic Hermite per channel on the authored numbers (Euler degrees included: no quaternion path, no short arc);
+  `tan` lists `arrive0 leave0 arrive1 leave1 ...` slopes (value per second), and an empty `tan` means automatic (the
+  non-uniform finite difference of the neighbours). `smooth` is unchanged: Catmull-Rom (a smooth camera position is a centripetal
+  spline and yaw / pitch go through quaternion squad; `docs/EDITOR.md`, Phase 15). Keys that are **sections** (`dur > 0`: audio,
+  animation, sub-sequence) share the key list; sections on one track must not overlap (the later start wins and cuts the earlier one).
+  Trailing values equal to their neutral value are not written, an older reader takes the first 9/5/4 values and ignores the
+  rest of the line. Keys are sorted by `t` (stable) after parsing and by the writer.
+- Numbers keep `%.6g`; when that is off by more than `1e-6 * max(1, |v|)` (a time past 1000 s) the writer uses `%.9g`.
+  Every value an existing file can hold writes as before.
 - `SEQTRACK`/`SEQKEY` outside an open sequence or track are ignored; `BEGIN`/`END` belong to the
   placement nesting and are not reused.
 - **Targets are renumbered on write.** In memory `OcSeqTrack::target` indexes `placements`, but the
   writer emits placements depth-first from the roots, which can renumber them (see
   `OcWorldPlacement::parent`). The writer therefore writes each track's target as the placement's
   emit index, computed by the same walk the placement writer uses, so a reloaded track still names the
-  placement it was saved with. A transform or material track whose target is out of range is dropped on write.
+  placement it was saved with. A track that needs an actor (transform, material, property, visibility, animation) whose target
+  is out of range and that has no `bind` is dropped on write.
+
+**`.ocseq`** (`modules/formats/{include,src}/aver/formats/OcSeq.{hpp,cpp}`: `OcSeqFile`, `parseOcseq`, `writeOcseq`) is a standalone
+level-sequence file: the header line `OCSEQ 1` (a newer version is refused) followed by the same `SEQUENCE ... ENDSEQUENCE` records. A
+placement index means nothing outside a level, so actors are bound by **name only**: `target` is ignored on read and never written, and a
+track that needs an actor and has no `bind` is dropped on read with one message. Sub-sequence sections and `sequence_play` can name a file
+as `Seq/boom.ocseq` or `Seq/boom.ocseq#Boom`. It is ordinary Content (no registration).
 
 **`LIGHT`** (`OcWorldData::lights`, `OcLight` in `OcWorld.hpp`) is a world-space scene light
 (`scene::CLight`; `docs/rendering/LIGHTS.md`). One line, case-insensitive keywords, any order, unknown

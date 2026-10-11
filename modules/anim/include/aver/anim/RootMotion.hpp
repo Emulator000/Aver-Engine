@@ -40,6 +40,9 @@ bool clipHasRootMotion(const fmt::OcAnimation& c, const RootSpec& s);
 // Motion between two clip times, already wrapped into the clip. wrap = true reads t1 < t0 as forward
 // through the loop seam (t0 -> duration, then 0 -> t1). move = Rz(-yaw0) * (p1 - p0), masked by s.axes.
 RootDelta rootDeltaBetween(const fmt::OcAnimation& c, const RootSpec& s, f32 t0, f32 t1, bool wrap);
+// The same extraction without the kOcAnimRootMotion / additive / object gate: any clip with a track on
+// s.bone. For a caller that has already decided the clip carries root motion (a motion-matching database).
+RootDelta rootDeltaUnflagged(const fmt::OcAnimation& c, const RootSpec& s, f32 t0, f32 t1, bool wrap);
 // acc += w * d
 void addWeighted(RootDelta& acc, const RootDelta& d, f32 w);
 // a toward b by t, componentwise.

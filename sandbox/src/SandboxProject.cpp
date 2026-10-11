@@ -163,6 +163,10 @@ void SandboxApp::applyProject(Engine& e) {
                                                 : std::string());
     releaseProjectMaterials();
     content_.adopt(project_);
+#if AVER_MODULE_SCENE
+    // [wave5/ik-retarget] adopt cleared AnimSystem; the project's .ocretarget assets say which clips play on which rig.
+    anim::animSystem().registerRetargets(content_.idsWithExtension(".ocretarget"));
+#endif
     // LEVEL-SCOPED RESIDENCY (the default -- see levelScopedMaterialsEnabled()'s own comment):
     // nothing is loaded here at all. Binding every project .ocmat up front is exactly the behaviour
     // that made a project holding more than one heavy level (Sponza AND Jungle Ruins under one

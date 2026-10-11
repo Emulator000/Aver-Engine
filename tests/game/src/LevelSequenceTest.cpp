@@ -223,6 +223,150 @@ static void testPlayer() {
 }
 #endif
 
+// ---- [wave5/sequencer] Hermite curves, sections, crossings, cuts --------------------------------
+
+static OcSeqTrack scalarTrack(OcSeqTrackKind kind = OcSeqTrackKind::Transform) {
+    OcSeqTrack t;
+    t.kind = kind;
+    return t;
+}
+
+static void testCubic() {
+    // Two keys with explicit slopes: p(u) = h00 p1 + h10 dt m1 + h01 p2 + h11 dt m2.
+    OcSeqTrack tr = scalarTrack();
+    OcSeqKey a = key(1.0, 10, 0, 0, OcSeqInterp::Cubic), b = key(3.0, 50, 0, 0, OcSeqInterp::Cubic);
+    a.tan.assign(18, 0.0);
+    b.tan.assign(18, 0.0);
+    a.tan[1] = 7.0;    // x channel: leave slope of key a
+    b.tan[0] = -3.0;   // x channel: arrive slope of key b
+    tr.keys = {a, b};
+    const f64 dt = 2.0;
+    for (const f64 t : {1.0, 1.5, 2.0, 2.7, 3.0}) {
+        const f64 u = (t - 1.0) / dt, u2 = u * u, u3 = u2 * u;
+        const f64 want = (2 * u3 - 3 * u2 + 1) * 10 + (u3 - 2 * u2 + u) * dt * 7.0 + (-2 * u3 + 3 * u2) * 50 + (u3 - u2) * dt * -3.0;
+        Transform xf;
+        check(game::sampleSeqTransform(tr, t, xf) && approx(xf.position.x, want, 1e-3), "Hermite matches the closed form at t = " + std::to_string(t));
+        check(approx(game::sampleSeqChannel(tr, 0, t), want, 1e-9), "sampleSeqChannel is the same curve at t = " + std::to_string(t));
+    }
+
+    // Automatic tangents are the non-uniform finite difference; one-sided at the ends.
+    OcSeqTrack auto3 = scalarTrack();
+    auto3.keys = {key(0, 0, 0, 0, OcSeqInterp::Cubic), key(1, 10, 0, 0, OcSeqInterp::Cubic), key(4, 40, 0, 0, OcSeqInterp::Cubic)};
+    f64 arr = -1, lea = -1;
+    game::seqAutoTangent(auto3.keys, 1, 0, arr, lea);
+    check(approx(arr, 10.0) && approx(lea, 10.0), "interior: (p_next - p_prev) / (t_next - t_prev), arrive == leave");
+    game::seqAutoTangent(auto3.keys, 0, 0, arr, lea);
+    check(approx(lea, 10.0), "first key: one-sided toward the next");
+    game::seqAutoTangent(auto3.keys, 2, 0, arr, lea);
+    check(approx(arr, 10.0), "last key: one-sided from the previous");
+    // A straight run with automatic slopes is a straight line.
+    Transform xf;
+    check(game::sampleSeqTransform(auto3, 2.5, xf) && approx(xf.position.x, 25.0, 1e-3), "automatic Hermite on a straight run is straight");
+
+    // Cubic rotation is Hermite on the raw degrees: 350 -> 370 goes the long way round the same arc.
+    OcSeqTrack rot = scalarTrack();
+    OcSeqKey r0 = key(0, 0, 0, 0, OcSeqInterp::Cubic), r1 = key(1, 0, 0, 0, OcSeqInterp::Cubic);
+    r0.v[3] = 350; r1.v[3] = 370;
+    rot.keys = {r0, r1};
+    check(approx(game::sampleSeqChannel(rot, 3, 0.5), 360.0, 1e-6), "the yaw channel is the authored numbers, no short arc");
+
+    // Smooth is the classic Catmull-Rom and its channel sampler agrees with the transform sampler.
+    OcSeqTrack sm = scalarTrack();
+    sm.keys = {key(0, 0, 0, 0), key(1, 10, 5, 0), key(2, 20, 0, 0), key(3, 30, 5, 0)};
+    check(game::sampleSeqTransform(sm, 1.5, xf) && approx(game::sampleSeqChannel(sm, 0, 1.5), xf.position.x, 1e-6) &&
+              approx(game::sampleSeqChannel(sm, 1, 1.5), xf.position.y, 1e-6),
+          "Smooth channels agree with the transform sampler");
+
+    // A camera under Cubic is Hermite on position and on the yaw / pitch degrees.
+    OcSeqTrack cam;
+    cam.kind = OcSeqTrackKind::Camera;
+    OcSeqKey c0 = camKey(0, 0, 0, 0, 0, 0), c1 = camKey(2, 100, 0, 0, 90, 0);
+    c0.interp = c1.interp = OcSeqInterp::Cubic;
+    cam.keys = {c0, c1};
+    game::SeqCameraPose p;
+    check(game::sampleSeqCamera(cam, 1.0, p) && approx(p.position.x, 50.0, 1e-3) && approx(p.yaw, 45.0 * 3.14159265 / 180.0, 1e-3),
+          "Cubic camera: halfway is halfway on a symmetric segment");
+
+    // Property sampling: floats follow the key interpolation; integers hold; quaternions slerp.
+    OcSeqTrack pr;
+    pr.kind = OcSeqTrackKind::Property;
+    pr.keys = {key(0, 0, 0, 0, OcSeqInterp::Linear), key(2, 10, 20, 30, OcSeqInterp::Linear)};
+    f64 out[4];
+    check(game::sampleSeqProperty(pr, 1.0, false, false, out) && approx(out[0], 5) && approx(out[1], 10) && approx(out[2], 15), "property floats lerp");
+    check(game::sampleSeqProperty(pr, 1.0, false, true, out) && approx(out[0], 0), "integer fields hold the key");
+    OcSeqKey q0, q1;
+    q0.t = 0; q0.v[0] = 0; q0.v[1] = 0; q0.v[2] = 0; q0.v[3] = 1; q0.interp = OcSeqInterp::Linear;
+    q1.t = 1; q1.v[0] = 0; q1.v[1] = 0; q1.v[2] = 1; q1.v[3] = 0; q1.interp = OcSeqInterp::Linear;   // 180 degrees about Z
+    pr.keys = {q0, q1};
+    check(game::sampleSeqProperty(pr, 0.5, true, false, out) && approx(out[2], std::sqrt(0.5), 1e-3) && approx(out[3], std::sqrt(0.5), 1e-3),
+          "quaternion properties slerp and stay unit length");
+}
+
+static void testSections() {
+    OcSeqTrack tr = scalarTrack(OcSeqTrackKind::Audio);
+    OcSeqKey a = key(1.0, 0, 0, 0, OcSeqInterp::Step), b = key(5.0, 0, 0, 0, OcSeqInterp::Step);
+    a.dur = 2.0; b.dur = 1.0;
+    tr.keys = {a, b};
+    f64 local = -1;
+    check(game::seqActiveSection(tr, 0.5, false, local) == nullptr, "before the first section: none");
+    const OcSeqKey* k = game::seqActiveSection(tr, 1.5, false, local);
+    check(k == &tr.keys[0] && approx(local, 0.5), "inside a section: it, and the time into it");
+    check(game::seqActiveSection(tr, 3.5, false, local) == nullptr, "between sections: none");
+    k = game::seqActiveSection(tr, 3.5, true, local);
+    check(k == &tr.keys[0] && approx(local, 2.5), "hold-after keeps the last started section");
+    check(game::seqActiveSection(tr, 5.2, false, local) == &tr.keys[1], "a later section wins");
+    // Overlapping sections in a file: the later start wins, the earlier is cut there.
+    tr.keys[0].dur = 10.0;
+    check(game::seqActiveSection(tr, 5.5, false, local) == &tr.keys[1], "overlap: the later start wins");
+
+    // Weight ramps.
+    OcSeqKey s;
+    s.dur = 4.0;
+    check(approx(game::seqSectionWeight(s, 0.0, 1.0, 1.0), 0.0) && approx(game::seqSectionWeight(s, 0.5, 1.0, 1.0), 0.5, 1e-6) &&
+              approx(game::seqSectionWeight(s, 2.0, 1.0, 1.0), 1.0),
+          "fade in is a smoothstep up to one");
+    check(approx(game::seqSectionWeight(s, 3.5, 1.0, 1.0), 0.5, 1e-6) && approx(game::seqSectionWeight(s, 4.0, 1.0, 1.0), 0.0),
+          "fade out is a smoothstep down to zero at the end");
+    check(approx(game::seqSectionWeight(s, 1.0, 0.0, 0.0), 1.0) && approx(game::seqSectionWeight(s, -0.1, 0.0, 0.0), 0.0), "no fades: one inside, zero before");
+
+    // Crossings.
+    OcSeqTrack ev = scalarTrack(OcSeqTrackKind::Event);
+    ev.keys = {key(0.0, 0, 0, 0, OcSeqInterp::Step), key(1.0, 0, 0, 0, OcSeqInterp::Step), key(2.0, 0, 0, 0, OcSeqInterp::Step),
+               key(9.5, 0, 0, 0, OcSeqInterp::Step)};
+    std::vector<u32> hit;
+    game::seqCrossedKeys(ev, 0.5, 1.0, false, 10.0, true, hit);
+    check(hit.size() == 1 && hit[0] == 1, "a span includes its end: (0.5, 1.0] has the key at 1.0");
+    game::seqCrossedKeys(ev, 1.0, 2.0, false, 10.0, true, hit);
+    check(hit.size() == 1 && hit[0] == 2, "and excludes its start: (1.0, 2.0] has only the key at 2.0");
+    game::seqCrossedKeys(ev, 0.0, 0.5, true, 10.0, true, hit);
+    check(hit.size() == 1 && hit[0] == 0, "an inclusive start catches t = 0 on first play");
+    game::seqCrossedKeys(ev, 0.0, 0.5, false, 10.0, true, hit);
+    check(hit.empty(), "and without it t = 0 is not crossed again");
+    game::seqCrossedKeys(ev, 9.0, 0.2, false, 10.0, true, hit);
+    check(hit.size() == 2 && hit[0] == 3 && hit[1] == 0, "across a loop seam: the tail first, then the head");
+    game::seqCrossedKeys(ev, 1.5, 1.5, false, 10.0, true, hit);
+    check(hit.empty(), "a zero-length span crosses nothing");
+    game::seqCrossedKeys(ev, 9.0, 0.2, false, 10.0, false, hit);
+    check(hit.empty(), "no wrap without a loop");
+}
+
+static void testCuts() {
+    OcSeqTrack cuts = scalarTrack(OcSeqTrackKind::CameraCut);
+    OcSeqKey a = key(2.0, 0, 0, 0, OcSeqInterp::Step), b = key(6.0, 0, 0, 0, OcSeqInterp::Step);
+    a.text = "Wide";
+    b.text = "Crane";
+    b.v[0] = 2.0;   // two seconds of blend into Crane
+    cuts.keys = {a, b};
+    std::string cam, prev;
+    f32 alpha = -1;
+    check(game::sampleSeqCut(cuts, 1.0, cam, prev, alpha) && cam.empty() && prev.empty() && approx(alpha, 1.0), "before the first cut: no camera named (the first camera track)");
+    check(game::sampleSeqCut(cuts, 3.0, cam, prev, alpha) && cam == "Wide" && prev.empty() && approx(alpha, 1.0), "a hard cut names its camera");
+    check(game::sampleSeqCut(cuts, 7.0, cam, prev, alpha) && cam == "Crane" && prev == "Wide" && approx(alpha, 0.5, 1e-6), "midway through a blend: the previous camera and alpha");
+    check(game::sampleSeqCut(cuts, 8.5, cam, prev, alpha) && cam == "Crane" && prev.empty() && approx(alpha, 1.0), "after the blend: the camera alone");
+    OcSeqTrack none = scalarTrack(OcSeqTrackKind::CameraCut);
+    check(!game::sampleSeqCut(none, 1.0, cam, prev, alpha), "no cut keys -> false");
+}
+
 int main() {
     AVER_INFO("LevelSequenceTest");
     testWrap();
@@ -230,6 +374,9 @@ int main() {
     testCamera();
     testCameraSpline();
     testMaterial();
+    testCubic();
+    testSections();
+    testCuts();
 #if AVER_MODULE_SCENE
     testPlayer();
 #endif

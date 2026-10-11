@@ -1,6 +1,7 @@
 // .ocworld reader and writer: the text scanner and serialiser for the native world format.
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/detail/TextScan.hpp"
+#include "aver/formats/OcSeq.hpp"
 #include "aver/core/Hash.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -166,19 +167,6 @@ std::vector<EmitStep> placementEmitSteps(const std::vector<OcWorldPlacement>& pl
     return steps;
 }
 
-// Values per key by track kind: transform 9, camera 5, material 4.
-usize seqKeyValueCount(OcSeqTrackKind k) {
-    return k == OcSeqTrackKind::Transform ? 9 : k == OcSeqTrackKind::Camera ? 5 : 4;
-}
-
-const char* seqKindName(OcSeqTrackKind k) {
-    return k == OcSeqTrackKind::Transform ? "transform" : k == OcSeqTrackKind::Camera ? "camera" : "material";
-}
-
-const char* seqInterpName(OcSeqInterp i) {
-    return i == OcSeqInterp::Linear ? "linear" : i == OcSeqInterp::Step ? "step" : "smooth";
-}
-
 } // namespace
 
 const OcPostValue* OcPostVolume::find(std::string_view key) const {
@@ -250,7 +238,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     i32 lastPlacement = -1;
     // The open SEQUENCE (index into out.sequences) and its last SEQTRACK, -1 outside one. SEQTRACK /
     // SEQKEY outside a sequence, or after an unknown track kind, are ignored.
-    i32 seqOpen = -1, trackOpen = -1;
+    SeqParseState seqState;   // [wave5/sequencer] the records live in OcSeq.cpp
     i32 prefabOpen = -1;   // the open PREFABINST, -1 outside one
     i32 levelInstOpen = -1;   // [wave3/level-instances] the open LEVELINST, -1 outside one
 
@@ -720,47 +708,8 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             // SCATTER's `mesh` -- none of those support a path with a space in it either, so this
             // does not invent an escaping scheme none of this file's other asset references have.
             out.foliageFiles.push_back(std::string(t[1]));
-        } else if (equalsCI(key, "SEQUENCE")) {
-            OcSequence sq;
-            for (usize i = 1; i < t.size(); ++i) {
-                if      (equalsCI(t[i], "name")     && i + 1 < t.size()) sq.name     = percentDecode(t[++i]);
-                else if (equalsCI(t[i], "length")   && i + 1 < t.size()) sq.length   = parseF64(t[++i], sq.length);
-                else if (equalsCI(t[i], "fps")      && i + 1 < t.size()) sq.fps      = std::clamp(parseI32(t[++i], 60), 1, 1000);
-                else if (equalsCI(t[i], "loop")     && i + 1 < t.size()) sq.loop     = parseI32(t[++i], 1) != 0;
-                else if (equalsCI(t[i], "autoplay") && i + 1 < t.size()) sq.autoplay = parseI32(t[++i], 1) != 0;
-                else if (equalsCI(t[i], "camera")   && i + 1 < t.size()) sq.camera   = parseI32(t[++i], 1) != 0;
-            }
-            seqOpen = static_cast<i32>(out.sequences.size());
-            trackOpen = -1;
-            out.sequences.push_back(std::move(sq));
-        } else if (equalsCI(key, "SEQTRACK")) {
-            trackOpen = -1;
-            if (seqOpen < 0 || t.size() < 2) continue;
-            OcSeqTrack tr;
-            if      (equalsCI(t[1], "transform")) tr.kind = OcSeqTrackKind::Transform;
-            else if (equalsCI(t[1], "camera"))    tr.kind = OcSeqTrackKind::Camera;
-            else if (equalsCI(t[1], "material"))  tr.kind = OcSeqTrackKind::Material;
-            else continue;
-            for (usize i = 2; i + 1 < t.size(); ++i)
-                if (equalsCI(t[i], "target")) tr.target = parseI32(t[++i], -1);
-            if (tr.kind == OcSeqTrackKind::Camera) tr.target = -1;
-            std::vector<OcSeqTrack>& tracks = out.sequences[static_cast<usize>(seqOpen)].tracks;
-            trackOpen = static_cast<i32>(tracks.size());
-            tracks.push_back(std::move(tr));
-        } else if (equalsCI(key, "SEQKEY")) {
-            if (seqOpen < 0 || trackOpen < 0) continue;
-            OcSeqTrack& tr = out.sequences[static_cast<usize>(seqOpen)].tracks[static_cast<usize>(trackOpen)];
-            OcSeqKey k;
-            k.t = tokF(t, 1);
-            if (t.size() > 2) {
-                if      (equalsCI(t[2], "linear")) k.interp = OcSeqInterp::Linear;
-                else if (equalsCI(t[2], "step"))   k.interp = OcSeqInterp::Step;
-            }
-            const usize cnt = seqKeyValueCount(tr.kind);
-            for (usize i = 0; i < cnt && 3 + i < t.size(); ++i) k.v[i] = parseF64(t[3 + i], k.v[i]);
-            tr.keys.push_back(k);
-        } else if (equalsCI(key, "ENDSEQUENCE")) {
-            seqOpen = trackOpen = -1;
+        } else if (parseSeqRecord(key, t, out.sequences, seqState)) {
+            // SEQUENCE / SEQTRACK / SEQKEY / ENDSEQUENCE: consumed (OcSeq.cpp)
         } else if (equalsCI(key, "BEGIN")) {
             // OPENS A SCOPE ON THE MOST RECENT PLACEMENT. See the grammar note above parseOcworld.
             if (lastPlacement < 0) {
@@ -863,10 +812,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     }
 
     // An unclosed SEQUENCE is kept as it stands. Keys end up in time order whatever order they were typed.
-    for (OcSequence& sq : out.sequences)
-        for (OcSeqTrack& tr : sq.tracks)
-            std::stable_sort(tr.keys.begin(), tr.keys.end(),
-                             [](const OcSeqKey& a, const OcSeqKey& b) { return a.t < b.t; });
+    sortSeqKeys(out.sequences);
 
     // THE PARSER'S SECOND FAILURE MODE, and its first new one since it was written. Everything else
     // in this function either matches a record or silently skips it -- the "unknown records are
@@ -1311,39 +1257,9 @@ std::string writeOcworld(const OcWorldData& w) {
             if (st.kind == EmitStep::Kind::Place) emitIndex[static_cast<usize>(st.index)] = nextIndex++;
 
         s += "\n";
-        for (const OcSequence& sq : w.sequences) {
-            s += "SEQUENCE";
-            if (!sq.name.empty()) { s += " name "; s += percentEncode(sq.name); }
-            s += " length " + num(sq.length);
-            if (sq.fps != 60) s += " fps " + std::to_string(sq.fps);
-            s += std::string(" loop ") + (sq.loop ? "1" : "0") +
-                 " autoplay " + (sq.autoplay ? "1" : "0") +
-                 " camera " + (sq.camera ? "1" : "0") + "\n";
-            for (const OcSeqTrack& tr : sq.tracks) {
-                const bool cam = tr.kind == OcSeqTrackKind::Camera;
-                i32 target = -1;
-                if (!cam) {
-                    if (tr.target < 0 || tr.target >= static_cast<i32>(emitIndex.size())) continue;
-                    target = emitIndex[static_cast<usize>(tr.target)];
-                    if (target < 0) continue;
-                }
-                s += "  SEQTRACK "; s += seqKindName(tr.kind);
-                if (!cam) s += " target " + std::to_string(target);
-                s += "\n";
-                std::vector<const OcSeqKey*> keys;
-                keys.reserve(tr.keys.size());
-                for (const OcSeqKey& k : tr.keys) keys.push_back(&k);
-                std::stable_sort(keys.begin(), keys.end(),
-                                 [](const OcSeqKey* x, const OcSeqKey* y) { return x->t < y->t; });
-                const usize cnt = seqKeyValueCount(tr.kind);
-                for (const OcSeqKey* k : keys) {
-                    s += "    SEQKEY " + num(k->t) + " "; s += seqInterpName(k->interp);
-                    for (usize i = 0; i < cnt; ++i) { s += " "; s += num(k->v[i]); }
-                    s += "\n";
-                }
-            }
-            s += "ENDSEQUENCE\n";
-        }
+        appendSeqRecords(s, w.sequences, [&](i32 target) {
+            return target >= 0 && target < static_cast<i32>(emitIndex.size()) ? emitIndex[static_cast<usize>(target)] : -1;
+        });
     }
 
     appendOcPrefabInstances(s, w.prefabInstances);   // nothing for a level without prefabs

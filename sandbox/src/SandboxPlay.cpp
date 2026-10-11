@@ -9,6 +9,7 @@
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/GamePawn.hpp"
 #include "aver/game/GameLocalization.hpp"
+#include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] hooks for the preview and Play
 #if AVER_MODULE_FRAMEWORK
 #  include "aver/framework/framework_loc_abi.h"
 #endif
@@ -247,7 +248,14 @@ void SandboxApp::startPlay() {
     capturePlayWorld();
 #if AVER_MODULE_SCENE
     // After playMobility_.begin: the sequence starts from 0 (when it autoplays) and its actors are seeded.
-    seqEditor_.beginPlay(playMobility_);
+    seqEditor_.beginPlay(playMobility_, game::makeSequenceHooks(project_.contentDir(), [this](i32 ent, const std::string& name) {
+#if AVER_MODULE_SCRIPTING
+        return scripts_.graphFire(ent, name.c_str());
+#else
+        (void)ent; (void)name;
+        return false;
+#endif
+    }));
     // Object animation (a placed mesh's transform clip) plays from here until Stop. After the snapshot:
     // its first live tick is what starts moving the placements the snapshot just recorded. The two
     // begin_play failure branches below turn it back off, since nothing would ever call Stop.
@@ -900,18 +908,33 @@ void SandboxApp::driveAnimatedBodies(f32 dt) {
 #endif
 
 #if AVER_MODULE_SCENE
-// The level sequence's frame step, between the object-animation tick and World::flush: advances and
-// applies it in Animate mode's preview and while Play runs it.
-void SandboxApp::tickSequence(Engine& e, f32 dt) {
+// The level sequence's frame steps (docs/SEQUENCER.md section 2). Pre runs before the animation graphs and
+// AnimSystem::tick: the render queue / capture run poses the sequence, then the preview or Play advances and
+// evaluates the property, visibility, animation, event, audio and sub-sequence tracks. Post runs after the tick.
+void SandboxApp::tickSequencePre(Engine& e, f32 dt) {
     sequenceRunStep(e);
+    // The audio and event hooks reach the audio ABI, the event bus and entity graphs; rebuilt when the project moves.
+    if (!seqEditor_.hasHooks() || seqHooksDir_ != project_.contentDir()) {
+        seqHooksDir_ = project_.contentDir();
+        seqEditor_.setHooks(game::makeSequenceHooks(seqHooksDir_, [this](i32 ent, const std::string& name) {
+#if AVER_MODULE_SCRIPTING
+            return scripts_.graphFire(ent, name.c_str());
+#else
+            (void)ent; (void)name;
+            return false;
+#endif
+        }));
+    }
     editor::SequenceTickCtx c;
     c.dt = dt;
 #if AVER_MODULE_FRAMEWORK
     c.playActive = anyPlayActive();
     c.playPaused = aver_fw_play_state() == AVER_FW_PLAY_PAUSED;
 #endif
-    seqEditor_.tick(c);
+    seqEditor_.tickPre(c);
 }
+
+void SandboxApp::tickSequencePost() { seqEditor_.tickPost(); }
 #endif
 
 // Aspect comes from the viewport rect (the dockspace's central node), not the whole window.

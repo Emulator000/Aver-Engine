@@ -534,6 +534,8 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework)
     add_subdirectory(tests/framework_timers)
     add_subdirectory(tests/framework_anim)
+    add_subdirectory(tests/framework_ik)   # wave5 #24: the IK / rig-input ABI relay
+    add_subdirectory(tests/framework_sequence)   # wave5 #27: the sequencer ABI relay
     add_subdirectory(tests/framework_content)
     add_subdirectory(tests/gas)
   endif()

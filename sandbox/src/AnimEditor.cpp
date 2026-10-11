@@ -59,6 +59,7 @@ namespace aver::editor {
 namespace {
 
 std::string g_contentRoot;
+AnimEditorRigHooks g_rigHooks;   // [wave5/ik-retarget]
 
 // A bone's box is drawn along the vector to its parent, so a chain reads as a limb rather than as a
 // scatter of cubes. A root, having no parent, gets a small cube at its own joint.
@@ -1012,6 +1013,13 @@ void AnimEditor::drawAssetBrowser() {
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Not for this skeleton: a track addresses a bone past %zu.",
                                    skel_.bones.size());
+            // [wave5/ik-retarget] A retargeter can carry it over: open one for this skeleton, or the Batch panel.
+            if (g_rigHooks.openRetargetFor && !skelPath_.empty()) {
+                ImGui::SameLine();
+                ImGui::PushID(c.path.c_str());
+                if (ImGui::SmallButton("Retarget to this skeleton...")) g_rigHooks.openRetargetFor(skelPath_);
+                ImGui::PopID();
+            }
             continue;
         }
         if (ImGui::Selectable(c.display.c_str(), isCurrent) && !isCurrent) openClip(c.path);
@@ -2604,6 +2612,11 @@ void AnimEditor::draw(Engine& e) {
         if (ImGui::BeginChild("bones", ImVec2(0, h * 0.42f), false)) {
             ImGui::TextDisabled("BONES");
             drawBones();
+            // [wave5/ik-retarget] A skeleton tab can start an IK Rig or a Retargeter for its rig.
+            if (!isClip_ && !path_.empty()) {
+                if (g_rigHooks.createIkRig && ImGui::SmallButton("Create IK Rig for this skeleton")) g_rigHooks.createIkRig(path_);
+                if (g_rigHooks.createRetarget && ImGui::SmallButton("Create Retargeter from this skeleton")) g_rigHooks.createRetarget(path_);
+            }
         }
         ImGui::EndChild();
         ImGui::Separator();
@@ -2859,6 +2872,8 @@ void AnimEditor::resetLayout() {
 } // namespace
 
 void setAnimEditorContentRoot(std::string root) { g_contentRoot = std::move(root); }
+
+void setAnimEditorRigHooks(AnimEditorRigHooks hooks) { g_rigHooks = std::move(hooks); }
 
 // Unregisters the skinning feature and frees its GPU resources, before the device goes.
 //

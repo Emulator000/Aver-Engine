@@ -64,6 +64,11 @@ bool clipHasRootMotion(const fmt::OcAnimation& c, const RootSpec& s) {
 
 RootDelta rootDeltaBetween(const fmt::OcAnimation& c, const RootSpec& s, f32 t0, f32 t1, bool wrap) {
     if (!clipHasRootMotion(c, s)) return {};
+    return rootDeltaUnflagged(c, s, t0, t1, wrap);
+}
+
+RootDelta rootDeltaUnflagged(const fmt::OcAnimation& c, const RootSpec& s, f32 t0, f32 t1, bool wrap) {
+    if (!s.valid()) return {};
     const fmt::OcTrack* t = trackOf(c, s.bone);
     if (!t) return {};
     if (!(wrap && t1 < t0)) return stepDelta(*t, s, t0, t1);

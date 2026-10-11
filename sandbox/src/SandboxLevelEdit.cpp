@@ -704,7 +704,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
     writeLevelExtent(w);
     // [wave3/level-instances end]
     // THE SEQUENCE, written from the editor's model with each actor mapped to the slot it is saved in.
-    seqEditor_.save(w, slotOf);
+    seqEditor_.save(w, slotOf, [this](scene::Entity ent) { return sequenceBindName(ent); });   // [wave5/sequencer] a non-placement actor is saved by name
     if (streamedSave) appendStreamedSequenceTracks(w);
 
     // CLASS PLACEMENTS GO BACK OUT TOO, AND UNTIL NOW THEY DID NOT: this loop rebuilds a

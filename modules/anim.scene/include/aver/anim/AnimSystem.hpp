@@ -9,6 +9,7 @@
 #pragma once
 
 #include "aver/anim/AnimMontages.hpp"
+#include "aver/anim/AnimRetarget.hpp"
 #include "aver/anim/AnimSampler.hpp"
 #include "aver/anim/RootMotion.hpp"
 #include "aver/scene/Components.hpp"
@@ -112,7 +113,27 @@ public:
     void setPoseModifier(PoseModifierFn fn, void* user) { poseMod_ = fn; poseModUser_ = user; }
     void setPoseSource(PoseSourceFn fn, void* user) { poseSrc_ = fn; poseSrcUser_ = user; }
     bool hasPoseSource() const { return poseSrc_ != nullptr; }
+    // The installed source, so a second one can chain it (MotionMatchSystem runs behind the state machines).
+    PoseSourceFn poseSource() const { return poseSrc_; }
+    void* poseSourceUser() const { return poseSrcUser_; }
+    // Bumped by clear() only: anything holding pointers into the clip / skeleton caches compares this to know
+    // they died.
+    u32 contentEpoch() const { return contentEpoch_; }
     bool hasPoseModifier() const { return poseMod_ != nullptr; }
+    // ---- IK and retargeting (docs/plans/wave5/IK_RETARGETING.md) ----
+    // dt of the tick in progress (the last one between ticks), and a counter that moves once per tick: state
+    // with a lifetime (IK goals, rig inputs) uses it to smooth and to prune.
+    f32 tickDt() const { return tickDt_; }
+    u64 tickIndex() const { return tickIndex_; }
+    // The clip as it should play on the skeleton `skeletonId`: a retargeted bake when a project .ocretarget maps the
+    // clip's skeleton onto it, otherwise exactly clip(clipId). Every consumer that knows its entity's skeleton uses
+    // this one; clip() stays the raw loader.
+    const fmt::OcAnimation* clipFor(u64 clipId, u64 skeletonId);
+    // Replaces the retarget catalog with the project's .ocretarget assets (content id, absolute path). Call after
+    // every content adopt.
+    void registerRetargets(const std::vector<std::pair<u64, std::string>>& idAndPath) { retarget_.registerAssets(idAndPath); }
+    u32 retargetEpoch() const { return retarget_.epoch(); }
+    RetargetRuntime& retargets() { return retarget_; }
     // The installed modifier, so a second one can chain it (RagdollSystem runs after the control rig).
     PoseModifierFn poseModifier() const { return poseMod_; }
     void* poseModifierUser() const { return poseModUser_; }
@@ -386,6 +407,10 @@ private:
     PoseModifierFn poseMod_ = nullptr;
     void* poseModUser_ = nullptr;
     u64 fired_ = 0;
+    u32 contentEpoch_ = 0;
+    f32 tickDt_ = 0.0f;
+    u64 tickIndex_ = 0;
+    RetargetRuntime retarget_;
     u32 attachmentsPlaced_ = 0;
     // Set for the duration of clear() itself, so a notify sink that reacts to a forced "_End" by
     // calling clear() again -- reentrantly, from inside the loop clear() is still running -- does

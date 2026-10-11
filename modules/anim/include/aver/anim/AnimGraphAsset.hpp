@@ -15,8 +15,9 @@
 namespace aver::anim {
 
 inline constexpr int kBlendSpaceVersion = 1;
-// 2 only when the machine carries a pipeline; a machine without one is still written as version 1.
-inline constexpr int kStateMachineVersion = 2;
+// 2 only when the machine carries a pipeline, 3 only when a state is a motion-matching state; a machine
+// with neither is still written as version 1.
+inline constexpr int kStateMachineVersion = 3;
 inline constexpr int kMontageVersion = 1;
 
 std::string writeBlendSpace(const BlendSpaceAsset& a);

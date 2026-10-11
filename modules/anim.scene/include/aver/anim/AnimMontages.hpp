@@ -40,6 +40,20 @@ public:
     bool isPlaying(scene::Entity e, u64 montageId /*0 = any*/) const;
     // out = position, length, weight, rate of the montage (0 = newest); sectionHash = fnv1a64 of its section.
     bool state(scene::Entity e, u64 montageId, f32 out[4], u64* sectionHash) const;
+    // [wave5/sequencer] DRIVEN players: a sequencer owns the clock. Each call places the player at an exact
+    // position with an exact weight (state Hold, no events, no notifies, no root motion, no auto blend-out),
+    // so scrubbing is exact. Driven players are not advanced by tick(); one that goes more than 2 ticks
+    // without a drive call (the sequencer died without releasing) is dropped silently. They join their slot
+    // like any player but are invisible to play/stop/jump/state. Both add a CAnimator when the entity has
+    // none. False for an entity without a skeleton or an asset that does not load.
+    bool driveMontage(AnimSystem& anim, scene::World& w, scene::Entity e, u64 montageId, f32 position, f32 weight, u64 owner);
+    // Plays clip `clipId` (an .ocanim ObjectId) as a synthesised one-segment montage (whole clip, rate 1, no
+    // blends, DefaultSlot) at `clipTime` clip seconds.
+    bool driveClip(AnimSystem& anim, scene::World& w, scene::Entity e, u64 clipId, f32 clipTime, f32 weight, u64 owner);
+    // Silent: no Ended, no notifies. assetId 0 = every driven player of this owner on the entity.
+    void releaseDriven(scene::Entity e, u64 owner, u64 assetId);
+    // Driven players on `e` (all owners); for tests and diagnostics.
+    u32 drivenCount(scene::Entity e) const;
     // Drops every player silently (Play stop, level change): no events are delivered.
     void stopAll();
     // Ends every player (Ended and open NotifyEnds through `sink`), then drops players and cached assets.
@@ -72,10 +86,17 @@ private:
         const Loaded* loaded = nullptr;
         MontagePlayer mp;
         RootDelta delta;                    // this tick's, unweighted
+        bool driven = false;                // placed by a sequencer, never advanced (driveMontage / driveClip)
+        bool dead = false;                  // dropped silently by the next tick
+        u64 owner = 0;
+        u32 stale = 0;                      // ticks since the last drive call
     };
     using Pending = std::vector<std::pair<scene::Entity, std::string>>;
 
     const Loaded* loadAsset(AnimSystem& anim, u64 id);
+    const Loaded* loadClipAsset(AnimSystem& anim, u64 clipId);       // the synthesised one-segment montage
+    bool drive(AnimSystem& anim, scene::World& w, scene::Entity e, const Loaded* L, u64 assetId, f32 position,
+               f32 weight, u64 owner, bool clip);
     Player* find(scene::Entity e, u64 montageId);                // 0 = newest not finished
     const Player* find(scene::Entity e, u64 montageId) const;
     static void drain(scene::Entity e, Player& p, Pending& out);
@@ -83,6 +104,7 @@ private:
 
     std::unordered_map<scene::Entity, std::vector<Player>> players_;
     std::unordered_map<u64, std::unique_ptr<Loaded>> assets_;       // null = failed once
+    std::unordered_map<u64, std::unique_ptr<Loaded>> clipAssets_;   // driveClip's, by clip id
     Pending deferred_;                                              // events from play/stop between ticks
     std::vector<MontageEvent> scratchEvents_;
     Pose scratchPose_;

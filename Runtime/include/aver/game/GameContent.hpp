@@ -35,6 +35,9 @@ public:
 
     // Paths of assets with matching extension (with dot, e.g. ".ocgraph"), sorted for determinism.
     std::vector<std::string> pathsWithExtension(std::string_view ext) const;
+    // The same assets as (ObjectId, path) pairs, sorted by path. [wave5/ik-retarget] The runtime retarget catalog
+    // (AnimSystem::registerRetargets) reads every .ocretarget this way.
+    std::vector<std::pair<u64, std::string>> idsWithExtension(std::string_view ext) const;
 
     usize size() const { return contentIndex_.size(); }
     const fmt::ProjectDesc& project() const { return project_; }

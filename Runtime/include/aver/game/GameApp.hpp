@@ -59,6 +59,7 @@
 #include "aver/game/MouseCapture.hpp"
 #include "aver/game/PlayMobility.hpp"
 #include "aver/game/LevelSequence.hpp"
+#include "aver/game/SequenceDirector.hpp"   // [wave5/sequencer]
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
 #  include "aver/world/VehicleSystem.hpp"
 #endif
@@ -296,8 +297,8 @@ private:
     scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
     // What moves during the session, so Voxi keeps it out of the GI bake (PlayMobility.hpp).
     game::PlayMobility playMobility_;
-    // The level's own sequence (.ocworld SEQ records): moves actors, the view and emissive while it plays.
-    game::SequencePlayer sequencePlayer_;
+    // The level's sequences (.ocworld SEQ records): move actors, the view and emissive while they play. [wave5/sequencer]
+    game::SequenceDirector sequenceDirector_;
     // DrawWorldOptions::emissiveScale sink; user is the GameApp.
     static bool sequenceEmissiveScale(scene::Entity e, f32 outRgb[3], void* user);
 #  if AVER_MODULE_PHYSICS

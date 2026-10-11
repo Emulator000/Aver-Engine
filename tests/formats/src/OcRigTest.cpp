@@ -103,7 +103,7 @@ int main() {
     {
         const struct { const char* text; const char* what; } bad[] = {
             {"NAME NoHeader\n",                              "a file with no OCRIG header"},
-            {"OCRIG 2\nNAME X\n",                            "a version it does not know"},
+            {"OCRIG 3\nNAME X\n",                            "a version it does not know"},
             {"OCRIG 1\nOP sideways bone=head\n",             "an unknown op kind"},
             {"OCRIG 1\nOP twobone root=a mid=b\n",           "a two-bone chain missing its tip"},
             {"OCRIG 1\nOP twobone root=a mid=a tip=b goal=0,0,0 pole=0,1,0\n",
@@ -121,6 +121,95 @@ int main() {
             check(!ok, std::string(c.what) + " is refused");
             if (!ok) check(!why.empty(), std::string("  ...and says why: ") + why);
         }
+    }
+
+    AVER_INFO("=== OCRIG 1 is unchanged: the golden text re-writes byte for byte ===");
+    {
+        const std::string golden =
+            "OCRIG 1\n"
+            "NAME ArmReach\n"
+            "OP twobone root=shoulder mid=elbow tip=wrist goal=80,0,0 pole=0,-100,20 weight=1\n"
+            "OP aim bone=head at=0,200,150 axis=0,0,1 weight=0.5\n";
+        fmt::OcRigData g;
+        check(fmt::parseOcRig(golden, g, &err), "the v1 golden parses: " + err);
+        check(!g.needsV2(), "and needs no v2 feature");
+        check(fmt::writeOcRig(g) == golden, "the writer emits OCRIG 1 and reproduces it exactly");
+    }
+
+    AVER_INFO("=== OCRIG 2: inputs, references and every new op round-trip ===");
+    {
+        const std::string v2 =
+            "OCRIG 2\n"
+            "NAME HeroReach\n"
+            "INPUT GunTarget vec3 space=world default=0,0,0\n"
+            "INPUT LookAt vec3 space=model default=1,2,3\n"
+            "INPUT Aim float default=0.25\n"
+            "INPUT Grip quat space=world default=0,0,0,1\n"
+            "OP fabrik root=upperarm_r tip=hand_r goal=@GunTarget pole=bone:elbow_r+0,-30,0 iter=10 tol=0.1 limits=1 tiprot=@Grip weight=@Aim\n"
+            "OP ccd root=spine_01 tip=head goal=@LookAt iter=12 tol=0.5 step=20 limits=0 weight=0.6\n"
+            "OP copybone dst=ik_hand_l src=hand_r space=model pos=1 rot=0 weight=1\n"
+            "OP setbone bone=weapon pos=0,0,0 rot=0,0,0,1 space=local weight=1\n"
+            "OP twobone root=thigh_l mid=calf_l tip=foot_l goal=bone:foot_l+0,0,5 pole=0,50,0 weight=1\n";
+        fmt::OcRigData d;
+        check(fmt::parseOcRig(v2, d, &err), "a v2 file parses: " + err);
+        check(d.inputs.size() == 4 && d.ops.size() == 5, "inputs and ops arrived");
+        if (d.inputs.size() == 4 && d.ops.size() == 5) {
+            check(d.inputs[0].type == fmt::OcRigInputType::Vec3 && d.inputs[0].world && !d.inputs[1].world &&
+                  d.inputs[1].defVec.z == 3.0f && d.inputs[2].type == fmt::OcRigInputType::Float && near(d.inputs[2].defFloat, 0.25f) &&
+                  d.inputs[3].type == fmt::OcRigInputType::Quat, "input types, spaces and defaults");
+            const fmt::OcRigOp& f = d.ops[0];
+            check(f.kind == fmt::OcRigOpKind::Fabrik && f.targetRef.kind == fmt::OcRigRef::Kind::Input && f.targetRef.name == "GunTarget" &&
+                  f.hintRef.kind == fmt::OcRigRef::Kind::Bone && f.hintRef.name == "elbow_r" && sameVec(f.hintRef.offset, Vec3{0, -30, 0}) &&
+                  f.hasPole && f.limits && f.iterations == 10 && f.hasTipRot && f.rotRef.name == "Grip" && f.weightInput == "Aim",
+                  "fabrik: root/tip, @input goal, bone: pole with offset, iter, limits, tiprot, weight=@input");
+            check(d.ops[1].kind == fmt::OcRigOpKind::Ccd && d.ops[1].iterations == 12 && near(d.ops[1].maxStepDeg, 20.0f) && !d.ops[1].hasPole, "ccd: step, no pole");
+            check(d.ops[2].kind == fmt::OcRigOpKind::CopyBone && d.ops[2].dst == "ik_hand_l" && d.ops[2].root == "hand_r" &&
+                  d.ops[2].copyPos && !d.ops[2].copyRot && d.ops[2].modelSpace, "copybone: dst, src, pos/rot flags, space");
+            check(d.ops[3].kind == fmt::OcRigOpKind::SetBone && !d.ops[3].modelSpace && d.ops[3].copyPos && d.ops[3].copyRot &&
+                  near(d.ops[3].rotation.w, 1.0f), "setbone: literal pos and rot, local space");
+            check(d.ops[4].targetRef.kind == fmt::OcRigRef::Kind::Bone && sameVec(d.ops[4].targetRef.offset, Vec3{0, 0, 5}) &&
+                  sameVec(d.ops[4].hint, Vec3{0, 50, 0}), "twobone accepts references too, and keeps its literal pole");
+        }
+        check(d.needsV2(), "it needs v2");
+        const std::string back = fmt::writeOcRig(d);
+        check(back.rfind("OCRIG 2\n", 0) == 0, "and is written as OCRIG 2");
+        fmt::OcRigData e;
+        check(fmt::parseOcRig(back, e, &err), "the written text parses again: " + err);
+        check(fmt::writeOcRig(e) == back, "and a second write is byte-identical");
+        check(back == v2, "which here is exactly the text that was read");
+    }
+
+    AVER_INFO("=== v2 validity and grammar errors ===");
+    {
+        const struct { const char* text; const char* what; } bad[] = {
+            {"OCRIG 2\nOP fabrik root=a tip=b goal=@Nope\n",                          "an @name that is not a declared INPUT"},
+            {"OCRIG 2\nINPUT A float default=0\nOP fabrik root=a tip=b goal=@A\n",    "a float input used as a vector"},
+            {"OCRIG 2\nINPUT A vec3 space=world\nOP fabrik root=a tip=b goal=@A weight=@A\n", "a vector input used as a weight"},
+            {"OCRIG 2\nINPUT A vec3 space=world\nINPUT A float default=0\n",           "a duplicate INPUT"},
+            {"OCRIG 2\nINPUT A matrix\n",                                              "an unknown INPUT type"},
+            {"OCRIG 2\nOP fabrik root=a tip=a goal=0,0,0\n",                           "fabrik with root == tip"},
+            {"OCRIG 2\nOP fabrik root=a tip=b goal=0,0,0 iter=99\n",                   "99 iterations"},
+            {"OCRIG 2\nOP copybone dst=a src=a\n",                                     "copybone onto itself"},
+            {"OCRIG 2\nOP copybone src=a\n",                                           "copybone with no dst"},
+            {"OCRIG 2\nOP fabrik root=a tip=b goal=bone:+1,2,3\n",                     "a bone: reference with no name"},
+            {"OCRIG 2\nOP fabrik root=a tip=b goal=bone:x+1,2\n",                      "a bone: offset with two components"},
+            {"OCRIG 2\nOP setbone bone=a rot=1,2,3\n",                                 "a quaternion with three components"},
+            {"OCRIG 2\nOP twobone root=a mid=b tip=c pos=1\n",                         "pos= on a twobone"},
+        };
+        for (const auto& c : bad) {
+            fmt::OcRigData x;
+            std::string why;
+            const bool ok = fmt::parseOcRig(c.text, x, &why);
+            check(!ok, std::string(c.what) + " is refused");
+            if (!ok) check(!why.empty(), std::string("  ...and says why: ") + why);
+        }
+        fmt::OcRigData x;
+        std::string why;
+        fmt::parseOcRig("OCRIG 2\nNAME X\n\nOP aim bone=head at=1,2\n", x, &why);
+        check(why.find("line 4") != std::string::npos, "a grammar error names its line, got: " + why);
+        // The old reader's version gate: a v1-only reader refuses OCRIG 2 with the unsupported-version text.
+        check(!fmt::parseOcRig("OCRIG 9\n", x, &why) && why.find("unsupported .ocrig version") != std::string::npos,
+              "an unknown version says so");
     }
 
     AVER_INFO("=== an empty rig is legal ===");

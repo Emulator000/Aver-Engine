@@ -668,3 +668,78 @@ add_executable(MontageEditorTest
 target_include_directories(MontageEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(MontageEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(MontageEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# MotionDbEditorTest -- the .ocmotion editor tab's headless core (docs/ANIM_MOTION_MATCHING.md): the structural
+# edits (tags, tag ranges and clip entries repair each other), content references, a build and a bake against
+# real files in a temp tree, the query lab, and the tab's load / save / dirty / undo bookkeeping. Same arrangement
+# as MontageEditorTest: compiles the editor source directly, AVER_WITH_IMGUI left undefined.
+add_executable(MotionDbEditorTest
+  src/MotionDbEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/MotionDbEditor.cpp)
+target_include_directories(MotionDbEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(MotionDbEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MotionDbEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# [wave5/sequencer] SequenceCurveOpsTest / SequenceTrackOpsTest -- the Sequencer's curve and track editing with no UI
+# (tangent presets, retiming and inserting keys on a Hermite curve; new tracks, the property field list, sections that
+# never overlap, the editing form <-> file form, .ocseq export refusals), and SequenceEditorTest -- the editor model:
+# all of a level's sequences load and save, switching, the preview writes and their undo, render poses, .ocseq import.
+# SandboxApp is add_executable-only, so the editor sources compile directly with AVER_WITH_IMGUI left undefined.
+if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.Scene)
+  add_executable(SequenceCurveOpsTest
+    src/SequenceCurveOpsTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SequenceCurveOps.cpp)
+  target_include_directories(SequenceCurveOpsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(SequenceCurveOpsTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(SequenceCurveOpsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+  add_executable(SequenceTrackOpsTest
+    src/SequenceTrackOpsTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SequenceTrackOps.cpp)
+  target_include_directories(SequenceTrackOpsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(SequenceTrackOpsTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(SequenceTrackOpsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+  add_executable(SequenceEditorTest
+    src/SequenceEditorTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SequenceEditor.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SequenceCurveView.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SequenceTrackOps.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SequenceCurveOps.cpp)
+  target_include_directories(SequenceEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(SequenceEditorTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(SequenceEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# [wave5/ik-retarget] The IK Rig, IK Retargeter and Control Rig editor tabs' headless cores and the skeleton view's
+# camera math (docs/plans/wave5/IK_RETARGETING.md section 8). Same arrangement as MontageEditorTest: the editor sources
+# are compiled directly with AVER_WITH_IMGUI left undefined, so the edits (renames that repair references, accept masks,
+# input renames), the problems lists, the batch driver against a temp tree and the load / save / dirty / undo bookkeeping
+# are checked with no UI.
+add_executable(RigPreviewTest
+  src/RigPreviewTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/RigPreview.cpp)
+target_include_directories(RigPreviewTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(RigPreviewTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(RigPreviewTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(IkRigEditorTest
+  src/IkRigEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/IkRigEditor.cpp)
+target_include_directories(IkRigEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(IkRigEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(IkRigEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(RetargetEditorTest
+  src/RetargetEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/RetargetEditor.cpp)
+target_include_directories(RetargetEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(RetargetEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(RetargetEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(RigEditorTest
+  src/RigEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/RigEditor.cpp)
+target_include_directories(RigEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(RigEditorTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(RigEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

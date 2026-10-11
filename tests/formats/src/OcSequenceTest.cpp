@@ -321,6 +321,165 @@ int main() {
               "fps is clamped to 1..1000 on read");
     }
 
+    // ---- [wave5/sequencer] the new track kinds, tags, tangents and bindings -----------------------------
+    {
+        using K = fmt::OcSeqTrackKind;
+        using I = fmt::OcSeqInterp;
+        fmt::OcWorldData w;
+        w.name = "Tracks";
+        w.placements.push_back(place("a.ocmesh"));
+        w.placements.push_back(place("b.ocmesh"));
+        fmt::OcSequence sq;
+        sq.name = "Cutscene";
+
+        fmt::OcSeqTrack tf;   // a transform track with a Cubic key and slopes
+        tf.kind = K::Transform;
+        tf.target = 1;
+        tf.keys.push_back(key(0.0, I::Smooth, {0, 0, 100, 0, 0, 0, 1, 1, 1}));
+        fmt::OcSeqKey ck = key(4.5, I::Cubic, {400, 0, 100, 90, 0, 0, 1, 1, 1});
+        ck.tan = {0, 0, 80, 80};
+        for (int i = 0; i < 14; ++i) ck.tan.push_back(i % 3);
+        tf.keys.push_back(ck);
+        sq.tracks.push_back(tf);
+
+        fmt::OcSeqTrack cam;   // two named cameras, one riding an actor
+        cam.kind = K::Camera;
+        cam.name = "Wide Shot";
+        cam.keys.push_back(key(0.0, I::Smooth, {-500, 0, 150, 0, -10}));
+        sq.tracks.push_back(cam);
+        fmt::OcSeqTrack crane;
+        crane.kind = K::Camera;
+        crane.name = "Crane";
+        crane.target = 0;
+        sq.tracks.push_back(crane);
+
+        fmt::OcSeqTrack cut;
+        cut.kind = K::CameraCut;
+        { fmt::OcSeqKey a = key(0.0, I::Step, {}); a.text = "Wide Shot"; cut.keys.push_back(a); }
+        { fmt::OcSeqKey a = key(6.0, I::Step, {1.5}); a.text = "Crane"; cut.keys.push_back(a); }
+        sq.tracks.push_back(cut);
+
+        fmt::OcSeqTrack prop;   // bound by name, percent-encoded
+        prop.kind = K::Property;
+        prop.bind = "Lamp 100%";
+        prop.property = "CLight.intensityLux";
+        prop.keys.push_back(key(0.0, I::Linear, {2000}));
+        prop.keys.push_back(key(3.0, I::Cubic, {9000}));
+        sq.tracks.push_back(prop);
+
+        fmt::OcSeqTrack vis;
+        vis.kind = K::Visibility;
+        vis.target = 0;
+        { fmt::OcSeqKey a = key(2.0, I::Step, {0, 1}); vis.keys.push_back(a); }
+        { fmt::OcSeqKey a = key(5.0, I::Step, {1, 0}); vis.keys.push_back(a); }   // not including children
+        sq.tracks.push_back(vis);
+
+        fmt::OcSeqTrack ev;
+        ev.kind = K::Event;
+        { fmt::OcSeqKey a = key(4.0, I::Step, {0, 1, 0.5}); a.text = "Door_Open"; a.arg = "lever a"; ev.keys.push_back(a); }
+        sq.tracks.push_back(ev);
+
+        fmt::OcSeqTrack au;
+        au.kind = K::Audio;
+        au.target = 1;
+        { fmt::OcSeqKey a = key(1.0, I::Step, {0, 0, 0, 1, 0, 0, 0.75, 1.5}); a.dur = 3.2; a.text = "Audio/door creak.wav"; au.keys.push_back(a); }
+        sq.tracks.push_back(au);
+
+        fmt::OcSeqTrack an;
+        an.kind = K::Animation;
+        an.target = 0;
+        { fmt::OcSeqKey a = key(2.0, I::Step, {0.5, 0.2, 0.2, 1, 1}); a.dur = 4; a.text = "Anims/wave.ocanim"; an.keys.push_back(a); }
+        sq.tracks.push_back(an);
+
+        fmt::OcSeqTrack sub;
+        sub.kind = K::SubSequence;
+        sub.name = "Explosion";
+        { fmt::OcSeqKey a = key(10.0, I::Step, {}); a.dur = 3; a.text = "Explosion"; sub.keys.push_back(a); }
+        sq.tracks.push_back(sub);
+
+        fmt::OcSeqTrack muted;
+        muted.kind = K::Material;
+        muted.target = 1;
+        muted.mute = true;
+        muted.keys.push_back(key(0.0, I::Smooth, {1, 1, 1, 2}));
+        sq.tracks.push_back(muted);
+        w.sequences.push_back(sq);
+
+        const std::string text = fmt::writeOcworld(w);
+        fmt::OcWorldData r;
+        check(fmt::parseOcworld(text, r, &err), "a level with every track kind parses: " + err);
+        check(r.sequences.size() == 1 && r.sequences[0].tracks.size() == sq.tracks.size(), "every track comes back");
+        if (r.sequences.size() == 1 && r.sequences[0].tracks.size() == sq.tracks.size()) {
+            const auto& t = r.sequences[0].tracks;
+            check(t[0].keys[1].interp == I::Cubic && t[0].keys[1].tan == ck.tan, "cubic and its tangent slopes round-trip");
+            check(t[1].name == "Wide Shot" && t[1].target == -1 && t[2].name == "Crane" && t[2].target >= 0,
+                  "named cameras round-trip, the actor camera keeps its target");
+            check(t[3].kind == K::CameraCut && t[3].keys.size() == 2 && t[3].keys[1].text == "Crane" && t[3].keys[1].v[0] == 1.5,
+                  "cut keys carry the camera name and the blend");
+            check(t[4].bind == "Lamp 100%" && t[4].target == -1 && t[4].property == "CLight.intensityLux",
+                  "bind survives percent-encoding with a space and a percent sign");
+            check(t[5].keys.size() == 2 && t[5].keys[0].v[1] == 1 && t[5].keys[1].v[1] == 0, "visibility keeps its include-children flag");
+            check(t[6].keys[0].text == "Door_Open" && t[6].keys[0].arg == "lever a" && t[6].keys[0].v[1] == 1 && t[6].keys[0].v[2] == 0.5,
+                  "event name, string argument and numeric arguments round-trip");
+            check(t[7].keys[0].dur == 3.2 && t[7].keys[0].text == "Audio/door creak.wav" && t[7].keys[0].v[6] == 0.75 && t[7].keys[0].v[7] == 1.5,
+                  "an audio section keeps dur, text and its trailing values");
+            check(t[8].keys[0].dur == 4 && t[8].keys[0].v[0] == 0.5 && t[8].keys[0].v[4] == 1, "an animation section round-trips");
+            check(t[9].kind == K::SubSequence && t[9].keys[0].text == "Explosion" && t[9].keys[0].dur == 3, "a sub-sequence section round-trips");
+            check(t[10].mute && t[10].kind == K::Material, "mute round-trips");
+        }
+        check(fmt::writeOcworld(r) == text, "and the whole block is byte-stable");
+
+        // The numeric run stops at the first tag; an unknown interpolation word is Smooth; an unknown kind and its keys are ignored.
+        const std::string tags =
+            "OCWORLD 1\nSEQUENCE name T\n"
+            "SEQTRACK event\nSEQKEY 1 step 0 2 7 8 text Boom arg x\n"
+            "SEQTRACK transform target 0\nSEQKEY 2 bounce 1 2 3\n"
+            "SEQTRACK hologram target 0\nSEQKEY 3 smooth 9 9 9\n"
+            "ENDSEQUENCE\n";
+        fmt::OcWorldData tg;
+        check(fmt::parseOcworld(tags, tg, &err) && tg.sequences.size() == 1 && tg.sequences[0].tracks.size() == 2,
+              "an unknown track kind is skipped with its keys");
+        if (tg.sequences.size() == 1 && tg.sequences[0].tracks.size() == 2) {
+            const fmt::OcSeqKey& e = tg.sequences[0].tracks[0].keys[0];
+            check(e.v[1] == 2 && e.v[2] == 7 && e.v[3] == 8 && e.text == "Boom" && e.arg == "x", "the numeric run ends at the first tag");
+            check(tg.sequences[0].tracks[1].keys[0].interp == I::Smooth, "an unknown interpolation word reads as Smooth");
+        }
+
+        // Targets renumber correctly with bind tracks interleaved; a bind track needs no placement.
+        fmt::OcWorldData rn = makeLevel();   // lamp (child of table), table, floor: emitted table, lamp, floor
+        rn.sequences.clear();
+        fmt::OcSequence s2;
+        s2.name = "R";
+        fmt::OcSeqTrack a1; a1.kind = K::Transform; a1.target = 0; a1.keys.push_back(key(0, I::Smooth, {1, 2, 3, 0, 0, 0, 1, 1, 1})); s2.tracks.push_back(a1);
+        fmt::OcSeqTrack b1; b1.kind = K::Visibility; b1.bind = "Sun Lamp"; b1.keys.push_back(key(1, I::Step, {1, 1})); s2.tracks.push_back(b1);
+        fmt::OcSeqTrack a2; a2.kind = K::Visibility; a2.target = 1; a2.keys.push_back(key(1, I::Step, {0, 1})); s2.tracks.push_back(a2);
+        rn.sequences.push_back(s2);
+        fmt::OcWorldData rb;
+        check(fmt::parseOcworld(fmt::writeOcworld(rn), rb, &err) && rb.sequences.size() == 1 && rb.sequences[0].tracks.size() == 3,
+              "bind tracks interleave with targets");
+        if (rb.sequences.size() == 1 && rb.sequences[0].tracks.size() == 3) {
+            const auto& t = rb.sequences[0].tracks;
+            check(t[0].target == 1 && t[1].target == -1 && t[1].bind == "Sun Lamp" && t[2].target == 0,
+                  "targets renumber, the bind track keeps its name and no target");
+        }
+
+        // Number spelling: a time past 1000 s keeps its millisecond; ordinary values still print short.
+        fmt::OcWorldData ns;
+        ns.name = "Num";
+        fmt::OcSequence s3;
+        s3.length = 2000;
+        fmt::OcSeqTrack c3;
+        c3.kind = K::Camera;
+        c3.keys.push_back(key(1234.567, I::Smooth, {0.1, 0, 0, 0, 0}));
+        s3.tracks.push_back(c3);
+        ns.sequences.push_back(s3);
+        const std::string nt = fmt::writeOcworld(ns);
+        fmt::OcWorldData nr;
+        check(fmt::parseOcworld(nt, nr, &err) && nr.sequences.size() == 1 && nr.sequences[0].tracks[0].keys[0].t == 1234.567,
+              "t = 1234.567 survives a round trip");
+        check(contains(nt, "SEQKEY 1234.567 smooth 0.1 "), "and 0.1 still writes as 0.1");
+    }
+
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== PASS: {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== FAIL: {} assertions, {} FAILED ===", g_checks, g_failures);

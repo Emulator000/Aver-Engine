@@ -33,6 +33,11 @@ add_executable(Sandbox WIN32
   src/ActorEditor.cpp
   src/AnimEditor.cpp
   src/SequenceEditor.cpp
+  # [wave5/sequencer begin] headless track / curve editing and the Curves view
+  src/SequenceTrackOps.cpp
+  src/SequenceCurveOps.cpp
+  src/SequenceCurveView.cpp
+  # [wave5/sequencer end]
   src/SandboxSequenceRun.cpp
   # wave3: the Landscape mode's Paint tab (layers, brush, foliage scatter, terrain material editor) and Water tab (rivers, lakes).
   src/LandscapePaintTool.cpp
@@ -78,6 +83,13 @@ add_executable(Sandbox WIN32
   src/BlendSpaceEditor.cpp
   src/AnimStateMachineEditor.cpp
   src/MontageEditor.cpp
+  # [wave5/ik-retarget] IK Rig, IK Retargeter and Control Rig editors, and the skeleton view they share.
+  src/RigPreview.cpp
+  src/IkRigEditor.cpp
+  src/RetargetEditor.cpp
+  src/RigEditor.cpp
+  src/MotionDbEditor.cpp
+  src/MotionDebugOverlay.cpp
   src/PrefabEditorModel.cpp
   src/PrefabEditorUi.cpp
   # [wave3/level-instances begin] Level instances: the model and the ImGui half, and the SandboxApp members that wire them.

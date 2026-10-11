@@ -1972,6 +1972,16 @@ void SandboxApp::onRender(Engine& e)  {
         }
     }
 #endif
+#if AVER_MODULE_SCENE
+    // Motion-matching overlay (Show > Motion Matching): the same line-mesh route, world-space vertices.
+    if (motionDebugMesh_) { e.device()->destroyLineMesh(motionDebugMesh_); motionDebugMesh_ = 0; }
+    editor::motionDebugCollect(motionDebug_, motionDebugFrame_);
+    if (motionDebug_.any() && !noEditorChrome_ && !motionDebugFrame_.lines.empty()) {
+        motionDebugMesh_ = e.device()->createLineMesh(motionDebugFrame_.lines.data(), static_cast<u32>(motionDebugFrame_.lines.size()));
+        const Mat4 mmId = Mat4::identity();
+        if (motionDebugMesh_) e.device()->drawLines(motionDebugMesh_, &mmId.m[0][0]);
+    }
+#endif
 #if AVER_MODULE_PHYSICS
     // ---- COLLIDERS, which could not be seen at all until now --------------------------------
     // No collider overlay, toggle or wireframe existed before; the drawLines infrastructure was
@@ -2008,6 +2018,11 @@ void SandboxApp::onRender(Engine& e)  {
     if (aiDebug_.any() && !noEditorChrome_)
         editor::aiDebugDrawLabels(synapse::aiDebug(), viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
                                   static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, aiDebug_.labelMaxDistanceCm);
+#endif
+#if AVER_MODULE_SCENE && AVER_WITH_IMGUI
+    if (motionDebug_.any() && !noEditorChrome_)
+        editor::motionDebugDrawLabels(motionDebugFrame_, viewProj_, static_cast<f32>(vpX_), static_cast<f32>(vpY_),
+                                      static_cast<f32>(vpW_), static_cast<f32>(vpH_), eye_, motionDebug_.labelMaxDistanceCm);
 #endif
 #if AVER_WITH_IMGUI
     uiReg_.endFrame();

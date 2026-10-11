@@ -19,6 +19,8 @@
 #  include "aver/scene/World.hpp"
 #  include "aver/anim/AnimSystem.hpp"
 #  include "aver/anim/AnimGraphSystem.hpp"
+#  include "aver/anim/ControlRig.hpp"
+#  include "aver/anim/MotionMatchSystem.hpp"
 #endif
 #if AVER_MODULE_AUDIO_SCENE
 #  include "aver/audio/AudioScene.hpp"
@@ -122,6 +124,8 @@ inline void registerGameSystems() {
     anim::AnimGraphSystem::registerComponents(world);
     anim::AnimSystem::registerComponents(world);   // CRootMotion
     anim::animGraphSystem().install(anim::animSystem(), world);
+    anim::MotionMatchSystem::registerComponents(world);                        // motion matching: wave 5 #25
+    anim::motionMatchSystem().install(anim::animSystem(), world);              // after the graph: it chains behind it
 #endif
 #if AVER_MODULE_AUDIO_SCENE
     audio::audioSceneSystem().registerComponents(scene::World::instance());
@@ -161,6 +165,7 @@ inline void removeCrowdGpu(rhi::IDevice* dev, synapse::GpuCrowdBackend& backend)
 // samples is this frame's.
 inline void tickAnimGraphs(f32 dt) {
 #if AVER_MODULE_SCENE
+    anim::motionMatchSystem().tick(scene::World::instance(), dt);   // queries first: the machines' matcher layers read them
     anim::animGraphSystem().tick(scene::World::instance(), dt);
 #else
     (void)dt;
@@ -172,7 +177,10 @@ inline void tickAnimGraphs(f32 dt) {
 inline void resetGameSystems() {
 #if AVER_MODULE_SCENE
     anim::animGraphSystem().clear();
+    anim::motionMatchSystem().clear();   // after the graph: its matcher layers point into these databases
     anim::animSystem().montages().stopAll();
+    anim::controlRigSystem().clearRuntime();   // [wave5/ik-retarget] rig inputs, IK goals, foot smoothing
+    anim::controlRigSystem().clear();          // and the loaded rigs, so an edited .ocrig / .ocikrig is read afresh
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
     synapse::btSystem().clearStateTrees();   // AI: wave 3 #21 -- instances only; before the boards their tasks may read

@@ -455,7 +455,9 @@ On the timeline, click a key to select it (Ctrl or Shift adds to the selection, 
 
 `scripts/seq-ab.py` runs one pass per setting and compares them: `python scripts/seq-ab.py <level> --out <dir> --denoiser 0 1 2 --every 4 --common "--render-scale 0.5"`. Runs are named `none`, `ffx`, `nrd2` for `--denoiser 0 1 2`, or given by `--run NAME="ARGS"`. It writes `<dir>/<run>/seq_*.png`, side-by-side images with amplified difference panels in `<dir>/compare/`, and `summary.txt` / `summary.csv` (mean, p99 and max pixel delta against the reference run, PSNR, the share of pixels over a threshold, tile islands as in `scripts/shots.py diff`, and per-run flicker, the mean change between consecutive captured frames). `--compare-only` redoes the comparison on an existing `<dir>`. A run is a headed process on the real GPU, so close the editor first, and note that ray noise and a denoiser's history make two runs of the same setting differ slightly: compare the runs' summaries, not single pixels.
 
-**Limits.** One sequence per level and one camera track. The capture is the viewport as presented (after AverSR and the tonemap) cropped from the window, so the window and panel layout must be the same between runs of a comparison; the script runs them back to back on one machine. Sequence camera keys are not undoable through the level's own Ctrl+Z.
+**More than camera and transform tracks.** The Sequencer window now also holds property, visibility, event, audio, animation and sub-sequence tracks, several named cameras with camera cuts, several sequences per level, and a Curves view with tangent handles; see `docs/SEQUENCER.md`.
+
+**Limits.** The capture is the viewport as presented (after AverSR and the tonemap) cropped from the window, so the window and panel layout must be the same between runs of a comparison; the script runs them back to back on one machine. Sequence camera keys are not undoable through the level's own Ctrl+Z.
 
 ---
 

@@ -2,6 +2,7 @@
 #include "aver/anim/AnimGraphSystem.hpp"
 
 #include "aver/anim/AnimGraphAsset.hpp"
+#include "aver/anim/MotionMatchSystem.hpp"
 #include "aver/core/Assert.hpp"
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
@@ -114,8 +115,8 @@ const BlendSpaceAsset* AnimGraphSystem::spaceFor(const std::string& ref) {
     return (spaces_[id] = std::move(space)).get();
 }
 
-const fmt::OcAnimation* AnimGraphSystem::clipFor(const std::string& ref) {
-    return anim_ ? anim_->clip(fnv1a64(std::string_view(ref))) : nullptr;
+const fmt::OcAnimation* AnimGraphSystem::clipFor(const std::string& ref, u64 skeleton) {
+    return anim_ ? anim_->clipFor(fnv1a64(std::string_view(ref)), skeleton) : nullptr;
 }
 
 void AnimGraphSystem::tick(scene::World& world, f32 dt) {
@@ -135,17 +136,35 @@ void AnimGraphSystem::tick(scene::World& world, f32 dt) {
             if (!world.hasComponent(e, scene::kComponentAnimator)) world.addComponent(e, scene::kComponentAnimator);
 
             Instance& inst = instances_[e];
-            if (!inst.sm || inst.machine != c->machine) {
+            const auto* skmRt = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
+            const u64 skelId = skmRt ? skmRt->skeleton : 0;
+            const bool retargetStale = inst.sm && (inst.skeleton != skelId || inst.retargetEpoch != anim_->retargetEpoch());
+            if (!inst.sm || inst.machine != c->machine || retargetStale) {
                 inst.machine = c->machine;
+                inst.skeleton = skelId;
+                inst.retargetEpoch = anim_->retargetEpoch();
                 inst.sm = std::make_unique<AnimStateMachine>();
                 inst.sm->bind(&loaded->asset,
-                              [this](const std::string& r) { return clipFor(r); },
+                              [this, skelId](const std::string& r) { return clipFor(r, skelId); },
                               [this](const std::string& r) { return spaceFor(r); });
                 inst.pipe = AnimPipeline{};
                 inst.pipeSkel = nullptr;
+                if (loaded->asset.usesMotionMatch())
+                    inst.sm->setMotionResolver([e](const std::string& r) {
+                        return motionMatchSystem().databaseFor(e, fnv1a64(std::string_view(r)));
+                    });
             }
             inst.stamp = stamp_;
             AnimStateMachine& sm = *inst.sm;
+
+            // Motion-matching states: a script drives the trajectory through the entity's CMotionMatcher, and
+            // the machine's matcher layers read the query MotionMatchSystem built for it this frame.
+            if (loaded->asset.usesMotionMatch()) {
+                MotionMatchSystem::ensure(world, e);
+                const auto* skm = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
+                sm.setMotionContext((skm && skm->skeleton) ? anim_->skeleton(skm->skeleton) : nullptr,
+                                    motionMatchSystem().query(e));
+            }
 
             // The pipeline binds against the entity's skeleton as soon as one resolves (and again if the
             // entity is pointed at another rig).
@@ -154,7 +173,7 @@ void AnimGraphSystem::tick(scene::World& world, f32 dt) {
                 const fmt::OcSkeleton* sk = (skm && skm->skeleton) ? anim_->skeleton(skm->skeleton) : nullptr;
                 if (sk && inst.pipeSkel != sk) {
                     inst.pipe.bind(&loaded->asset.pipeline, sk,
-                                   [this](const std::string& r) { return clipFor(r); },
+                                   [this, skelId](const std::string& r) { return clipFor(r, skelId); },
                                    [this](const std::string& r) { return spaceFor(r); });
                     inst.pipeSkel = sk;
                 }

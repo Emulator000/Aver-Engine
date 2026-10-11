@@ -19,6 +19,11 @@ aver_add_module(Aver.Anim.Scene
     src/AnimGraphSystem.cpp
     # Montages (slots, sections, blend in/out) and the provider the framework relays to.
     src/AnimMontages.cpp
+    # Motion matching on entities (CMotionMatcher): databases, trajectory queries, the standalone pose source.
+    src/MotionMatchSystem.cpp
+    # IK Rig runtime (CIkRig: foot placement, goals, body) and the runtime retarget bake (docs/plans/wave5/IK_RETARGETING.md).
+    src/IkRigSystem.cpp
+    src/AnimRetarget.cpp
   DEPS
     Aver.Anim
     Aver.Scene

@@ -46,6 +46,12 @@ public class AverCharacter : AverPawn
     /// <summary>Ground move speed, centimetres per second.</summary>
     public float MoveSpeed = 350f;
 
+    /// <summary>Seconds for the body's horizontal velocity to close half the gap to the wanted velocity (a
+    /// critically damped approach). 0, the default, keeps the instantaneous velocity write every existing game
+    /// has. Used only on a character with a CMotionMatcher (<see cref="Entity.SetMotionMatching"/>): the body
+    /// then accelerates the way the matcher's predicted trajectory assumes, so the feet do not slide.</summary>
+    public float MotionHalfLife = 0f;
+
     /// <summary>Mouse-look sensitivity, degrees of yaw per pixel of mouse movement.</summary>
     public float TurnSpeed = 0.2f;
 
@@ -236,6 +242,7 @@ public class AverCharacter : AverPawn
 
         Vec3 wish = WalkForward * moveAxis.X + WalkRight * moveAxis.Y;
         wish = wish.Normalized * MoveSpeed;
+        UpdateMotionMatching(wish, dt);
 
         if (_capsule == 0)
         {
@@ -247,8 +254,50 @@ public class AverCharacter : AverPawn
 
         Vec3 v = Velocity;
         float vx = wish.X, vy = wish.Y, vz = v.Z;
+        if (_mmEase) EaseHorizontal(wish.X, wish.Y, v.X, v.Y, dt, out vx, out vy);
         ApplyRootMotion(ref vx, ref vy, ref vz);
         Phys.aver_phys_character_set_velocity(_capsule, vx, vy, vz);
+    }
+
+    // MOTION MATCHING. The matcher is told where the character wants to go (the raw wish, and the facing: this
+    // character always faces its mouse-look yaw), and with MotionHalfLife > 0 the body approaches that wish with
+    // the same critically damped spring the matcher predicts with, so the pose it picks and the body agree.
+    // Whether the entity has a matcher is checked once a second, not every tick.
+    private const float MotionSpringK = 1.67835f;   // root of (1 + z) e^-z = 0.5, as in Trajectory.hpp
+    private bool _mmPresent, _mmEase, _mmSeeded;
+    private float _mmCheck, _mmAx, _mmAy;
+
+    private void UpdateMotionMatching(Vec3 wish, float dt)
+    {
+        _mmCheck -= dt;
+        if (_mmCheck <= 0f)
+        {
+            _mmCheck = 1f;
+            _mmPresent = Self.HasComponent("CMotionMatcher");
+        }
+        _mmEase = _mmPresent && MotionHalfLife > 0f;
+        if (!_mmEase) _mmSeeded = false;
+        if (_mmPresent) Self.SetMotionInput(wish.X, wish.Y, _yaw);
+    }
+
+    // The body's current velocity is the spring's state (so a wall that stops it is respected); only the
+    // acceleration is carried between frames.
+    private void EaseHorizontal(float wishX, float wishY, float curX, float curY, float dt, out float vx, out float vy)
+    {
+        if (!_mmSeeded) { _mmAx = _mmAy = 0f; _mmSeeded = true; }
+        float g = MotionSpringK / MathF.Max(MotionHalfLife, 1e-4f);
+        float e = MathF.Exp(-g * dt);
+        vx = SpringStep(curX, ref _mmAx, wishX, g, e, dt);
+        vy = SpringStep(curY, ref _mmAy, wishY, g, e, dt);
+    }
+
+    private static float SpringStep(float v, ref float a, float target, float g, float e, float dt)
+    {
+        float x = v - target;
+        float j = a + g * x;
+        float xd = x + j * dt;
+        a = (j - g * xd) * e;
+        return target + xd * e;
     }
 
     // ROOT MOTION FOR A CAPSULE. The animation system cannot see the capsule handle, so with mode Apply

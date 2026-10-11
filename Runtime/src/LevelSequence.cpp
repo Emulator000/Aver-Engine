@@ -7,10 +7,6 @@
 #include <cmath>
 #include <unordered_set>
 
-#if AVER_MODULE_SCENE
-#include "aver/scene/World.hpp"
-#endif
-
 namespace aver::game {
 
 namespace {
@@ -53,6 +49,21 @@ f64 catmullRom(f64 p0, f64 p1, f64 p2, f64 p3, f64 u) {
                   (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * u3);
 }
 
+// Cubic Hermite across k1 -> k2 with the keys' own slopes (or the automatic ones): the leave slope of k1
+// and the arrive slope of k2.
+f64 hermite(const std::vector<OcSeqKey>& keys, const Seg& s, int c) {
+    const OcSeqKey& a = keys[s.k1];
+    const OcSeqKey& b = keys[s.k2];
+    if (s.k1 == s.k2) return a.v[c];
+    const f64 dt = b.t - a.t;
+    f64 m1 = 0, m2 = 0, unused = 0;
+    seqEffectiveTangent(keys, s.k1, static_cast<u32>(c), unused, m1);
+    seqEffectiveTangent(keys, s.k2, static_cast<u32>(c), m2, unused);
+    const f64 u = s.u, u2 = u * u, u3 = u2 * u;
+    return (2.0 * u3 - 3.0 * u2 + 1.0) * a.v[c] + (u3 - 2.0 * u2 + u) * dt * m1 +
+           (-2.0 * u3 + 3.0 * u2) * b.v[c] + (u3 - u2) * dt * m2;
+}
+
 // One scalar channel across the segment.
 f64 sampleChannel(const std::vector<OcSeqKey>& keys, const Seg& s, int c) {
     const f64 p0 = keys[s.k0].v[c], p1 = keys[s.k1].v[c], p2 = keys[s.k2].v[c], p3 = keys[s.k3].v[c];
@@ -60,6 +71,7 @@ f64 sampleChannel(const std::vector<OcSeqKey>& keys, const Seg& s, int c) {
         case OcSeqInterp::Step:   return p1;
         case OcSeqInterp::Linear: return p1 + (p2 - p1) * s.u;
         case OcSeqInterp::Smooth: return catmullRom(p0, p1, p2, p3, s.u);
+        case OcSeqInterp::Cubic:  return hermite(keys, s, c);
     }
     return p1;
 }
@@ -190,6 +202,11 @@ bool sampleSeqTransform(const OcSeqTrack& track, f64 t, Transform& out) {
                         f(sampleChannel(track.keys, s, 2))};
     out.scale    = Vec3{f(sampleChannel(track.keys, s, 6)), f(sampleChannel(track.keys, s, 7)),
                         f(sampleChannel(track.keys, s, 8))};
+    if (s.interp == OcSeqInterp::Cubic) {   // Hermite on the authored Euler degrees: no short arc
+        out.rotation = world::quatFromEulerDeg(Vec3{f(sampleChannel(track.keys, s, 5)), f(sampleChannel(track.keys, s, 4)),
+                                                    f(sampleChannel(track.keys, s, 3))});
+        return true;
+    }
     const Quat q1 = keyRotation(track.keys[s.k1]);
     if (s.interp == OcSeqInterp::Step || s.k1 == s.k2) {
         out.rotation = q1;
@@ -213,6 +230,12 @@ bool sampleSeqCamera(const OcSeqTrack& track, f64 t, SeqCameraPose& out) {
     };
     if (s.k1 == s.k2 || s.interp == OcSeqInterp::Step || s.u <= 0.0) { setKey(keys[s.k1]); return true; }
     if (s.u >= 1.0) { setKey(keys[s.k2]); return true; }
+    if (s.interp == OcSeqInterp::Cubic) {   // Hermite on position and on the authored yaw / pitch degrees
+        out.position = Vec3{f(sampleChannel(keys, s, 0)), f(sampleChannel(keys, s, 1)), f(sampleChannel(keys, s, 2))};
+        out.yaw = f(sampleChannel(keys, s, 3) * kDeg2Rad);
+        out.pitch = f(sampleChannel(keys, s, 4) * kDeg2Rad);
+        return true;
+    }
 
     V3 pos;
     Q q;
@@ -260,84 +283,163 @@ void seqKeyFromCamera(const SeqCameraPose& pose, fmt::OcSeqKey& key) {
     key.v[4] = pose.pitch * kRad2Deg;
 }
 
-#if AVER_MODULE_SCENE
-
-scene::Entity SequencePlayer::entityOf(i32 placement) const {
-    if (placement < 0 || static_cast<usize>(placement) >= placementEntities_.size()) return scene::kInvalidEntity;
-    return placementEntities_[static_cast<usize>(placement)];
-}
+// ---- curves, tangents, sections, crossings ----------------------------------------------------------
 
 namespace {
-std::vector<scene::Entity> entitiesOf(const SequencePlayer& p, bool material) {
-    std::vector<scene::Entity> out;
-    std::unordered_set<scene::Entity> seen;
-    for (const OcSeqTrack& tr : p.sequence().tracks) {
-        const bool wanted = tr.kind == OcSeqTrackKind::Transform || (material && tr.kind == OcSeqTrackKind::Material);
-        if (!wanted) continue;
-        const scene::Entity e = p.entityOf(tr.target);
-        if (e != scene::kInvalidEntity && seen.insert(e).second) out.push_back(e);
-    }
-    return out;
+
+f64 smooth01(f64 u) {
+    u = std::clamp(u, 0.0, 1.0);
+    return u * u * (3.0 - 2.0 * u);
 }
+
+bool isRotationChannel(OcSeqTrackKind k, u32 c) {
+    return (k == OcSeqTrackKind::Transform && c >= 3 && c <= 5) || (k == OcSeqTrackKind::Camera && (c == 3 || c == 4));
+}
+
 } // namespace
 
-std::vector<scene::Entity> SequencePlayer::boundEntities() const { return entitiesOf(*this, true); }
-std::vector<scene::Entity> SequencePlayer::transformEntities() const { return entitiesOf(*this, false); }
-
-void SequencePlayer::advance(f64 dt) {
-    if (!playing_) return;
-    time_ += dt;
-    if (seq_.loop) {
-        time_ = seqWrapTime(seq_, time_);
-    } else if (time_ >= seq_.length) {
-        time_ = std::max(seq_.length, 0.0);
-        playing_ = false;
+u32 seqChannelCount(const OcSeqTrack& track, u32 propertyArity) {
+    switch (track.kind) {
+        case OcSeqTrackKind::Transform: return 9;
+        case OcSeqTrackKind::Camera:    return 5;
+        case OcSeqTrackKind::Material:  return 4;
+        case OcSeqTrackKind::Property:  return std::min(propertyArity, 4u);
+        default:                        return 0;
     }
 }
 
-void SequencePlayer::evaluate(scene::World& world) {
-    emissive_.clear();
-    hasCamera_ = false;
-    const f64 t = seqWrapTime(seq_, time_);
-    for (const OcSeqTrack& tr : seq_.tracks) {
-        switch (tr.kind) {
-            case OcSeqTrackKind::Transform: {
-                const scene::Entity e = entityOf(tr.target);
-                Transform xf;
-                if (e != scene::kInvalidEntity && world.valid(e) && sampleSeqTransform(tr, t, xf))
-                    world.setLocalTransform(e, xf);
-                break;
-            }
-            case OcSeqTrackKind::Camera: {
-                SeqCameraPose pose;
-                if (!hasCamera_ && sampleSeqCamera(tr, t, pose)) { camera_ = pose; hasCamera_ = true; }
-                break;
-            }
-            case OcSeqTrackKind::Material: {
-                const scene::Entity e = entityOf(tr.target);
-                f32 rgb[3];
-                if (e != scene::kInvalidEntity && sampleSeqMaterial(tr, t, rgb))
-                    emissive_[e] = {rgb[0], rgb[1], rgb[2]};
-                break;
-            }
+void seqAutoTangent(const std::vector<OcSeqKey>& keys, usize key, u32 channel, f64& arrive, f64& leave) {
+    arrive = leave = 0.0;
+    const usize n = keys.size();
+    if (n < 2 || key >= n || channel >= 9) return;
+    const usize a = key > 0 ? key - 1 : key;
+    const usize b = key + 1 < n ? key + 1 : key;
+    const f64 dt = keys[b].t - keys[a].t;
+    if (dt <= 1e-12) return;
+    arrive = leave = (keys[b].v[channel] - keys[a].v[channel]) / dt;
+}
+
+void seqEffectiveTangent(const std::vector<OcSeqKey>& keys, usize key, u32 channel, f64& arrive, f64& leave) {
+    if (key < keys.size()) {
+        const std::vector<f64>& tan = keys[key].tan;
+        if (tan.size() > 2u * channel + 1u) {
+            arrive = tan[2u * channel];
+            leave = tan[2u * channel + 1u];
+            return;
         }
     }
+    seqAutoTangent(keys, key, channel, arrive, leave);
 }
 
-bool SequencePlayer::camera(SeqCameraPose& out) const {
-    if (!hasCamera_) return false;
-    out = camera_;
+f64 sampleSeqChannel(const OcSeqTrack& track, u32 channel, f64 t) {
+    if (track.keys.empty() || channel >= 9) return 0.0;
+    const std::vector<OcSeqKey>& keys = track.keys;
+    const Seg s = findSeg(keys, t);
+    const int c = static_cast<int>(channel);
+    if (isRotationChannel(track.kind, channel) && s.interp != OcSeqInterp::Cubic) {
+        // The authored degrees, eased the way the rotation slerp eases its parameter.
+        const f64 v1 = keys[s.k1].v[c], v2 = keys[s.k2].v[c];
+        if (s.k1 == s.k2 || s.interp == OcSeqInterp::Step) return v1;
+        const f64 w = s.interp == OcSeqInterp::Smooth ? smooth01(s.u) : s.u;
+        f64 approx = v1 + (v2 - v1) * w;
+        if (track.kind == OcSeqTrackKind::Camera && s.interp == OcSeqInterp::Smooth) {
+            // The camera's squad is not an Euler lerp: take its real yaw / pitch, unwrapped next to the lerp.
+            SeqCameraPose pose;
+            if (sampleSeqCamera(track, t, pose)) {
+                constexpr f64 kRad2Deg = 180.0 / 3.14159265358979323846;
+                const f64 d = (channel == 3 ? pose.yaw : pose.pitch) * kRad2Deg;
+                return channel == 3 ? d + 360.0 * std::round((approx - d) / 360.0) : d;
+            }
+        }
+        return approx;
+    }
+    if (track.kind == OcSeqTrackKind::Camera && channel < 3 && s.interp == OcSeqInterp::Smooth) {
+        SeqCameraPose pose;   // the centripetal spline, not the uniform one
+        if (sampleSeqCamera(track, t, pose)) return channel == 0 ? pose.position.x : channel == 1 ? pose.position.y : pose.position.z;
+    }
+    return sampleChannel(keys, s, c);
+}
+
+bool sampleSeqProperty(const OcSeqTrack& track, f64 t, bool quat, bool stepOnly, f64 out[4]) {
+    if (track.keys.empty()) return false;
+    const std::vector<OcSeqKey>& keys = track.keys;
+    Seg s = findSeg(keys, t);
+    if (stepOnly) s.interp = OcSeqInterp::Step;
+    if (quat) {
+        const auto q = [&](const OcSeqKey& k) { return normalize(Q{k.v[3], k.v[0], k.v[1], k.v[2]}); };
+        Q r = q(keys[s.k1]);
+        if (s.k1 != s.k2 && s.interp != OcSeqInterp::Step) {
+            const f64 w = s.interp == OcSeqInterp::Linear ? s.u : smooth01(s.u);   // Cubic reads as Smooth
+            r = normalize(slerpQ(r, q(keys[s.k2]), w));
+        }
+        out[0] = r.x; out[1] = r.y; out[2] = r.z; out[3] = r.w;
+        return true;
+    }
+    for (int c = 0; c < 4; ++c) out[c] = sampleChannel(keys, s, c);
     return true;
 }
 
-bool SequencePlayer::emissiveScale(scene::Entity e, f32 out[3]) const {
-    if (emissive_.empty()) return false;
-    const auto it = emissive_.find(e);
-    if (it == emissive_.end()) return false;
-    out[0] = it->second[0]; out[1] = it->second[1]; out[2] = it->second[2];
-    return true;
+const OcSeqKey* seqActiveSection(const OcSeqTrack& track, f64 t, bool holdAfter, f64& local) {
+    const std::vector<OcSeqKey>& keys = track.keys;
+    usize n = 0;   // keys starting at or before t (sorted)
+    while (n < keys.size() && keys[n].t <= t) ++n;
+    local = 0.0;
+    if (n == 0) return nullptr;
+    const OcSeqKey& k = keys[n - 1];
+    local = t - k.t;
+    if (t < k.t + k.dur) return &k;
+    return holdAfter ? &k : nullptr;
 }
 
-#endif
+f32 seqSectionWeight(const OcSeqKey& key, f64 local, f64 fadeIn, f64 fadeOut) {
+    if (local < 0.0) return 0.0f;
+    f64 w = 1.0;
+    if (fadeIn > 1e-9 && local < fadeIn) w *= smooth01(local / fadeIn);
+    if (fadeOut > 1e-9 && key.dur > 0.0) {
+        if (local >= key.dur) return 0.0f;
+        const f64 left = key.dur - local;
+        if (left < fadeOut) w *= smooth01(left / fadeOut);
+    }
+    return f(w);
+}
+
+usize seqCrossedKeys(const OcSeqTrack& track, f64 t0, f64 t1, bool inclusiveStart, f64 length, bool loop,
+                     std::vector<u32>& out) {
+    out.clear();
+    const std::vector<OcSeqKey>& keys = track.keys;
+    const auto from = [&](f64 kt) { return inclusiveStart ? kt >= t0 : kt > t0; };
+    if (t1 >= t0) {
+        for (usize i = 0; i < keys.size(); ++i)
+            if (from(keys[i].t) && keys[i].t <= t1) out.push_back(static_cast<u32>(i));
+    } else if (loop && length > 0.0) {   // a wrap: (t0, length] and then [0, t1]
+        for (usize i = 0; i < keys.size(); ++i)
+            if (from(keys[i].t) && keys[i].t <= length) out.push_back(static_cast<u32>(i));
+        for (usize i = 0; i < keys.size(); ++i)
+            if (keys[i].t >= 0.0 && keys[i].t <= t1) out.push_back(static_cast<u32>(i));
+    }
+    return out.size();
+}
+
+bool sampleSeqCut(const OcSeqTrack& cuts, f64 t, std::string& camera, std::string& prevCamera, f32& blendAlpha) {
+    camera.clear();
+    prevCamera.clear();
+    blendAlpha = 1.0f;
+    const std::vector<OcSeqKey>& keys = cuts.keys;
+    if (keys.empty()) return false;
+    usize n = 0;
+    while (n < keys.size() && keys[n].t <= t) ++n;
+    if (n == 0) return true;   // before the first cut: the caller's first camera
+    const OcSeqKey& k = keys[n - 1];
+    camera = k.text;
+    const f64 blend = k.v[0];
+    if (n >= 2 && blend > 1e-9) {
+        const f64 u = (t - k.t) / blend;
+        if (u < 1.0) {
+            blendAlpha = f(smooth01(u));
+            prevCamera = keys[n - 2].text;
+        }
+    }
+    return true;
+}
 
 } // namespace aver::game

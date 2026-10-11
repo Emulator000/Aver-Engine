@@ -540,11 +540,50 @@ editor::SequenceHost SandboxApp::sequenceHost() {
         return !prefabSys_.isLinked(ent);
     };
     h.setEditorCamera = [this](const game::SeqCameraPose& p) { camPos_ = p.position; yaw_ = p.yaw; pitch_ = p.pitch; };
+    // [wave5/sequencer] Bindings by name: the outliner label is the name a level saves for a placement, a light or a
+    // class actor; the scene's own entity name is the fallback.
+    h.findByName = [this](const std::string& name) -> scene::Entity {
+        scene::World& w = scene::World::instance();
+        for (const auto& kv : entityLabels_)
+            if (kv.second == name && w.valid(static_cast<scene::Entity>(kv.first))) return static_cast<scene::Entity>(kv.first);
+        return w.find(name);
+    };
+    h.nameCount = [this](const std::string& name) {
+        int n = 0;
+        for (const auto& kv : entityLabels_) n += kv.second == name ? 1 : 0;
+        return n;
+    };
+    h.bindName = [this](scene::Entity ent) { return sequenceBindName(ent); };
+    // Any actor a non-transform track may drive: not a decal, not a prefab member.
+    h.canBind = [this](scene::Entity ent) {
+        scene::World& w = scene::World::instance();
+        return w.valid(ent) && !w.hasComponent(ent, scene::kComponentDecal) && !prefabSys_.isLinked(ent);
+    };
+    h.contentRelative = [this](const std::string& full) -> std::string {
+        std::error_code ec;
+        const std::filesystem::path rel = std::filesystem::relative(full, project_.contentDir(), ec);
+        if (ec || rel.empty() || *rel.begin() == "..") return {};
+        return rel.generic_string();
+    };
+    h.contentFull = [this](const std::string& rel) -> std::string {
+        const std::filesystem::path p(rel);
+        return p.is_absolute() ? rel : (std::filesystem::path(project_.contentDir()) / p).make_preferred().string();
+    };
     // Not undoable, so the mark has to survive an undo and clear only on save.
     h.markLevelDirty = [this]() { markLevelUnsaved(); };
     h.vpX = vpX_; h.vpY = vpY_; h.vpW = vpW_; h.vpH = vpH_;
     h.levelFocused = levelFocused_;
     return h;
+}
+
+// A .ocseq opened from the Content Browser: the sequencer takes its sequences into the open level (actors bound by name).
+bool SandboxApp::openSequenceFile(const std::string& fullPath) {
+    if (levelPath_.empty()) { cbStatus_ = "Open a level first: a sequence file binds the open level's actors by name"; return false; }
+    setEditorMode(EditorMode::Animate);
+    const editor::SequenceHost h = sequenceHost();
+    const bool ok = seqEditor_.importOcseq(fullPath, h.findByName);
+    cbStatus_ = seqEditor_.status();
+    return ok;
 }
 
 void SandboxApp::buildAnimateModePanel() {

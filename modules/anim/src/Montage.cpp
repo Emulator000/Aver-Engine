@@ -71,7 +71,7 @@ bool MontagePlayer::bind(const MontageAsset* asset, MontageClipFn clips) {
     cur_ = 0;
     a_ = 0.0f;
     state_ = State::Idle;
-    additive_ = rootMotion_ = atEnd_ = inclusive_ = notifying_ = refReady_ = false;
+    additive_ = rootMotion_ = atEnd_ = inclusive_ = notifying_ = refReady_ = driven_ = false;
     rootAcc_ = RootDelta{};
     if (!asset) return false;
 
@@ -246,6 +246,20 @@ bool MontagePlayer::setNextSection(i32 from, i32 to) {
 
 void MontagePlayer::setRate(f32 r) { rate_ = std::max(r, 0.0f); }
 
+void MontagePlayer::drive(f32 position, f32 w) {
+    if (!asset_ || secs_.empty()) return;
+    driven_ = true;
+    events_.clear();
+    notifying_ = atEnd_ = inclusive_ = false;
+    rootAcc_ = RootDelta{};
+    pos_ = std::min(std::max(position, 0.0f), length_);
+    cur_ = 0;
+    for (usize i = 0; i < secs_.size(); ++i)
+        if (secs_[i].start <= pos_) cur_ = static_cast<i32>(i);
+    a_ = clamp01(w);
+    state_ = State::Hold;
+}
+
 i32 MontagePlayer::nextOf(i32 cur) const {
     const usize c = static_cast<usize>(cur);
     const i32 link = override_[c] != kNoOverride ? override_[c] : secs_[c].link;
@@ -372,6 +386,7 @@ void MontagePlayer::closeOutside() {
 
 f32 MontagePlayer::weight() const {
     if (state_ == State::Idle || state_ == State::Done || !asset_) return 0.0f;
+    if (driven_) return clamp01(a_);
     return applyCurve(state_ == State::Out ? asset_->outCurve : asset_->inCurve, a_);
 }
 

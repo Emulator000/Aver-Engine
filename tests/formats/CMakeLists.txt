@@ -341,7 +341,7 @@ set_target_properties(MakeSamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 # it must also be added to scripts/payload.allowlist's [bin] section, or a downloaded engine has
 # nothing for the launcher to invoke.
 add_executable(AverAssetC ${CMAKE_SOURCE_DIR}/tools/AverAssetC.cpp)
-target_link_libraries(AverAssetC PRIVATE Aver.Formats Aver.Core Aver.Platform)
+target_link_libraries(AverAssetC PRIVATE Aver.Formats Aver.Core Aver.Platform Aver.Anim)   # Aver.Anim: the `retarget` subcommand
 set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # The .ocworld Euler encoding (aver/world/LevelTransform.hpp) for the rotated placements a USD
 # PointInstancer produces. Header-only and Core-only, so an include directory and no link -- the
@@ -463,6 +463,12 @@ set_target_properties(TextureSrgbTableTest PROPERTIES
 add_executable(OcSequenceTest src/OcSequenceTest.cpp)
 target_link_libraries(OcSequenceTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcSequenceTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# [wave5/sequencer] OcSeqFileTest -- the standalone .ocseq file and the shared record code: the header gate,
+# actors bound by name only, dropped tracks, several sequences.
+add_executable(OcSeqFileTest src/OcSeqFileTest.cpp)
+target_link_libraries(OcSeqFileTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcSeqFileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # LightFormatTest -- IES (LM-63) profiles and the .ocworld LIGHT record: symmetry unfolding, the
 # flux-preserving table normalisation, half-float packing, refusals with a reason, and the LIGHT

@@ -136,6 +136,10 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "BlendSpaceEditor.hpp"
 #include "AnimStateMachineEditor.hpp"
 #include "MontageEditor.hpp"
+#include "IkRigEditor.hpp"      // [wave5/ik-retarget]
+#include "RetargetEditor.hpp"
+#include "RigEditor.hpp"
+#include "MotionDbEditor.hpp"
 #include "SoundEditor.hpp"
 // Guarded: ParticleEditor.hpp includes OcParticle.hpp, which sandbox/CMakeLists.txt links only
 // `if(TARGET Aver.Formats.Particles)` (gated on Aver.Particles). With AVER_MODULE_PARTICLES=OFF
@@ -170,6 +174,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/game/SceneDecalFeed.hpp"
 #endif
 #if AVER_MODULE_SCENE
+#include "MotionDebugOverlay.hpp"   // motion matching overlay (wave 5 #25)
 // [wave3/level-instances begin] Level instances in the editor (docs/LEVEL_INSTANCES.md).
 #include "LevelInstanceEditorUi.hpp"
 #include "aver/game/LevelInstancesAbiHost.hpp"
@@ -2722,6 +2727,15 @@ private:
     void cbCreateBlendSpace();
     void cbCreateStateMachine();
     void cbCreateMontage();
+    // [wave5/ik-retarget] A starter .ocikrig (chains suggested from the skeleton's bone names when one is given), a
+    // starter .ocretarget from a source skeleton (target left for the tab), and a starter .ocrig. With a skeleton path
+    // the asset is created beside it; without, in the selected folder.
+    void cbCreateIkRig(const std::string& skeletonPath = {});
+    void cbCreateRetarget(const std::string& sourceSkeletonPath = {});
+    void cbCreateRig();
+    bool cbOpenRetargetFor(const std::string& targetSkeletonPath);
+    void cbCreateMotionDb();   // a starter .ocmotion (motion matching database)
+    void cbCreateSequence();   // [wave5/sequencer] a starter .ocseq
 
     // Writes a starter .ocinput (Input Scheme) and opens it.
     void cbCreateInputScheme();
@@ -2914,8 +2928,13 @@ private:
     void buildAnimateModePanel();
     void buildSequencerWindow();
     editor::SequenceHost sequenceHost();
-    // Between animSystem().tick and World::flush, every frame.
-    void tickSequence(Engine& e, f32 dt);
+    // [wave5/sequencer] The frame's two sequence steps. Pre: before the animation graphs and AnimSystem::tick
+    // (render-queue pose, clock, property / visibility / animation / event / audio tracks). Post: after the tick,
+    // before World::flush (transform, emissive, camera).
+    void tickSequencePre(Engine& e, f32 dt);
+    void tickSequencePost();
+    // Opens a .ocseq as the Sequencer's current sequence (Content Browser double-click).
+    bool openSequenceFile(const std::string& fullPath);
     // The --sequence-play driver (SandboxSequenceRun.cpp): steps the run before the sequence ticks,
     // reads and writes the numbered captures in onRender, and ends the process with its verdict.
     void sequenceRunStep(Engine& e);
@@ -3119,6 +3138,9 @@ private:
     bool showDecals_ = true;                  // Show > Decals: dim boxes for every decal, not just the selected one
     editor::AiDebugOptions aiDebug_;          // Show > AI: sight cones, hearing, path, steering, BT state, cover
     rhi::LineHandle aiDebugMesh_ = 0;         // this frame's AI debug lines (rebuilt every frame an option is on)
+    editor::MotionDebugOptions motionDebug_;   // Show > Motion Matching: trajectories, matched row, labels
+    editor::MotionDebugFrame motionDebugFrame_;
+    rhi::LineHandle motionDebugMesh_ = 0;     // this frame's motion-matching lines
     // PREFABS: the library (loaded assets), the system (instances in the world), the editor's operations on
     // them and the Create Prefab dialog. The system's hooks keep levelEntities_, labels and bodies in step.
     prefab::PrefabLibrary prefabLib_;
@@ -4001,6 +4023,8 @@ private:
                                 fmt::OcWorldPlacement& p, bool& keepParent);
     void adoptNewLevelEntities();
     void appendStreamedSequenceTracks(fmt::OcWorldData& w);
+    // [wave5/sequencer] The name a sequence track binds an actor by: its outliner label when no other actor shares it.
+    std::string sequenceBindName(scene::Entity ent) const;
     bool regenerateStreamData(std::string& report);
     void refreshStreamRecord(scene::Entity e, u32 placement, fmt::OcWorldPlacement p);
     void pinStreamed(scene::Entity e);
@@ -4021,7 +4045,8 @@ private:
     std::unordered_set<u32> streamPlayResident_; // streamed entities resident when Play started
     std::vector<i32> streamOutSlot_;             // record index -> saved placement line, last save
     std::vector<fmt::OcSeqTrack> streamSeqTracks_;   // object tracks of a streamed level, kept aside
-    fmt::OcSequence streamSeqHeader_;
+    std::vector<std::string> streamSeqOwner_;        // [wave5/sequencer] the sequence (by name) each aside track belongs to
+    std::vector<fmt::OcSequence> streamSeqHeaders_;  // the level's sequences without tracks, to rebuild them on save
     // Label each streamed entity got when it streamed in (a changed label is a rename), and what is pinned.
     std::unordered_map<u32, std::string> streamLabel_;
     std::unordered_set<u32> streamPinned_;
@@ -4085,6 +4110,7 @@ private:
     // The level's sequence (Animate mode, Play). Its camera and emissive reach the frame through
     // viewOverride_ and DrawWorldOptions::emissiveScale.
     editor::SequenceEditor seqEditor_;
+    std::string seqHooksDir_;   // [wave5/sequencer] the content dir seqEditor_'s audio / event hooks were built for
     rhi::LineHandle seqPathMesh_ = 0;
     u64 seqPathStamp_ = 0;
     struct SequenceRunState {

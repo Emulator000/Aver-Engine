@@ -351,6 +351,13 @@ void SandboxApp::cbOpenEntry(const std::string& full, bool isDir) {
 #endif
         return;
     }
+#if AVER_MODULE_SCENE
+    // [wave5/sequencer] A sequence file opens in the Sequencer, bound by name to the open level's actors.
+    if (ext == ".ocseq") {
+        if (openSequenceFile(full)) cbStatus_ = "Opened in the Sequencer";
+        return;
+    }
+#endif
     if (assetEditors_.open(full)) { cbStatus_ = "Opened in the asset editor"; return; }
     if (cbIsSourceFile(ext)) {
         const editor::IdeInfo& ide = cbIde();
@@ -742,6 +749,120 @@ void SandboxApp::cbCreateMontage() {
     if (!anim::saveMontage(target.string(), editor::montageStarter(), &why)) {
         cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
         AVER_ERROR("[Editor] new montage failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// [wave5/ik-retarget] A starter .ocikrig. Given a skeleton file the rig is made beside it with chains suggested from
+// the skeleton's bone names (spine CCD, arms and legs two-bone, pelvis body, feet); otherwise an empty one in the
+// selected folder.
+void SandboxApp::cbCreateIkRig(const std::string& skeletonPath) {
+    anim::IkRigAsset rig = editor::ikrigStarter("");
+    std::string stem = "NewIkRig";
+    if (!skeletonPath.empty()) {
+        fmt::OcSkeleton skel;
+        std::string why;
+        if (!fmt::loadOcSkel(skeletonPath, skel, &why)) {
+            cbStatus_ = "Could not read the skeleton: " + why;
+            return;
+        }
+        cbSelectedDir_ = std::filesystem::path(skeletonPath).parent_path().string();
+        stem = std::filesystem::path(skeletonPath).stem().string() + "Ik";
+    }
+    const std::filesystem::path target = cbFreeAssetPath(stem.c_str(), ".ocikrig");
+    if (target.empty()) return;
+    if (!skeletonPath.empty()) {
+        fmt::OcSkeleton skel;
+        fmt::loadOcSkel(skeletonPath, skel, nullptr);
+        rig = editor::ikrigSuggest(skel, editor::mtgClipRefFromPath(target.string(), skeletonPath));
+    }
+    rig.name = target.stem().string();
+    std::string why;
+    if (!anim::saveIkRig(target.string(), rig, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new IK rig failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// [wave5/ik-retarget] A starter .ocretarget whose source is the given skeleton; pick the target in the tab.
+void SandboxApp::cbCreateRetarget(const std::string& sourceSkeletonPath) {
+    std::string stem = "NewRetargeter";
+    if (!sourceSkeletonPath.empty()) {
+        cbSelectedDir_ = std::filesystem::path(sourceSkeletonPath).parent_path().string();
+        stem = std::filesystem::path(sourceSkeletonPath).stem().string() + "_Retarget";
+    }
+    const std::filesystem::path target = cbFreeAssetPath(stem.c_str(), ".ocretarget");
+    if (target.empty()) return;
+    anim::RetargetAsset a = editor::rtgStarter(
+        sourceSkeletonPath.empty() ? std::string() : editor::mtgClipRefFromPath(target.string(), sourceSkeletonPath), "");
+    a.name = target.stem().string();
+    std::string why;
+    if (!anim::saveRetarget(target.string(), a, &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new retargeter failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// [wave5/ik-retarget] The Anim tab's "Retarget to this skeleton...": opens the project's retargeter whose target is that
+// skeleton when exactly one exists. False (with a status line) when there is none or several.
+bool SandboxApp::cbOpenRetargetFor(const std::string& targetSkeletonPath) {
+    std::vector<std::string> matches;
+    for (const std::string& rp : content_.pathsWithExtension(".ocretarget")) {
+        anim::RetargetAsset a;
+        if (!anim::loadRetarget(rp, a, nullptr) || a.target.empty()) continue;
+        std::string want = editor::mtgClipRefFromPath(rp, targetSkeletonPath), have = a.target;
+        std::replace(have.begin(), have.end(), '\\', '/');
+        auto lower = [](std::string s) { for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+        if (lower(want) == lower(have)) matches.push_back(rp);
+    }
+    if (matches.size() == 1) { assetEditors_.open(matches[0]); return true; }
+    cbStatus_ = matches.empty() ? "No retargeter in this project targets that skeleton: create one from the source skeleton's tab."
+                                : "Several retargeters target that skeleton: open the one you want from the Content Browser.";
+    return false;
+}
+
+// [wave5/ik-retarget] A starter .ocrig (OCRIG 1, no ops).
+void SandboxApp::cbCreateRig() {
+    const std::filesystem::path target = cbFreeAssetPath("NewControlRig", ".ocrig");
+    if (target.empty()) return;
+    std::string why;
+    if (!fmt::saveOcRig(target.string(), editor::rigStarter(target.stem().string()), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new control rig failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// [wave5/sequencer] A starter .ocseq: one empty sequence, actors bound by name once it has tracks.
+void SandboxApp::cbCreateSequence() {
+    const std::filesystem::path target = cbFreeAssetPath("NewSequence", ".ocseq");
+    if (target.empty()) return;
+    fmt::OcSeqFile file;
+    file.sequences.emplace_back();
+    file.sequences.back().name = target.stem().string();
+    file.sequences.back().autoplay = false;
+    if (!writeFileText(target.string(), fmt::writeOcseq(file))) {
+        cbStatus_ = "Could not write " + target.filename().string();
+        AVER_ERROR("[Editor] new sequence failed: {}", target.string());
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+// A starter .ocmotion: no clips yet (the tab takes .ocanim drops), the engine's search and spring defaults.
+void SandboxApp::cbCreateMotionDb() {
+    const std::filesystem::path target = cbFreeAssetPath("NewMotionDatabase", ".ocmotion");
+    if (target.empty()) return;
+    std::string why;
+    if (!anim::saveMotionAsset(target.string(), editor::motionStarter(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new motion database failed: {}", why);
         return;
     }
     cbAdoptNewAsset(target);
@@ -1292,6 +1413,16 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.stateMachine");
         if (ImGui::MenuItem("New Animation Montage")) cbCreateMontage();
         uiReg_.track("cb.add.montage");
+        if (ImGui::MenuItem("New IK Rig"))          cbCreateIkRig();   // [wave5/ik-retarget]
+        uiReg_.track("cb.add.ikRig");
+        if (ImGui::MenuItem("New IK Retargeter"))   cbCreateRetarget();
+        uiReg_.track("cb.add.retarget");
+        if (ImGui::MenuItem("New Control Rig"))     cbCreateRig();
+        uiReg_.track("cb.add.controlRig");
+        if (ImGui::MenuItem("New Motion Matching Database")) cbCreateMotionDb();
+        uiReg_.track("cb.add.motionDb");
+        if (ImGui::MenuItem("New Level Sequence"))  cbCreateSequence();   // [wave5/sequencer]
+        uiReg_.track("cb.add.sequence");
         if (ImGui::MenuItem("New Sound Graph"))     cbCreateSoundGraph();
         uiReg_.track("cb.add.soundGraph");
 #if AVER_MODULE_PARTICLES
@@ -1925,6 +2056,12 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".ocblend",    {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Blend Space"}},
         {".ocasm",      {ICON_TREE,       IM_COL32(190, 140, 255, 255), "Animation State Machine"}},
         {".ocmontage",  {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Animation Montage"}},
+        {".ocikrig",    {ICON_TREE,       IM_COL32(255, 170, 110, 255), "IK Rig"}},                 // [wave5/ik-retarget]
+        {".ocretarget", {ICON_LINK,       IM_COL32(255, 170, 110, 255), "IK Retargeter"}},
+        {".ocrig",      {ICON_TUNE,       IM_COL32(255, 170, 110, 255), "Control Rig"}},
+        {".ocmotion",   {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Motion Matching Database"}},
+        {".ocmbake",    {ICON_FILE,       IM_COL32(150, 130, 190, 255), "Motion Matching Bake"}},
+        {".ocseq",      {ICON_WAVE,       IM_COL32(150, 190, 255, 255), "Level Sequence Asset"}},   // [wave5/sequencer]
         {".ocprefab",   {ICON_FILE,       IM_COL32( 90, 170, 255, 255), "Prefab"}},
         {".ocgraph",    {ICON_LINK,       IM_COL32( 63, 126, 255, 255), "Graph"}},
         {".ocnav",      {ICON_TERRAIN,    IM_COL32(150, 200, 120, 255), "Navigation"}},

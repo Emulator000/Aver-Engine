@@ -68,8 +68,9 @@ An axis with `smoothing > 0` follows the input with an exponential, `v += (targe
 params:   name, type (float | int | bool | trigger), default
 machines: [ root, sub-machines... ]           machines[0] is the root
   machine: name, entry, states, transitions
-  state:   name, kind (clip | blendspace | machine), asset, machine, speed, loop,
+  state:   name, kind (clip | blendspace | machine | motionmatch), asset, machine, speed, loop,
            speedParam, xParam, yParam, onEnter, onExit, pos
+           (motionmatch also: tagsRequired, tagsExcluded; asset is an .ocmotion; see ANIM_MOTION_MATCHING.md)
   transition: from (state | -1 = Any), to (state | -2 = Exit), blend, exitTime (-1 = none),
               interruptible, allowSelf, when: [ {param, op, value} ]
 ```

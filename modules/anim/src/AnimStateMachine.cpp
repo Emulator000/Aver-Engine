@@ -20,6 +20,13 @@ i32 AnimStateMachineAsset::paramIndex(const std::string& n) const {
     return -1;
 }
 
+bool AnimStateMachineAsset::usesMotionMatch() const {
+    for (const AsmMachine& m : machines)
+        for (const AsmState& s : m.states)
+            if (s.kind == AsmStateKind::MotionMatch) return true;
+    return false;
+}
+
 bool AnimStateMachineAsset::valid(std::string* why) const {
     auto fail = [&](const std::string& m) { if (why) *why = m; return false; };
     if (machines.empty()) return fail("no machines");
@@ -43,9 +50,19 @@ bool AnimStateMachineAsset::valid(std::string* why) const {
             } else if (s.asset.empty()) {
                 return fail("state '" + s.name + "' has no asset");
             }
+            if (s.kind == AsmStateKind::MotionMatch) {
+                if (s.tagsRequired.size() > kMaxMotionTags || s.tagsExcluded.size() > kMaxMotionTags)
+                    return fail("state '" + s.name + "' lists more than 32 tags");
+                for (const std::string& t : s.tagsRequired)
+                    if (t.empty()) return fail("state '" + s.name + "' has an empty required tag");
+                for (const std::string& t : s.tagsExcluded)
+                    if (t.empty()) return fail("state '" + s.name + "' has an empty excluded tag");
+            }
         }
         for (const AsmTransition& t : m.transitions) {
             if (t.from < kAsmAny || t.from >= sc) return fail("transition source out of range");
+            if (t.hasExitTime && t.from >= 0 && m.states[t.from].kind == AsmStateKind::MotionMatch)
+                return fail("motion-matching states do not end: state '" + m.states[t.from].name + "' cannot use an exit time");
             if (t.to == kAsmExit) {
                 if (mi == 0) return fail("the root machine has nothing to exit");
             } else if (t.to < 0 || t.to >= sc) {
@@ -149,6 +166,10 @@ void AnimStateMachine::pushLayer(i32 machine, i32 state, f32 blendTime) {
     if (s.kind == AsmStateKind::Clip) {
         l.clip = clips_ ? clips_(s.asset) : nullptr;
         l.duration = (l.clip && l.clip->duration > 0.0f) ? l.clip->duration : 1.0f;
+    } else if (s.kind == AsmStateKind::MotionMatch) {
+        l.mm = std::make_unique<MotionMatcher>();
+        l.isMotionMatch = true;
+        bindMotion(l, s);
     } else if (s.kind == AsmStateKind::BlendSpace) {
         const BlendSpaceAsset* space = spaces_ ? spaces_(s.asset) : nullptr;
         if (space && space->valid()) {
@@ -170,6 +191,25 @@ void AnimStateMachine::pushLayer(i32 machine, i32 state, f32 blendTime) {
         l.blendTime = blendTime;
     }
     layers_.push_back(std::move(l));
+}
+
+void AnimStateMachine::setMotionResolver(AsmMotionFn fn) { motion_ = std::move(fn); }
+
+void AnimStateMachine::setMotionContext(const fmt::OcSkeleton* skel, const MotionQuery* query) {
+    mmSkel_ = skel;
+    mmQuery_ = query;
+}
+
+// Binds a MotionMatch layer once its database resolves (it may still be loading) and the entity's skeleton is
+// known; a database / skeleton pair that failed to bind is not retried.
+void AnimStateMachine::bindMotion(Layer& l, const AsmState& s) {
+    if (!l.mm || !motion_ || !mmSkel_) return;
+    if (l.mm->bound() && l.mmSkel == mmSkel_) return;
+    const PoseDatabase* db = motion_(s.asset);
+    if (!db || (db == l.mmDb && mmSkel_ == l.mmSkel)) return;
+    l.mmDb = db;
+    l.mmSkel = mmSkel_;
+    l.mm->bind(db, mmSkel_, clips_);
 }
 
 f32 AnimStateMachine::paramByName(const std::string& n) const {
@@ -244,6 +284,7 @@ bool AnimStateMachine::conditionsHold(const AsmTransition& t) {
 
 bool AnimStateMachine::exitTimeReached(const AsmTransition& t, usize level) const {
     if (stateAt(path_[level]).kind == AsmStateKind::SubMachine) return path_[level].exited;
+    if (stateAt(path_[level]).kind == AsmStateKind::MotionMatch) return false;   // it never ends
     return normalizedTime() >= t.exitTime;
 }
 
@@ -294,7 +335,24 @@ void AnimStateMachine::tick(f32 dt) {
         const AsmState& s = asset_->machines[l.machine].states[l.state];
         const f32 speed = s.speed * (s.speedParam.empty() ? 1.0f : paramByName(s.speedParam));
         const f32 step = dt * speed;
-        if (l.isBlendSpace) {
+        if (l.isMotionMatch) {
+            // The matcher keeps its own clock, so it gets the raw dt and the speed as a play rate.
+            bindMotion(l, s);
+            if (l.mm && l.mm->bound()) {
+                l.mm->setRootMotion(hasRoot_, hasRoot_ ? rootSpec_.axes : 0);
+                if (mmQuery_ && mmQuery_->valid) {
+                    MotionQuery q = *mmQuery_;
+                    const PoseDatabase* db = l.mm->database();
+                    for (const std::string& t : s.tagsRequired) q.require |= db->tagBit(fnv1a64(t));
+                    for (const std::string& t : s.tagsExcluded) q.exclude |= db->tagBit(fnv1a64(t));
+                    MotionParams mp;
+                    mp.playRate = speed;
+                    l.mm->tick(dt, q, mp);
+                }
+                const RootDelta d = l.mm->consumeRootDelta();   // consumed either way so nothing accumulates
+                if (hasRoot_) deltas[li] = d;
+            }
+        } else if (l.isBlendSpace) {
             l.bs.setRootMotion(hasRoot_ ? &rootSpec_ : nullptr);
             l.bs.setInput(s.xParam.empty() ? 0.0f : paramByName(s.xParam),
                           s.yParam.empty() ? 0.0f : paramByName(s.yParam));
@@ -374,7 +432,10 @@ void AnimStateMachine::evaluate(const fmt::OcSkeleton& skel, Pose& out) const {
     for (usize i = 0; i < layers_.size(); ++i) {
         if (w[i] <= 0.0f) continue;
         const Layer& l = layers_[i];
-        if (l.isBlendSpace) {
+        if (l.isMotionMatch) {
+            if (l.mm) l.mm->evaluate(skel, tmp);
+            else restPose(skel, tmp);
+        } else if (l.isBlendSpace) {
             l.bs.evaluate(skel, tmp);
         } else {
             restPose(skel, tmp);

@@ -7,9 +7,11 @@
 
 #include "aver/anim/AnimPipeline.hpp"
 #include "aver/anim/BlendSpace.hpp"
+#include "aver/anim/MotionMatcher.hpp"
 #include "aver/anim/RootMotion.hpp"
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,7 +26,9 @@ struct AsmParam {
     f32 def = 0.0f;
 };
 
-enum class AsmStateKind : u8 { Clip = 0, BlendSpace = 1, SubMachine = 2 };
+// MotionMatch: the state plays a motion-matching database (.ocmotion in `asset`); it never ends, so a
+// transition leaving it cannot use an exit time.
+enum class AsmStateKind : u8 { Clip = 0, BlendSpace = 1, SubMachine = 2, MotionMatch = 3 };
 
 struct AsmState {
     std::string name;
@@ -37,6 +41,8 @@ struct AsmState {
     std::string xParam, yParam;   // blend-space axis inputs
     std::string onEnter, onExit;  // event names raised on entry / exit
     f32 posX = 0.0f, posY = 0.0f; // graph editor placement
+    // MotionMatch: pose-database tags the search must / must not land on (OR-ed with the entity's own).
+    std::vector<std::string> tagsRequired, tagsExcluded;
 };
 
 enum class AsmOp : u8 { Greater = 0, GreaterEq, Less, LessEq, Equal, NotEqual, IsTrue, IsFalse, Trigger };
@@ -78,6 +84,8 @@ struct AnimStateMachineAsset {
 
     bool valid(std::string* why = nullptr) const;
     i32 paramIndex(const std::string& name) const;
+    // True when any state is a MotionMatch state.
+    bool usesMotionMatch() const;
 };
 
 struct AsmEvent {
@@ -88,12 +96,20 @@ struct AsmEvent {
     std::string name;             // the state's onEnter/onExit; empty when it has none
 };
 
+// Resolves a MotionMatch state's asset reference to its pose database; null while it loads or after it failed.
+using AsmMotionFn = std::function<const PoseDatabase*(const std::string& assetRef)>;
+
 class AnimStateMachine {
 public:
     // Enters the root machine's entry state. The asset and whatever the resolvers return must
     // outlive the instance.
     void bind(const AnimStateMachineAsset* asset, AsmClipFn clips, AsmBlendSpaceFn spaces);
     bool bound() const { return asset_ != nullptr; }
+
+    // Motion matching: the resolver (before the first tick) and, every tick, the skeleton and the entity's
+    // query. A null query leaves MotionMatch layers idle on their last pose.
+    void setMotionResolver(AsmMotionFn fn);
+    void setMotionContext(const fmt::OcSkeleton* skel, const MotionQuery* query);
 
     void setFloat(const std::string& name, f32 v);
     void setInt(const std::string& name, i32 v);
@@ -150,12 +166,17 @@ private:
         f32 alpha = 1.0f;
         f32 blendTime = 0.0f;
         f32 blendElapsed = 0.0f;
+        std::unique_ptr<MotionMatcher> mm;   // MotionMatch states
+        bool isMotionMatch = false;
+        const PoseDatabase* mmDb = nullptr;  // the last database / skeleton a bind was attempted with
+        const fmt::OcSkeleton* mmSkel = nullptr;
     };
 
     bool conditionsHold(const AsmTransition& t);
     bool exitTimeReached(const AsmTransition& t, usize level) const;
     void fire(usize level, const AsmTransition& t, i32 target);
     void pushLayer(i32 machine, i32 state, f32 blendTime);
+    void bindMotion(Layer& l, const AsmState& s);
     void descend(std::vector<PathEl>& path) const;
     void raise(AsmEvent::Kind kind, const PathEl& el);
     f32 paramByName(const std::string& n) const;
@@ -164,6 +185,9 @@ private:
     const AnimStateMachineAsset* asset_ = nullptr;
     AsmClipFn clips_;
     AsmBlendSpaceFn spaces_;
+    AsmMotionFn motion_;
+    const fmt::OcSkeleton* mmSkel_ = nullptr;
+    const MotionQuery* mmQuery_ = nullptr;
     std::vector<f32> values_;
     std::vector<bool> triggers_;
     std::unordered_map<std::string, u32> index_;

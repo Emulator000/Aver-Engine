@@ -5,6 +5,7 @@
 #include "EditorKeybinds.hpp"
 
 #include "aver/anim/AnimGraphAsset.hpp"
+#include "aver/anim/MotionAsset.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
@@ -351,6 +352,70 @@ std::vector<std::string> asmPipelineSlotNames(const AnimStateMachineAsset& a) {
     return out;
 }
 
+bool asmSetStateMotionMatch(AnimStateMachineAsset& a, i32 machine, i32 state, const std::string& assetRef) {
+    if (!inMachines(a, machine)) return false;
+    AsmMachine& m = a.machines[static_cast<usize>(machine)];
+    if (!inStates(m, state)) return false;
+    AsmState& s = m.states[static_cast<usize>(state)];
+    if (s.kind == AsmStateKind::SubMachine) return false;
+    s.kind = AsmStateKind::MotionMatch;
+    s.asset = assetRef;
+    s.subMachine = -1;
+    return true;
+}
+
+std::vector<std::string> asmMotionProblems(const AnimStateMachineAsset& a) {
+    std::vector<std::string> out;
+    for (const AsmMachine& m : a.machines) {
+        for (usize i = 0; i < m.states.size(); ++i) {
+            const AsmState& s = m.states[i];
+            if (s.kind != AsmStateKind::MotionMatch) continue;
+            const std::string who = "state '" + s.name + "'";
+            if (s.asset.empty()) out.push_back(who + " names no motion database");
+            for (const std::string& t : s.tagsRequired)
+                if (t.empty()) { out.push_back(who + " has a blank required tag"); break; }
+            for (const std::string& t : s.tagsExcluded)
+                if (t.empty()) { out.push_back(who + " has a blank excluded tag"); break; }
+            if (s.tagsRequired.size() > anim::kMaxMotionTags || s.tagsExcluded.size() > anim::kMaxMotionTags)
+                out.push_back(who + " lists more than " + std::to_string(anim::kMaxMotionTags) + " tags");
+            for (const AsmTransition& t : m.transitions)
+                if (t.from == static_cast<i32>(i) && t.hasExitTime) {
+                    out.push_back("MM state has an exit-time transition: " + who + " never ends, so its exit-time transition never fires");
+                    break;
+                }
+        }
+    }
+    return out;
+}
+
+std::vector<std::string> asmProblems(const AnimStateMachineAsset& a) {
+    std::vector<std::string> out = asmMotionProblems(a);
+    for (std::string& p : asmPipelineProblems(a)) out.push_back(std::move(p));
+    return out;
+}
+
+std::vector<std::string> asmTagsFromText(const std::string& text) {
+    std::vector<std::string> out;
+    usize from = 0;
+    while (from <= text.size()) {
+        const usize comma = text.find(',', from);
+        std::string tok = text.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+        const usize b = tok.find_first_not_of(" \t");
+        const usize e = tok.find_last_not_of(" \t");
+        tok = b == std::string::npos ? std::string() : tok.substr(b, e - b + 1);
+        if (!tok.empty() && std::find(out.begin(), out.end(), tok) == out.end()) out.push_back(tok);
+        if (comma == std::string::npos) break;
+        from = comma + 1;
+    }
+    return out;
+}
+
+std::string asmTagsToText(const std::vector<std::string>& tags) {
+    std::string s;
+    for (usize i = 0; i < tags.size(); ++i) s += (i ? ", " : "") + tags[i];
+    return s;
+}
+
 std::vector<std::string> asmPipelineProblems(const AnimStateMachineAsset& a) {
     std::vector<std::string> out;
     std::vector<std::string> seen, reported;
@@ -460,6 +525,32 @@ void AnimStateMachineEditor::onFileChanged() {
     loadFromDisk();
 }
 
+const std::vector<std::string>& AnimStateMachineEditor::motionTags(const std::string& assetRef) {
+    const auto hit = motionTags_.find(assetRef);
+    if (hit != motionTags_.end()) return hit->second;
+    std::vector<std::string>& out = motionTags_[assetRef];
+    if (assetRef.empty()) return out;
+    // The reference is content-relative: try it under the nearest Content folder, then beside this file.
+    namespace fs = std::filesystem;
+    std::vector<fs::path> roots{fs::path(path_).parent_path()};
+    for (fs::path d = fs::path(path_).parent_path(); !d.empty(); d = d.parent_path()) {
+        std::string n = d.filename().string();
+        std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (n == "content") { roots.insert(roots.begin(), d); break; }
+        if (d == d.parent_path()) break;
+    }
+    for (const fs::path& r : roots) {
+        std::error_code ec;
+        const fs::path file = fs::path(assetRef).is_absolute() ? fs::path(assetRef) : r / assetRef;
+        anim::MotionAsset ma;
+        if (fs::is_regular_file(file, ec) && anim::loadMotionAsset(file.string(), ma)) {
+            out = ma.tags;
+            break;
+        }
+    }
+    return out;
+}
+
 const std::vector<std::string>& AnimStateMachineEditor::boneNames() {
     if (bonesScanned_) return bones_;
     bonesScanned_ = true;
@@ -508,7 +599,7 @@ void AnimStateMachineEditor::redo() {
 i32 AnimStateMachineEditor::addState(AsmStateKind kind, f32 x, f32 y) {
     if (!loaded_ || !inMachines(asset_, machine_)) return -1;
     pushUndo();
-    const char* base = kind == AsmStateKind::BlendSpace ? "BlendSpace" : "State";
+    const char* base = kind == AsmStateKind::BlendSpace ? "BlendSpace" : kind == AsmStateKind::MotionMatch ? "MotionMatch" : "State";
     const i32 idx = asmAddState(asset_.machines[static_cast<usize>(machine_)], kind, base, x, y);
     selectState(idx);
     markDirty();
@@ -567,13 +658,15 @@ namespace {
 constexpr i32 kLinkNone = -3;
 
 const char* kindLabel(AsmStateKind k) {
-    return k == AsmStateKind::Clip ? "Clip" : k == AsmStateKind::BlendSpace ? "Blend space" : "Sub-machine";
+    return k == AsmStateKind::Clip ? "Clip" : k == AsmStateKind::BlendSpace ? "Blend space"
+         : k == AsmStateKind::MotionMatch ? "Motion matching" : "Sub-machine";
 }
 
 ImU32 kindColor(AsmStateKind k) {
     return k == AsmStateKind::Clip ? IM_COL32(48, 84, 130, 255)
          : k == AsmStateKind::BlendSpace ? IM_COL32(38, 112, 108, 255)
-                                         : IM_COL32(104, 66, 140, 255);
+         : k == AsmStateKind::MotionMatch ? IM_COL32(150, 92, 40, 255)
+                                          : IM_COL32(104, 66, 140, 255);
 }
 
 void arrow(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col, f32 thick, f32 head) {
@@ -744,6 +837,7 @@ void AnimStateMachineEditor::drawCanvas() {
     if (ImGui::BeginPopup("##asmctx")) {
         if (ImGui::MenuItem("Add clip state")) addState(AsmStateKind::Clip, popupX_, popupY_);
         if (ImGui::MenuItem("Add blend-space state")) addState(AsmStateKind::BlendSpace, popupX_, popupY_);
+        if (ImGui::MenuItem("Add motion-matching state")) addState(AsmStateKind::MotionMatch, popupX_, popupY_);
         if (ImGui::MenuItem("Add sub-machine")) addSubMachine(popupX_, popupY_);
         ImGui::EndPopup();
     }
@@ -844,8 +938,9 @@ void AnimStateMachineEditor::drawDetails() {
         if (s.kind == AsmStateKind::SubMachine) {
             if (ImGui::Button("Open")) openMachine(s.subMachine);
         } else {
-            text(s.kind == AsmStateKind::Clip ? "Clip" : "Blend space (.ocblend)", s.asset);
-            touch(ImGui::DragFloat("Speed", &s.speed, 0.01f, 0.0f, 8.0f));
+            text(s.kind == AsmStateKind::Clip ? "Clip" : s.kind == AsmStateKind::MotionMatch ? "Motion database (.ocmotion)"
+                                                                                         : "Blend space (.ocblend)", s.asset);
+            touch(ImGui::DragFloat(s.kind == AsmStateKind::MotionMatch ? "Play rate" : "Speed", &s.speed, 0.01f, 0.0f, 8.0f));
             if (s.kind == AsmStateKind::Clip) touch(ImGui::Checkbox("Loop", &s.loop));
             auto paramCombo = [&](const char* label, std::string& field) {
                 if (ImGui::BeginCombo(label, field.empty() ? "(none)" : field.c_str())) {
@@ -859,6 +954,38 @@ void AnimStateMachineEditor::drawDetails() {
             if (s.kind == AsmStateKind::BlendSpace) {
                 paramCombo("Blend X parameter", s.xParam);
                 paramCombo("Blend Y parameter", s.yParam);
+            }
+            if (s.kind == AsmStateKind::MotionMatch) {
+                // Tags the search must / must not land on, OR-ed with the entity's own. The database's declared
+                // tags become checkboxes when its file is found; otherwise a comma list.
+                const std::vector<std::string> declared = motionTags(s.asset);
+                auto tagRow = [&](const char* label, std::vector<std::string>& list) {
+                    if (!declared.empty()) {
+                        ImGui::TextUnformatted(label);
+                        for (const std::string& tag : declared) {
+                            bool on = std::find(list.begin(), list.end(), tag) != list.end();
+                            ImGui::SameLine();
+                            if (ImGui::Checkbox((tag + "##" + label).c_str(), &on)) {
+                                pushUndo();
+                                if (on) list.push_back(tag);
+                                else list.erase(std::remove(list.begin(), list.end(), tag), list.end());
+                                markDirty();
+                            }
+                        }
+                    } else {
+                        char tb[256];
+                        std::snprintf(tb, sizeof tb, "%s", asmTagsToText(list).c_str());
+                        if (ImGui::InputText(label, tb, sizeof tb, ImGuiInputTextFlags_EnterReturnsTrue)) {
+                            pushUndo();
+                            list = asmTagsFromText(tb);
+                            markDirty();
+                        }
+                    }
+                };
+                tagRow("Tags required", s.tagsRequired);
+                tagRow("Tags excluded", s.tagsExcluded);
+                for (const std::string& p : asmMotionProblems(asset_))
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "%s", p.c_str());
             }
         }
         text("On enter event", s.onEnter);

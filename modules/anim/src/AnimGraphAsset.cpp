@@ -56,7 +56,7 @@ const char* paramTypeName(AsmParamType t) {
 }
 
 const char* kindName(AsmStateKind k) {
-    static const char* n[] = {"clip", "blendspace", "machine"};
+    static const char* n[] = {"clip", "blendspace", "machine", "motionmatch"};
     return n[static_cast<int>(k)];
 }
 
@@ -231,7 +231,7 @@ bool loadBlendSpace(const std::string& path, BlendSpaceAsset& out, std::string* 
 }
 
 std::string writeStateMachine(const AnimStateMachineAsset& a) {
-    const int version = a.pipeline.empty() ? 1 : kStateMachineVersion;
+    const int version = a.usesMotionMatch() ? 3 : a.pipeline.empty() ? 1 : 2;
     std::string s = "{\n  \"format\": \"ocasm\",\n  \"version\": " + std::to_string(version) + ",\n";
     s += "  \"name\": " + esc(a.name) + ",\n  \"params\": [";
     for (usize i = 0; i < a.params.size(); ++i) {
@@ -253,7 +253,16 @@ std::string writeStateMachine(const AnimStateMachineAsset& a) {
                  ", \"loop\": " + (st.loop ? "true" : "false") + ", \"speedParam\": " + esc(st.speedParam) +
                  ", \"xParam\": " + esc(st.xParam) + ", \"yParam\": " + esc(st.yParam) +
                  ", \"onEnter\": " + esc(st.onEnter) + ", \"onExit\": " + esc(st.onExit) +
-                 ", \"pos\": [" + num(st.posX) + ", " + num(st.posY) + "]}";
+                 ", \"pos\": [" + num(st.posX) + ", " + num(st.posY) + "]";
+            if (st.kind == AsmStateKind::MotionMatch) {
+                auto names = [](const std::vector<std::string>& v) {
+                    std::string o = "[";
+                    for (usize k = 0; k < v.size(); ++k) o += (k ? ", " : "") + esc(v[k]);
+                    return o + "]";
+                };
+                s += ", \"tagsRequired\": " + names(st.tagsRequired) + ", \"tagsExcluded\": " + names(st.tagsExcluded);
+            }
+            s += "}";
         }
         s += m.states.empty() ? "],\n      \"transitions\": [" : "\n      ],\n      \"transitions\": [";
         for (usize i = 0; i < m.transitions.size(); ++i) {
@@ -306,7 +315,8 @@ bool parseStateMachine(std::string_view json, AnimStateMachineAsset& out, std::s
             AsmState s;
             s.name = str(v, "name");
             const std::string_view k = v["kind"].asString("clip");
-            s.kind = k == "blendspace" ? AsmStateKind::BlendSpace : k == "machine" ? AsmStateKind::SubMachine : AsmStateKind::Clip;
+            s.kind = k == "blendspace" ? AsmStateKind::BlendSpace : k == "machine" ? AsmStateKind::SubMachine
+                   : k == "motionmatch" ? AsmStateKind::MotionMatch : AsmStateKind::Clip;
             s.asset = str(v, "asset");
             s.subMachine = static_cast<i32>(v["machine"].asInt(-1));
             s.speed = v["speed"].asFloat(1.0f);
@@ -318,6 +328,8 @@ bool parseStateMachine(std::string_view json, AnimStateMachineAsset& out, std::s
             s.onExit = str(v, "onExit");
             s.posX = v["pos"][static_cast<usize>(0)].asFloat();
             s.posY = v["pos"][static_cast<usize>(1)].asFloat();
+            for (usize n = 0; n < v["tagsRequired"].size(); ++n) s.tagsRequired.emplace_back(v["tagsRequired"][n].asString());
+            for (usize n = 0; n < v["tagsExcluded"].size(); ++n) s.tagsExcluded.emplace_back(v["tagsExcluded"][n].asString());
             m.states.push_back(std::move(s));
         }
         const fmt::JsonValue& trs = mv["transitions"];

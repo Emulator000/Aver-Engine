@@ -19,6 +19,20 @@ aver_add_module(Aver.Anim
     src/RootMotion.cpp
     src/Montage.cpp
     src/AnimPipeline.cpp
+    # Motion matching (docs/ANIM_MOTION_MATCHING.md): pose database, search, trajectory prediction, inertialization.
+    src/MotionAsset.cpp
+    src/PoseDatabase.cpp
+    src/PoseSearch.cpp
+    src/Trajectory.cpp
+    src/Inertializer.cpp
+    src/MotionMatcher.cpp
+    # IK solvers, the .ocikrig asset and its pure rig stack, and the retargeter (docs/plans/wave5/IK_RETARGETING.md).
+    src/IkSolvers.cpp
+    src/IkRigAsset.cpp
+    src/IkRigSolver.cpp
+    src/Retarget.cpp
+    src/RetargetAsset.cpp
+    src/RetargetAutoMap.cpp
   DEPS
     Aver.Core
     Aver.Formats

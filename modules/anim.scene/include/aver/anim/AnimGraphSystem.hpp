@@ -64,6 +64,10 @@ private:
     struct Instance {
         u64 machine = 0;
         std::unique_ptr<AnimStateMachine> sm;
+        // [wave5/ik-retarget] The skeleton the machine's clips were resolved for, and the retarget catalog epoch
+        // it saw: either moving rebinds, so a clip authored for another rig plays as its retargeted bake.
+        u64 skeleton = 0;
+        u32 retargetEpoch = 0;
         // The machine's post stage (slot / layered / additive nodes). Bound lazily, once the entity's
         // skeleton resolves; an empty pipeline leaves the state machine's pose exactly as it was.
         AnimPipeline pipe;
@@ -79,7 +83,7 @@ private:
     static f32 rootWeightThunk(scene::Entity e, u64 slotHash, void* user);
     const Loaded* machineFor(u64 id);
     const BlendSpaceAsset* spaceFor(const std::string& ref);
-    const fmt::OcAnimation* clipFor(const std::string& ref);
+    const fmt::OcAnimation* clipFor(const std::string& ref, u64 skeleton);
 
     std::unordered_map<scene::Entity, Instance> instances_;
     std::unordered_map<u64, Loaded> machines_;

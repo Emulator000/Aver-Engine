@@ -163,6 +163,11 @@ const fmt::OcSkeleton* AnimSystem::skeleton(u64 objectId) {
                       }, "skeleton");
 }
 
+const fmt::OcAnimation* AnimSystem::clipFor(u64 clipId, u64 skeletonId) {
+    const fmt::OcAnimation* c = clip(clipId);
+    return c ? retarget_.resolve(*this, clipId, c, skeletonId) : nullptr;
+}
+
 const fmt::OcAnimation* AnimSystem::clip(u64 objectId) {
     return cachedLoad(clips_, objectId, resolve_, user_,
                       [](const std::string& p, fmt::OcAnimation& a, std::string* w) {
@@ -202,6 +207,8 @@ void AnimSystem::clear() {
 
     skeletons_.clear();
     clips_.clear();
+    retarget_.clear();   // baked clips and the catalog point at the caches above
+    ++contentEpoch_;
     posed_.clear();
     objects_.clear();
     slots_.clear();
@@ -214,6 +221,8 @@ void AnimSystem::clear() {
 }
 
 void AnimSystem::tick(scene::World& world, f32 dt) {
+    tickDt_ = dt;
+    ++tickIndex_;
     scene::ComponentPool* animators = world.pool(scene::kComponentAnimator);
     scene::ComponentPool* skeletal  = world.pool(scene::kComponentSkeletalMesh);
 
@@ -418,7 +427,7 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         if (sourced && rootMode) {
             if (const auto pb = pendingBase_.find(e); pb != pendingBase_.end()) rootD = pb->second;
         }
-        if (const fmt::OcAnimation* c = sourced ? nullptr : clip(a->clip)) {
+        if (const fmt::OcAnimation* c = sourced ? nullptr : clipFor(a->clip, sm->skeleton)) {
             // The loop flag lives on the COMPONENT, not the clip, so one clip can be looped by one
             // actor and played once by another.
             const bool once = (a->flags & scene::kAnimatorOnce) != 0;

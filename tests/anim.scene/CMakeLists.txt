@@ -70,3 +70,25 @@ foreach(t MontageSystem RootMotionSystem)
   target_link_libraries(${t}Test PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endforeach()
+
+# MotionMatchSystemTest -- CMotionMatcher on entities (docs/ANIM_MOTION_MATCHING.md): the component, a database
+# loading on a worker and baking its sidecar, the standalone matcher posing from measured motion, a motionmatch
+# state inside a state machine, the root motion modes, a crowd, and the clear()/destroy guards. No scripting host, no GPU.
+add_executable(MotionMatchSystemTest src/MotionMatchSystemTest.cpp)
+target_link_libraries(MotionMatchSystemTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MotionMatchSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# [wave5/sequencer] MontageDriveTest -- driven montage players (a sequencer places them): exact scrubbing,
+# weight, no events, lapse and release, over a bare animator and a state machine.
+add_executable(MontageDriveTest src/MontageDriveTest.cpp)
+target_link_libraries(MontageDriveTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(MontageDriveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# IkRigSystemTest / RetargetSystemTest -- CIkRig on entities (foot placement over a fake ground probe, goals bound to sockets,
+# OCRIG 2 inputs) and runtime retargeting (a clip for skeleton A playing on B through a CAnimator, a state machine and a
+# montage). docs/plans/wave5/IK_RETARGETING.md. No scripting host, no GPU.
+foreach(t IkRigSystem RetargetSystem)
+  add_executable(${t}Test src/${t}Test.cpp)
+  target_link_libraries(${t}Test PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${t}Test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

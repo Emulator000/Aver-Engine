@@ -5,6 +5,7 @@
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/LevelDecals.hpp"
 #include "aver/game/LevelLights.hpp"   // [wave3/level-instances]
+#include "aver/game/SequenceHost.hpp"   // [wave5/sequencer] hooks, level bindings, the ABI provider
 #include "aver/game/LevelInstancesFramework.hpp"   // [wave3/level-instances]
 
 #include <filesystem>
@@ -74,9 +75,11 @@
 #  include "aver/framework/framework_state_abi.h"
 #  include "aver/framework/framework_hooks.h"
 #  include "aver/framework/framework_anim_abi.h"
+#  include "aver/framework/framework_ik_abi.h"   // [wave5/ik-retarget] aver_fw_set_ik_provider
 #endif
 // GamePawn.hpp (game::placePossessedPawn): placePawnAtSpawn's pawn lookup and placement.
 #include "aver/game/GamePawn.hpp"
+#include "aver/game/GameIkProbe.hpp"   // [wave5/ik-retarget] the foot-IK ground probe
 // Culture choice and string/data-table stores (docs/LOCALIZATION.md).
 #include "aver/game/GameLocalization.hpp"
 #if AVER_MODULE_FRAMEWORK
@@ -585,7 +588,7 @@ void GameApp::tickGameplay(f32 dt) {
 
 #if AVER_MODULE_SCENE
 bool GameApp::sequenceEmissiveScale(scene::Entity e, f32 outRgb[3], void* user) {
-    return static_cast<const GameApp*>(user)->sequencePlayer_.emissiveScale(e, outRgb);
+    return static_cast<const GameApp*>(user)->sequenceDirector_.emissiveScale(e, outRgb);
 }
 #endif
 
@@ -979,7 +982,8 @@ void GameApp::installLevelHooks(Engine& e) {
     hooks.afterUnload = [this, &e] {
         postVolumes_.clear();
         postLuts_.clear(e.device());
-        sequencePlayer_ = game::SequencePlayer{};
+        sequenceDirector_.restore(scene::World::instance());   // [wave5/sequencer]
+        sequenceDirector_.clear();
 #  if AVER_MODULE_FLUIDS
         water_.unload();
 #  endif
@@ -1005,24 +1009,34 @@ void GameApp::installLevelHooks(Engine& e) {
         // their assets with their overrides on top.
         game::spawnLevelDecals(scene::World::instance(), loaded.world.decals);
         // [wave3/level-instances] LIGHT records: the packaged game spawned none before this.
-        game::spawnLevelLights(scene::World::instance(), loaded.world.lights);
+        const std::vector<scene::Entity> lightEntities = game::spawnLevelLights(scene::World::instance(), loaded.world.lights);
         postVolumes_ = loaded.world.postVolumes;
         if (rhi::IDevice* dev = e.device()) postLuts_.preload(*dev, project_.contentDir(), postVolumes_);
         if (prefabSys_) prefabSys_->instantiateLevelInstances(loaded.world.prefabInstances);
-        // The level's first sequence, bound to its placements' entities; it starts with the session.
-        sequencePlayer_ = game::SequencePlayer{};
+        // The level's sequences, bound to its placements' (and lights') entities; the autoplay ones start with the session.
+        // [wave5/sequencer]
+        sequenceDirector_.restore(scene::World::instance());
+        sequenceDirector_.clear();
         if (!loaded.world.sequences.empty()) {
             std::vector<scene::Entity> byPlacement(loaded.world.placements.size(), scene::kInvalidEntity);
             const auto& inst = loaded.instance;
             for (usize k = 0; k < inst.entities.size() && k < inst.placementIndex.size(); ++k)
                 if (inst.placementIndex[k] < byPlacement.size()) byPlacement[inst.placementIndex[k]] = inst.entities[k];
-            const fmt::OcSequence& seq = loaded.world.sequences.front();
-            sequencePlayer_.setSequence(seq);
-            sequencePlayer_.bind(byPlacement);
-            sequencePlayer_.setTime(0);
-            if (seq.autoplay) sequencePlayer_.play();
-            AVER_INFO("[Game] level sequence '{}': {} track(s), {:.1f}s{}", seq.name, seq.tracks.size(), seq.length,
-                      seq.autoplay ? ", autoplay" : "");
+            sequenceDirector_.setMode(game::SeqMode::Live);
+            sequenceDirector_.setHooks(game::makeSequenceHooks(project_.contentDir(), [this](i32 ent, const std::string& name) {
+#if AVER_MODULE_SCRIPTING
+                return scripts_.graphFire(ent, name.c_str());
+#else
+                (void)ent; (void)name;
+                return false;
+#endif
+            }));
+            sequenceDirector_.setSequences(loaded.world.sequences);
+            sequenceDirector_.setBindings(game::makeLevelBindings(loaded.world, byPlacement, lightEntities));
+            sequenceDirector_.startAutoplay();
+            for (const fmt::OcSequence& seq : loaded.world.sequences)
+                AVER_INFO("[Game] level sequence '{}': {} track(s), {:.1f}s{}", seq.name, seq.tracks.size(), seq.length,
+                          seq.autoplay ? ", autoplay" : "");
         }
 #  if AVER_MODULE_VOXI
         // Load foliage after placements (matches editor)
@@ -1144,6 +1158,10 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Load order is critical: index -> meshes -> levels
     content_.adopt(project_);
+#if AVER_MODULE_SCENE
+    // [wave5/ik-retarget] adopt cleared AnimSystem; the project's .ocretarget assets say which clips play on which rig.
+    anim::animSystem().registerRetargets(content_.idsWithExtension(".ocretarget"));
+#endif
     {
         // String and data-table stores, and the active culture (--culture > saved setting > OS language > LOCALE.DEFAULT).
         game::LocalizationInit li;
@@ -1831,6 +1849,7 @@ void GameApp::onInit(Engine& e) {
     // Control rig: registered in editor onInit but never before in shipped game. Class placements must find the type.
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
+    game::installIkGroundProbe();   // [wave5/ik-retarget] foot IK casts through physics; a no-op without it
 #endif
 #if AVER_MODULE_RAGDOLL
     // Ragdolls: installed AFTER the control rig so it chains it (the rig runs first, the ragdoll sees its pose).
@@ -1845,6 +1864,10 @@ void GameApp::onInit(Engine& e) {
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
     // Montages: the framework relays PlayMontage and friends to AnimSystem's montage players.
     aver_fw_set_anim_provider(&anim::montageProvider, &anim::animSystem());
+    // [wave5/ik-retarget] IK goals, foot-IK weights and rig inputs.
+    aver_fw_set_ik_provider(&anim::ikProvider, &anim::controlRigSystem());
+    // [wave5/sequencer] Level sequences: the framework relays LevelSequences.Play and friends to the director.
+    aver_fw_set_sequence_provider(&game::sequenceProvider, &sequenceDirector_);
 #endif
     // Animation state machines, reverb zones, blackboard relay, crowd/hearing/cover behaviours.
     game::registerGameSystems();
@@ -1934,7 +1957,7 @@ void GameApp::onInit(Engine& e) {
     // Shipped game: booting the level starts objects (editor turns this on at Play). Marks objects movable.
     playMobility_.begin(scene::World::instance());
     // The sequence's actors are going to move: movable from the first frame, like the physics cars.
-    if (!sequencePlayer_.empty()) playMobility_.seedMovable(sequencePlayer_.boundEntities());
+    if (!sequenceDirector_.empty()) playMobility_.seedMovable(sequenceDirector_.boundEntities());
     anim::animSystem().setObjectAnimationLive(true);
 #endif
     beginPlayIfGameModeDeclared();
@@ -2089,16 +2112,20 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
 #if AVER_MODULE_SCENE
     // Animation clock ticks UNCONDITIONALLY: hanging off gameplay gates would freeze it when no session is running.
     anim::animSystem().setObjectAnimationPaused(objectsHeld);
+    // [wave5/sequencer] Level sequences, Pre phase: the clock (not while paused), then property, visibility, animation,
+    // event, audio and sub-sequence tracks, so driven poses land in the animation tick below.
+    if (!sequenceDirector_.empty()) {
+        if (!objectsHeld) sequenceDirector_.advance(t.dt);
+        sequenceDirector_.evaluate(scene::World::instance(), game::SeqPhase::Pre);
+    }
     game::tickAnimGraphs(t.dt);   // state machines write the pose the clip sampler would
 #if AVER_MODULE_RAGDOLL
     ragdoll::ragdollSystem().tick(t.dt);   // after the physics step, before the pose it writes into
 #endif
     anim::animSystem().tick(scene::World::instance(), t.dt);
-    // Level sequence: advances with the session (not while paused), writes transforms before the flush below.
-    if (!sequencePlayer_.empty()) {
-        if (!objectsHeld) sequencePlayer_.advance(t.dt);
-        sequencePlayer_.evaluate(scene::World::instance());
-    }
+    // Level sequences: Post phase (transform, material, camera); advanced and Pre-evaluated before the animation tick.
+    // [wave5/sequencer]
+    if (!sequenceDirector_.empty()) sequenceDirector_.evaluate(scene::World::instance(), game::SeqPhase::Post);
     // Animated placements' kinematic bodies follow poses the tick just wrote.
     if (!objectsHeld)
         world::driveKinematicBodies(scene::World::instance(), level_.animatedBodies(), t.dt);
@@ -2143,9 +2170,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     drivePlayCamera();
 #if AVER_MODULE_SCENE
     // A sequence's camera track takes the view while it plays (the pawn's body shows, as in a cutscene).
-    if (sequencePlayer_.sequence().camera) {
+    {
         game::SeqCameraPose seqCam;
-        if (sequencePlayer_.camera(seqCam)) {
+        if (sequenceDirector_.camera(seqCam)) {
             camPos_ = seqCam.position;
             yaw_ = seqCam.yaw;
             pitch_ = seqCam.pitch;
@@ -2242,7 +2269,7 @@ void GameApp::onRender(Engine& e) {
             playMobility_.beginFrame(movableRoot);
             opts.mobility = &playMobility_;
         }
-        if (!sequencePlayer_.empty()) {
+        if (!sequenceDirector_.empty()) {
             opts.emissiveScale = &GameApp::sequenceEmissiveScale;
             opts.user = this;
         }
