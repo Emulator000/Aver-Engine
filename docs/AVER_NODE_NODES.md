@@ -948,6 +948,52 @@ Read the painted landscape and the water over it (`docs/LANDSCAPE_LAYERS_WATER.m
 | `AN_WaterSample` | `x` (in, float), `y` (in, float), `z` (in, float), `over` (out, bool), `submerged` (out, bool), `surfaceZ` (out, float), `depth` (out, float), `flowX` (out, float), `flowY` (out, float), `flowZ` (out, float), `kind` (out, int) | — | D | The water at a world position. `over` is true when water covers the XY; `submerged` when the point is under the surface. `kind`: 0 none, 1 ocean, 2 lake, 3 river. `flow` is the current in cm/s. |
 | `AN_EntityWater` | `entity` (in, int), `heightCm` (in, float), `over` (out, bool), `submersion` (out, float), `flowX` (out, float), `flowY` (out, float), `flowZ` (out, float), `kind` (out, int) | — | D | How much of a `heightCm` tall body (default 180) at the entity is under water, 0 to 1, and the current there. False for a dead entity or one not over water. |
 
+### IK and rig inputs
+
+Drive the IK rig an entity wears and the named inputs of its `.ocrig` (`docs/ANIM_IK_RETARGET.md`). The entity needs a skeleton. Goals and rig inputs are runtime data: they are not saved, and a destroyed target releases its goal. Rig, goal, foot and input names are attributes. A foot is named by its leg chain. The older `SetControlRig` node is unchanged. Rows: `GraphIkNodeTable.cs`, owner `IkGraphInterop` (`Aver.Framework/Ik.cs`). Tests: `Aver.Graph.Tests/IkNodeTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `SetIkRig` | `exec` (in, exec), `entity` (in, int), `weight` (in, float), `then` (out, exec), `success` (out, bool) | `rig=` | P | Puts the `.ocikrig` `rig=` on the entity at `weight` (default 1). |
+| `SetIkGoal` | `exec` (in, exec), `entity` (in, int), `x`, `y`, `z` (in, float), `useRotation` (in, bool), `pitch`, `yaw`, `roll` (in, float), `space` (in, int), `then` (out, exec), `success` (out, bool) | `goal=` | P | Places the goal `goal=` the rig declares: position in centimetres, plus a rotation in degrees when `useRotation` is set. `space` 0 is world, 1 is the entity's model space. The first call engages the goal over 0.15 s. |
+| `BindIkGoal` | `exec` (in, exec), `entity` (in, int), `target` (in, int), `ox`, `oy`, `oz` (in, float), `then` (out, exec), `success` (out, bool) | `goal=`, `socket=` (optional) | P | Makes the goal follow the entity `target`, or its socket `socket=`, plus the offset `ox`, `oy`, `oz` in that frame. |
+| `SetIkGoalWeight` | `exec` (in, exec), `entity` (in, int), `weight` (in, float), `blendSeconds` (in, float), `then` (out, exec), `success` (out, bool) | `goal=` | P | Blends the goal's strength to `weight` over `blendSeconds` (default 0.15; 0 cuts). |
+| `ClearIkGoal` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `goal=` (optional) | P | Releases the goal (its weight blends to 0); empty releases every goal on the entity. |
+| `GetIkGoalState` | `entity` (in, int), `found` (out, bool), `alpha` (out, float), `errorCm` (out, float), `reached` (out, bool) | `goal=` | D | The goal's blend weight, how far the chain's tip was from it after the last solve in centimetres, and whether the solve reached it. `found` is false without an IK rig or for an undeclared goal. |
+| `SetFootIkWeight` | `exec` (in, exec), `entity` (in, int), `weight` (in, float), `blendSeconds` (in, float), `then` (out, exec), `success` (out, bool) | `foot=` (optional) | P | Blends foot placement to `weight` over `blendSeconds` (default 0.2); empty sets every foot. |
+| `GetFootIkState` | `entity` (in, int), `found` (out, bool), `offsetCm` (out, float), `plant` (out, float), `nx`, `ny`, `nz` (out, float) | `foot=` (optional) | D | A foot's vertical offset in centimetres, its plant weight (1 planted) and the ground normal under it; empty reads the pelvis (how far it dropped). |
+| `SetRigInputFloat` | `exec` (in, exec), `entity` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | `input=` | P | Sets a float input of the entity's `.ocrig`. |
+| `SetRigInputVec3` | `exec` (in, exec), `entity` (in, int), `x`, `y`, `z` (in, float), `then` (out, exec), `success` (out, bool) | `input=` | P | Sets a vector input: a goal, a pole or a look-at point. The rig converts world-space inputs. |
+| `ClearRigInput` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `input=` (optional) | P | Forgets an input so the rig's declared default applies again; empty clears them all. |
+
+### Motion matching
+
+Pick the animation frame that best fits where the entity is going (`docs/ANIM_MOTION_MATCHING.md`). A motion-matching state is a state in the `.ocasm` and needs no node; these nodes drive a matcher directly and feed it the trajectory. The entity needs a skeleton. Rows: `GraphMotionMatchNodeTable.cs`, owner `MotionMatchGraphInterop` (`Aver.Framework/MotionMatching.cs`). Tests: `Aver.Graph.Tests/MotionMatchNodeTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `SetMotionMatching` | `exec` (in, exec), `entity` (in, int), `facing` (in, int), `drive` (in, int), `playRate` (in, float), `then` (out, exec), `success` (out, bool) | `database=` (optional) | P | Runs motion matching on the entity against the `.ocmotion` `database=`; empty leaves the choice to a motion-matching state of its state machine. `facing` 0 follows the velocity, 1 follows the yaw given to Set Motion Input. `drive` 0 lets the simulation move the entity, 1 lets the animation's root motion do it. `playRate` defaults to 1. |
+| `SetMotionInput` | `exec` (in, exec), `entity` (in, int), `velocityX` (in, float), `velocityY` (in, float), `facingYaw` (in, float), `then` (out, exec), `success` (out, bool) | — | P | The world-space planar velocity the character is trying to reach, in cm/s, and, in yaw facing, the heading in degrees. Call it every tick. False without a matcher. |
+| `SetMotionTags` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `required=` (optional), `excluded=` (optional) | P | Restricts the search to frames with the `required=` tags and without the `excluded=` tags (comma-separated names declared in the `.ocmotion`, up to four each; empty is none). False when over four. |
+| `RequestMotionSearch` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Asks for a search on the next tick instead of waiting out the interval. |
+| `GetMotionState` | `entity` (in, int), `found` (out, bool), `clipTime` (out, float), `cost` (out, float), `switches` (out, int) | — | D | The time in the clip the matcher plays, how well that frame fits the wanted trajectory (lower is better) and how many times it has switched. `found` is false without a matcher. |
+| `IsMotionClip` | `entity` (in, int), `result` (out, bool) | `clip=` | D | True while the matcher plays the clip `clip=` (the path as written in the `.ocmotion`). |
+
+### Sequencer
+
+Play, scrub and bind the level's sequences and `.ocseq` files (`docs/SEQUENCER.md`). A sequence is named by an attribute and has no entity of its own. Lifecycle and event-track events need no node: they arrive as `AN_OnEvent` entries (`<Sequence>_Started`, `<Sequence>_Finished` and every authored event name) or `CustomEvent`. Property, visibility and animation tracks are authored, not scripted. Rows: `GraphSequenceNodeTable.cs`, owner `SequenceGraphInterop` (`Aver.Framework/LevelSequence.cs`). Tests: `Aver.Graph.Tests/SequenceNodeTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `PlaySequence` | `exec` (in, exec), `start` (in, float), `rate` (in, float), `then` (out, exec), `success` (out, bool) | `sequence=` | P | Starts or resumes `sequence=`. A negative `start` (default -1) continues from where it is, or from 0 if it was stopped or finished; `rate` 0 (default) keeps the current rate. False for a sequence the level does not have. |
+| `PauseSequence` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | `sequence=` | P | Pauses `sequence=` where it is; what it wrote stays. |
+| `StopSequence` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | `sequence=` (optional) | P | Stops `sequence=` (empty = every sequence): back to time 0, everything it wrote put back as authored, its sounds stopped. |
+| `SetSequenceTime` | `exec` (in, exec), `seconds` (in, float), `then` (out, exec), `success` (out, bool) | `sequence=` | P | Jumps `sequence=` to `seconds`. Sampled tracks show that time exactly; events and sounds do not fire for the skipped span. |
+| `SetSequenceRate` | `exec` (in, exec), `rate` (in, float), `then` (out, exec), `success` (out, bool) | `sequence=` | P | Sets the playback speed multiplier of `sequence=`, 0 or more; 0 holds the clock. |
+| `BindSequenceActor` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `sequence=`, `binding=` | P | Makes `entity` the actor that the tracks bound by the name `binding=` drive. Entity 0 clears the override. False when the sequence has no track bound by that name. |
+| `IsSequencePlaying` | `result` (out, bool) | `sequence=` (optional) | D | True while `sequence=` (empty = any sequence) plays. |
+| `GetSequenceState` | `found` (out, bool), `time` (out, float), `length` (out, float), `rate` (out, float) | `sequence=` | D | The playhead and length in seconds and the playback rate of `sequence=`. `found` is false for a sequence the level lacks. |
+
 ## Aliases invisible to the palette
 
 The parser accepts a second spelling for seven node types. The Add-Node palette only ever spawns the canonical name — these aliases exist for a hand-written or C#-authored `.ocgraph`, never appear in the GUI, and are otherwise identical in every respect to the type they alias:

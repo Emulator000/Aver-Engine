@@ -103,13 +103,17 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
 
 // The game-systems node families, each in its own file so this one stays the readable core table:
 // crowds/hearing/cover, then timers/blackboard/streamed audio/anim state machines/UI/prefabs/decals,
-// then gameplay abilities, then AI queries/smart objects/brains, level instances, landscape and water.
+// then gameplay abilities, then AI queries/smart objects/brains, level instances, landscape and water,
+// then IK/rig inputs, motion matching and the sequencer.
 #include "GraphNodeDefsSynapseAi.hpp"
 #include "GraphNodeDefsGameSystems.hpp"
 #include "GraphNodeDefsGas.hpp"
 #include "GraphNodeDefsAiQuery.hpp"
 #include "GraphNodeDefsLevelInstances.hpp"
 #include "GraphNodeDefsTerrain.hpp"
+#include "GraphNodeDefsIk.hpp"
+#include "GraphNodeDefsMotionMatch.hpp"
+#include "GraphNodeDefsSequencer.hpp"
 
 // One line per node type. This is the "one entry" the build task and Slice 6 both call for.
 inline std::vector<GraphNodeDesc> buildCatalog() {
@@ -1100,6 +1104,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     appendAiQueryNodeDefs(t);
     appendLevelInstanceNodeDefs(t);
     appendTerrainNodeDefs(t);
+    appendIkNodeDefs(t);
+    appendMotionMatchNodeDefs(t);
+    appendSequencerNodeDefs(t);
     return t;
 }
 

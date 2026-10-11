@@ -275,6 +275,10 @@ static int Main()
         failures += AiQueryNodeTests.RunAll();
         failures += LevelInstanceNodeTests.RunAll();
         failures += TerrainNodeTests.RunAll();
+        // Wave-5 node families (docs/plans/wave5): IK and rig inputs, motion matching, the sequencer.
+        failures += IkNodeTests.RunAll();
+        failures += MotionMatchNodeTests.RunAll();
+        failures += SequenceNodeTests.RunAll();
 
         // Self: the node that makes a canvas-authored graph able to name its own entity at all.
         // See SelfNodeTests.cs's header for why its absence, not polish, is what kept every
