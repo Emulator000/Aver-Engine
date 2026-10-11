@@ -18,6 +18,10 @@
 #define RCN_MIN_FRESH     8u          // fewest fresh samples a cell's label may come from
 #define RCN_MIN_NEFF      2u
 #define RCN_EPS           0.001
+#define RCN_REL_SLACK     0.05        // the label forgives a 5% disagreement of the old state on top of the sampling noise
+#define RCN_VAR_EPS       0.000001    // floor under the label's variance
+#define RCN_Z_FREE        2.0         // label 1 up to this many standard errors of the fresh mean ...
+#define RCN_Z_SPAN        3.0         // ... falling to 0 over this many more
 #define RCN_TRUST_DIV     0.85        // trust = saturate(prediction / 0.85)
 #define RCN_STAT_SCALE    16384.0     // fixed point of the stats: a frame's 131072 records of <= 1 stay under 2^32
 #define RCN_STATS         8u
@@ -113,8 +117,11 @@ void CSRcNetFeatures(uint3 dtid : SV_DispatchThreadID)
     [unroll] for (uint j = 0u; j < 4u; ++j)
         fresh[j] = float3((float)gAccum[pb + j * 3u], (float)gAccum[pb + j * 3u + 1u], (float)gAccum[pb + j * 3u + 2u]) * shInv;
 
-    const float Eo = rcnLum(rcShIrradianceOverPi(old, nu));
-    const float Ef = rcnLum(rcShIrradianceOverPi(fresh, nu));
+    // The label's scalar is the DC term of irradiance / PI, luminance: the mean of the scatter's per-sample scalar
+    // (rcScatter), so Ef and its sampling variance come from the same samples. Eo is the old state's.
+    const float Eo = rcnLum(0.282095 * old[0]);
+    const float Ef = rcnLum(0.282095 * fresh[0]);
+    const float EoFull = rcnLum(rcShIrradianceOverPi(old, nu));   // the neighbour-ratio feature compares full irradiance
 
     // The six face neighbours at this cascade, old state, weighted by how well their normal agrees with ours.
     float sumW = 0.0, sumWE = 0.0;
@@ -148,7 +155,7 @@ void CSRcNetFeatures(uint3 dtid : SV_DispatchThreadID)
         float dev = 0.0;
         [unroll] for (int k2 = 0; k2 < 6; ++k2) dev += wk[k2] * abs(ek[k2] - ebar);
         disagree = dev / (sumW * (ebar + RCN_EPS));
-        ratio = clamp(log2((ebar + RCN_EPS) / (Eo + RCN_EPS)), -4.0, 4.0) * 0.25;
+        ratio = clamp(log2((ebar + RCN_EPS) / (EoFull + RCN_EPS)), -4.0, 4.0) * 0.25;
     }
     const float aniso = length(float3(rcnLum(old[1]), rcnLum(old[2]), rcnLum(old[3]))) / max(rcnLum(old[0]), RCN_EPS);
 
@@ -156,7 +163,7 @@ void CSRcNetFeatures(uint3 dtid : SV_DispatchThreadID)
     f[0] = len;
     f[1] = (float)nEff / 15.0;
     f[2] = (float)age / 15.0;
-    f[3] = 1.0;                                  // inference: sampling noise is not read as unreliability
+    f[3] = 1.0;                                  // the label no longer depends on the sample count, so neither does the input
     f[4] = sumW / 6.0;
     f[5] = min(disagree, 2.0) * 0.5;
     f[6] = ratio;
@@ -164,9 +171,12 @@ void CSRcNetFeatures(uint3 dtid : SV_DispatchThreadID)
     f[8] = nu.y;
     f[9] = (float)cascade * 0.5;
 
-    // The label comes from traced samples only: how far this frame's mean moved the cell's own light.
-    const float rho = abs(Ef - Eo) / (Ef + Eo + RCN_EPS);
-    const float label = 1.0 - min(1.0, 2.0 * rho);
+    // The label comes from traced samples only: how far this frame's mean moved the cell's own light, in standard
+    // errors of that mean (so a perfect cell scores 1 however noisy its fresh samples are).
+    const float msq = (float)gAccum[(uint)AVER_RC_SQ_BASE + cell] / ((float)n * (float)AVER_RC_SQ_SCALE);
+    const float varMean = max(msq - Ef * Ef, 0.0) / (float)max(n - 1u, 1u);
+    const float zs = abs(Ef - Eo) / sqrt(varMean + (RCN_REL_SLACK * Eo) * (RCN_REL_SLACK * Eo) + RCN_VAR_EPS);
+    const float label = saturate(1.0 - max(zs - RCN_Z_FREE, 0.0) / RCN_Z_SPAN);
     const bool eligible = n >= RCN_MIN_FRESH && nEff >= RCN_MIN_NEFF && Eo + Ef > RCN_EPS;
 
     uint slot;
@@ -182,7 +192,6 @@ void CSRcNetFeatures(uint3 dtid : SV_DispatchThreadID)
     uint ts;
     InterlockedAdd(gTrainCnt[0], 1u, ts);
     if (ts >= RCN_MAX_TRAIN) return;
-    f[3] = log2(1.0 + (float)n) / 6.0;
     [unroll] for (uint m = 0u; m < RCN_INPUTS; ++m) gTrainRec[ts * RCN_INPUTS + m] = f[m];
     gTrainTgt[ts] = label;
 }

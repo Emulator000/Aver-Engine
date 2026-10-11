@@ -25,6 +25,8 @@ inline constexpr u32 kCrossFadeCells   = 4;
 // ---------------------------------------------------------------- tunables the HLSL mirrors (AVER_RC_*)
 inline constexpr f64 kShScale    = 32768.0;     // 2^15      -> AVER_RC_SH_SCALE
 inline constexpr f64 kNScale     = 65536.0;     // 2^16      -> AVER_RC_N_SCALE
+inline constexpr f64 kSqScale    = 2048.0;      // 2^11      -> AVER_RC_SQ_SCALE
+inline constexpr f64 kDcToE      = 1.0 / (4.0 * 3.14159265358979323846);   // 0.282095^2 -> AVER_RC_DC_TO_E
 inline constexpr u32 kMaxCap     = 64;          //           -> AVER_RC_MAX_CAP
 inline constexpr f64 kLMax       = 32.0;        //           -> AVER_RC_LMAX
 inline constexpr f64 kMinCos     = 0.1;         // pdf floor  -> AVER_RC_MIN_COS
@@ -39,13 +41,15 @@ inline constexpr u32 kDefaultCoarseCap2 = 8;    // per-cell cap, cascade 2
 
 // ---------------------------------------------------------------- accumulator layout (int32 elements)
 // Counts [0, kCells) = accepted | prevArrivals << 16; arrivals [kCells, 2 kCells);
-// payload from kPayloadBase: 12 SH values + 3 normal sums per cell.
+// payload from kPayloadBase: 12 SH values + 3 normal sums per cell; then one block of kCells sums of squares
+// (kSqBase + cell), the per-sample scalar squared in fixed point, which the stage-2a label reads for the noise of Ef.
 inline constexpr u32 kShFloats       = 12;
 inline constexpr u32 kPayloadInts    = 15;
 inline constexpr u32 kArrivalsBase   = kCells;                               // -> AVER_RC_CELLS
 inline constexpr u32 kPayloadBase    = 2 * kCells;                           // -> AVER_RC_PAYLOAD_BASE
-inline constexpr u32 kAccumInts      = kPayloadBase + kCells * kPayloadInts; // 17 * kCells = 13,369,344
-inline constexpr u64 kAccumBytes     = static_cast<u64>(kAccumInts) * 4ull;  // 53,477,376
+inline constexpr u32 kSqBase         = kPayloadBase + kCells * kPayloadInts; // 17 * kCells -> AVER_RC_SQ_BASE
+inline constexpr u32 kAccumInts      = kSqBase + kCells;                     // 18 * kCells = 14,155,776
+inline constexpr u64 kAccumBytes     = static_cast<u64>(kAccumInts) * 4ull;  // 56,623,104
 inline constexpr u32 kCellStride     = 32;
 inline constexpr u64 kCellsBytes     = static_cast<u64>(kCells) * kCellStride;   // 25,165,824
 inline constexpr u32 kInfoStride     = 80;
@@ -89,9 +93,15 @@ inline constexpr f64 kWorstShSum      = kWorstSample * kMaxCap * kShScale;      
 inline constexpr f64 kWorstNormalSum  = 1.0 * kMaxCap * kNScale;                // 4.2e6
 static_assert(kWorstShSum * 2.0 < 2147483647.0, "SH sum needs a 2x margin under int32 max");
 static_assert(kWorstNormalSum * 2.0 < 2147483647.0, "normal sum needs a 2x margin under int32 max");
+// The per-sample scalar of the variance term: luminance(L) * weight / (4 pi), the sample's DC contribution to
+// irradiance / PI. Luminance weights sum to 1, so it is bounded by kLMax * (PI / kMinCos) / (4 PI) = 80.
+inline constexpr f64 kWorstScalar     = kLMax * (kPi / kMinCos) * kDcToE;       // 80
+inline constexpr f64 kWorstSqSum      = kWorstScalar * kWorstScalar * kMaxCap * kSqScale;   // ~8.4e8
+static_assert(kWorstSqSum * 2.0 < 2147483647.0, "sum of squares needs a 2x margin under int32 max");
 static_assert(kCells % kResolveGroupSize == 0, "one resolve thread per cell, no remainder group");
 static_assert(kNEffMax < 16 && kAgeMax < 16, "n_eff and age are 4-bit fields");
-static_assert(kAccumInts == 17 * kCells, "counts + arrivals + 15 payload ints per cell");
+static_assert(kAccumInts == 18 * kCells, "counts + arrivals + 15 payload ints + 1 sum of squares per cell");
+static_assert(kSqBase == 17 * kCells, "the sum-of-squares block follows the payload");
 static_assert(kMaxCap < 256, "coarse caps travel in 8-bit fields");
 
 // ---------------------------------------------------------------- addressing (mirrors rcTagPack / rcCellIndex)

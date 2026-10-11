@@ -360,7 +360,7 @@ cbuffer GuideCB : register(b3) {
   - The resolve resets trust to 63 for a new or replaced cell and carries it for a valid one.
   - Meta (24-bit tag, 4 n_eff, 4 age) is unchanged.
   - Update `NeuRaC::logWarmupStats`, which reads `cell.b[2] >> 22`.
-- **Accumulator layout:** counts `[0,K)` as `accepted | prevArrivals<<16`, arrivals `[K,2K)`, payload from `2K`, with `K = kCells`. `kAccumInts = 17 * kCells`, about 53.5 MB total.
+- **Accumulator layout:** counts `[0,K)` as `accepted | prevArrivals<<16`, arrivals `[K,2K)`, payload from `2K`, with `K = kCells`. `kAccumInts = 17 * kCells (18 * kCells since the 2026-10-12 noise-calibrated label adds a sum-of-squares block)`, about 53.5 MB total.
   - `info.accumInts` flows to the table-0 binding through `Bindings`. No renderer change is needed.
   - Replace the payload-base macro `AVER_RC_CELLS`.
 - **RcInfo, same 80 bytes:** `hdr1 = (alphaMin, relaxAlpha, asfloat(coarseCaps), netStrength)`.

@@ -9,10 +9,13 @@
 #define AVER_RC_CELLS_PER_CASC  262144      // 64^3
 #define AVER_RC_CELLS           786432      // 3 * 64^3
 #define AVER_RC_PAYLOAD_BASE    1572864     // 2 * AVER_RC_CELLS: counts and arrivals come first
+#define AVER_RC_SQ_BASE         13369344    // 17 * AVER_RC_CELLS: one sum-of-squares int per cell, after the payload
 
 // Fixed-point scales: SH terms * 2^15, summed normals * 2^16.
 #define AVER_RC_SH_SCALE        32768.0
 #define AVER_RC_N_SCALE         65536.0
+#define AVER_RC_SQ_SCALE        2048.0      // sum of squares of the per-sample scalar (<= 80), 2^11
+#define AVER_RC_DC_TO_E         0.0795774715 // 1 / (4 PI) = 0.282095^2: DC coefficient -> irradiance / PI
 #define AVER_RC_MAX_CAP         64          // per-cell per-frame sample cap
 #define AVER_RC_LMAX            32.0        // radiance clamped before projection
 #define AVER_RC_MIN_COS         0.1         // pdf floor: weight = PI / max(cos, MIN_COS)
@@ -35,7 +38,8 @@ struct RcInfo { uint4 hdr0; float4 hdr1; int4 cas[3]; };
 struct RcCell { uint4 a; uint4 b; };
 
 // Accumulator (ints): counts [0, K) = accepted | prevArrivals << 16; arrivals [K, 2K); payload at
-// AVER_RC_PAYLOAD_BASE + cell*15 + k, K = AVER_RC_CELLS. k = 0..11 SH sums, k = 12..14 summed surface normal.
+// AVER_RC_PAYLOAD_BASE + cell*15 + k, K = AVER_RC_CELLS. k = 0..11 SH sums, k = 12..14 summed surface normal;
+// then K ints at AVER_RC_SQ_BASE + cell: the sum over accepted samples of (lum(L) * weight / 4 PI)^2, scale SQ_SCALE.
 #define AVER_RC_PAYLOAD_INTS    15
 
 // 3 x 8 bits of (worldCell >> 6). Toroidal address (worldCell & 63) cannot distinguish cells 64 apart; tag can.

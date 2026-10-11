@@ -5,7 +5,8 @@
 //   3. hash thinning: rate, keep fraction, salts, the expected training count under the cap
 //   4. label, eligibility and the trust mapping, with edge cases
 //   5. the feature builder on hand-built cells (each input against its definition)
-//   6. a MlpReference-trained net separates leaky from clean synthetic cells
+//   6. the label against sampling noise: scattered Monte Carlo samples, perfect and biased cells
+//   7. a MlpReference-trained net separates leaky from clean synthetic cells, and trusts the clean ones
 #include "aver/core/Log.hpp"
 #include "aver/voxi/NeuRaCLayout.hpp"
 #include "aver/voxi/NeuRaCNetReference.hpp"
@@ -160,6 +161,8 @@ struct CaseParams {
     f32 L[3] = {1.0f, 0.8f, 0.6f};
     f32 aniso[3] = {0.1f, 0.0f, 0.05f};
     f32 freshScale = 1.0f;
+    f32 noiseCv = 0.3f;         // per-sample coefficient of variation of the label's scalar, written as the sum of squares
+    bool customFresh = false;   // the caller fills the accumulator (counts, payload, squares) itself
     NbParams nb[6];
     CaseParams() { normalize3(nu); }
     void allNeighbours(f32 scale) {
@@ -176,14 +179,17 @@ u32 writeCase(Scene& S, const CaseParams& p) {
     writeCell(S.cells[cell], sh, p.nu, p.len, p.nEff, p.age, p.trust6, p.badTag ? (tag ^ 1u) : tag);
 
     const u32 n = p.counts ? p.counts : p.nFresh;
-    S.accum[cell] = static_cast<i32>(n | (3u << 16));
-    if (n) {
+    if (!p.customFresh) S.accum[cell] = static_cast<i32>(n | (3u << 16));
+    if (n && !p.customFresh) {
         const u32 nUsed = std::min(n & 0xFFFFu, rc::capForCascade(S.info, p.cascade));   // what the resolve will divide by
         f32 fresh[rc::kShFloats];
         makeSh(p.L, p.aniso, p.freshScale, fresh);
         const u32 pb = rc::kPayloadBase + cell * rc::kPayloadInts;
         for (u32 k = 0; k < rc::kShFloats; ++k)
             S.accum[pb + k] = static_cast<i32>(std::llround(static_cast<f64>(fresh[k]) * nUsed * rc::kShScale));
+        // Sum of squares of samples that average to Ef with the given spread: n (Ef^2 + (cv Ef)^2).
+        const f64 ef = net::lum(0.282095f * fresh[0], 0.282095f * fresh[1], 0.282095f * fresh[2]);
+        S.accum[rc::kSqBase + cell] = static_cast<i32>(std::llround(nUsed * ef * ef * (1.0 + p.noiseCv * p.noiseCv) * rc::kSqScale));
     }
     for (int k = 0; k < 6; ++k) {
         const NbParams& nb = p.nb[k];
@@ -199,6 +205,27 @@ u32 writeCase(Scene& S, const CaseParams& p) {
 }
 
 net::Features featuresOf(const Scene& S, u32 cell) { return net::buildForCell(S.cells.data(), S.accum.data(), S.info, cell); }
+
+void clearAccum(Scene& S, u32 cell) {
+    S.accum[cell] = 0;
+    for (u32 k = 0; k < rc::kPayloadInts; ++k) S.accum[rc::kPayloadBase + cell * rc::kPayloadInts + k] = 0;
+    S.accum[rc::kSqBase + cell] = 0;
+}
+
+// One accepted sample as the scatter adds it (rcScatter + rcScatterCascade): SH payload, summed normal, square of the
+// scalar lum(L) * weight / 4 PI, and the accepted count.
+void addSample(Scene& S, u32 cell, const f32 L[3], const f32 N[3], const f32 dir[3], f32 cosDir) {
+    const f32 wgt = static_cast<f32>(rc::kPi) / std::max(cosDir, static_cast<f32>(rc::kMinCos));
+    f32 y[4];
+    rc::shBasis(dir, y);
+    const u32 pb = rc::kPayloadBase + cell * rc::kPayloadInts;
+    for (u32 k = 0; k < 4; ++k)
+        for (u32 ch = 0; ch < 3; ++ch) S.accum[pb + 3 * k + ch] += static_cast<i32>(std::llround(L[ch] * y[k] * wgt * rc::kShScale));
+    for (u32 a = 0; a < 3; ++a) S.accum[pb + 12 + a] += static_cast<i32>(std::llround(N[a] * rc::kNScale));
+    const f32 s = net::lum(L[0], L[1], L[2]) * wgt * static_cast<f32>(rc::kDcToE);
+    S.accum[rc::kSqBase + cell] += static_cast<i32>(std::llround(s * s * rc::kSqScale));
+    S.accum[cell] += 1;
+}
 
 }  // namespace
 
@@ -218,6 +245,7 @@ int main() {
             {"RCN_INFER_TARGET", net::kInferTarget}, {"RCN_TRAIN_TARGET", net::kTrainTarget}, {"RCN_MIN_FRESH", net::kMinFresh},
             {"RCN_MIN_NEFF", net::kMinNEff}, {"RCN_EPS", net::kEps}, {"RCN_TRUST_DIV", net::kTrustDivisor},
             {"RCN_STAT_SCALE", net::kStatScale}, {"RCN_STATS", net::kStatCount},
+            {"RCN_REL_SLACK", net::kRelSlack}, {"RCN_VAR_EPS", net::kVarEps}, {"RCN_Z_FREE", net::kZFree}, {"RCN_Z_SPAN", net::kZSpan},
         };
         for (const Lit& l : lits) {
             const f64 v = defineValue(hlsl, l.name);
@@ -240,10 +268,15 @@ int main() {
         check(has(cmake, "src/NeuRaCNet.cpp"), "modules/render.voxi/CMakeLists.txt builds NeuRaCNet.cpp");
         check(has(hlsl, "saturate(pred / RCN_TRUST_DIV)") && has(hlsl, "0x03FFFFFFu") && has(hlsl, "t6 << 26"),
               "the apply bakes round(63 saturate(pred / 0.85)) into bits 26..31 and keeps the other 26");
-        check(has(hlsl, "1.0 - min(1.0, 2.0 * rho)") && has(hlsl, "abs(Ef - Eo) / (Ef + Eo + RCN_EPS)"),
-              "the label is 1 - min(1, 2 rho), rho = |Ef - Eo| / (Ef + Eo + eps)");
-        check(has(hlsl, "f[3] = 1.0;") && has(hlsl, "f[3] = log2(1.0 + (float)n) / 6.0;"),
-              "input 3 is 1 at inference and log2(1 + n_fresh) / 6 in a training record");
+        check(has(hlsl, "saturate(1.0 - max(zs - RCN_Z_FREE, 0.0) / RCN_Z_SPAN)") &&
+                  has(hlsl, "abs(Ef - Eo) / sqrt(varMean + (RCN_REL_SLACK * Eo) * (RCN_REL_SLACK * Eo) + RCN_VAR_EPS)") &&
+                  has(hlsl, "max(msq - Ef * Ef, 0.0) / (float)max(n - 1u, 1u)") &&
+                  has(hlsl, "(float)gAccum[(uint)AVER_RC_SQ_BASE + cell] / ((float)n * (float)AVER_RC_SQ_SCALE)"),
+              "the label is saturate(1 - max(z - 2, 0) / 3), z = |Ef - Eo| / sqrt(var + (0.05 Eo)^2 + 1e-6), var from the sum of squares");
+        check(has(hlsl, "Eo = rcnLum(0.282095 * old[0])") && has(hlsl, "Ef = rcnLum(0.282095 * fresh[0])"),
+              "Eo and Ef are the DC term of irradiance / PI, the mean of the scatter's per-sample scalar");
+        check(has(hlsl, "f[3] = 1.0;") && !has(hlsl, "log2(1.0 + (float)n)"),
+              "input 3 is 1 in the inference and the training record alike");
     }
 
     // ---- 2. the network ------------------------------------------------------------------------------
@@ -327,13 +360,24 @@ int main() {
     // ---- 4. label, eligibility, trust ----------------------------------------------------------------
     AVER_INFO("=== label, eligibility, trust mapping ===");
     {
-        check(net::label(1.0f, 1.0f) == 1.0f, "label: an unmoved cell is 1");
-        check(approx(net::label(1.0f, 1.5f), 0.6, 2e-3), "label: Ef = 1.5 Eo gives rho = 0.2, label 0.6");
-        check(approx(net::label(1.0f, 0.5f), 1.0 - 2.0 * (0.5 / 1.501), 2e-3), "label: Ef = Eo / 2 gives rho = 1/3");
-        check(net::label(1.0f, 3.0f) >= 0.0f && net::label(1.0f, 3.0f) < 1e-3f && net::label(3.0f, 1.0f) < 1e-3f &&
-                  net::label(1.0f, 100.0f) == 0.0f,
-              "label: a cell that changed by a factor of 3 or more is ~0, never negative");
-        check(approx(net::label(2.0f, 1.0f), net::label(1.0f, 2.0f), 1e-6), "label: symmetric in Eo and Ef");
+        // Eo = 1, sampling variance 0.01 (standard error 0.1), 5% slack: the denominator d = sqrt(0.01 + 0.0025 + 1e-6).
+        const f64 d = std::sqrt(0.01 + 0.0025 + 1e-6);
+        check(net::label(1.0f, 1.0f, 0.01f) == 1.0f, "label: an unmoved cell is 1");
+        check(net::label(1.0f, static_cast<f32>(1.0 + 1.9 * d), 0.01f) == 1.0f && net::label(1.0f, static_cast<f32>(1.0 - 2.0 * d), 0.01f) > 0.9999f,
+              "label: within two standard errors is 1, either side");
+        check(approx(net::label(1.0f, static_cast<f32>(1.0 + 3.5 * d), 0.01f), 0.5, 1e-4), "label: 3.5 standard errors off gives 0.5");
+        check(net::label(1.0f, static_cast<f32>(1.0 + 5.0 * d), 0.01f) < 1e-4f && net::label(1.0f, static_cast<f32>(1.0 + 9.0 * d), 0.01f) == 0.0f &&
+                  net::label(1.0f, 0.0f, 0.01f) == 0.0f,
+              "label: five or more standard errors is 0, never negative");
+        check(net::label(1.0f, 1.05f, 0.0f) == 1.0f && approx(net::label(1.0f, 1.15f, 0.0f), 1.0 - (0.15 / std::sqrt(0.0025 + 1e-6) - 2.0) / 3.0, 1e-4),
+              "label: with no sampling noise the 5% slack on Eo is the whole tolerance");
+        check(net::label(1.0f, 1.3f, 0.0f) < 1e-4f && net::label(1.0f, 1.3f, 0.04f) > 0.9999f,
+              "label: the same 30% move is a failure on a quiet cell and nothing on a noisy one");
+        check(net::label(1.0f, 1.0f, 100.0f) == 1.0f && std::isfinite(net::label(0.0f, 0.5f, 0.0f)) && net::label(0.0f, 0.5f, 0.0f) == 0.0f,
+              "label: 1 for a huge variance, finite and 0 for a black old state against a bright fresh mean");
+        check(approx(net::meanVariance(1.09f, 1.0f, 11), 0.009, 1e-6) && net::meanVariance(0.9f, 1.0f, 11) == 0.0f &&
+                  approx(net::meanVariance(2.0f, 1.0f, 1), 1.0, 1e-6),
+              "variance of the mean: (mean of squares - mean^2) / (n - 1), floored at 0, n = 1 divides by 1");
 
         check(net::eligible(8, 2, 1.0f, 1.0f), "eligible: 8 fresh samples, n_eff 2");
         check(!net::eligible(7, 2, 1.0f, 1.0f), "not eligible: 7 fresh samples");
@@ -387,7 +431,7 @@ int main() {
             check(f.touched && f.eligible && f.nFresh == 12, "an isolated cell with 12 fresh samples is touched and eligible");
             check(f.in[0] == len && approx(len, 0.9, 1.0 / 63.0), "input 0 is the cell's planarity as stored (0.9, resolution 1/63)");
             check(approx(f.in[1], 12.0 / 15.0, 1e-6) && approx(f.in[2], 3.0 / 15.0, 1e-6), "inputs 1 and 2 are n_eff / 15 and age / 15");
-            check(f.in[3] == 1.0f && approx(f.trainIn3, std::log2(13.0) / 6.0, 1e-6), "input 3 is 1 at inference and log2(1 + 12) / 6 in training");
+            check(f.in[3] == 1.0f, "input 3 is 1: the label does not depend on the sample count");
             check(f.in[4] == 0.0f && f.in[5] == 0.0f && f.in[6] == 0.0f, "no neighbours: support, disagreement and the neighbour ratio are 0");
             check(approx(f.in[7], std::sqrt(0.01 + 0.0 + 0.0025) * 0.5, 3e-3), "input 7 is the old SH anisotropy |c1,c2,c3| / c0, halved");
             check(f.in[8] == nu[1] && approx(f.in[9], 0.5, 1e-7), "inputs 8 and 9 are nu.y and cascade / 2");
@@ -445,17 +489,21 @@ int main() {
 
         // Label against the fresh scale.
         {
-            struct Row { f32 scale; f64 label; };
-            const Row rows[] = {{1.5f, 0.6}, {0.5f, 1.0 - 2.0 / 3.0}, {3.0f, 0.0}, {0.0f, 0.0}};
+            // Fresh samples of coefficient of variation 0.3 around Ef = scale * Eo, 16 of them, so var = (0.3 Ef)^2 / 15.
             bool ok = true;
-            for (const Row& r : rows) {
+            std::string got;
+            for (const f32 scale : {1.03f, 1.15f, 1.3f, 1.5f, 0.5f, 3.0f, 0.0f}) {
                 CaseParams p;
                 p.world[0] = 40;
-                p.freshScale = r.scale;
+                p.freshScale = scale;
                 const net::Features f = features(p, S);
-                ok = ok && f.eligible && approx(f.label, r.label, 4e-3);
+                const f64 eo = 0.82808, ef = scale * eo;   // lum(1.0, 0.8, 0.6)
+                const f64 z = std::fabs(ef - eo) / std::sqrt(0.09 * ef * ef / 15.0 + 0.0025 * eo * eo + 1e-6);
+                const f64 want = std::clamp(1.0 - std::max(z - 2.0, 0.0) / 3.0, 0.0, 1.0);
+                ok = ok && f.eligible && approx(f.label, want, 4e-3) && approx(f.varMean, 0.09 * ef * ef / 15.0, 2e-4);
+                got += " " + std::to_string(f.label);
             }
-            check(ok, "label from the real cell and accumulator: fresh at 1.5x, 0.5x, 3x and 0 gives 0.6, 0.333, 0, 0");
+            check(ok, "label from the real cell and accumulator at fresh scales 1.03 .. 3 and 0, against the z-score formula (" + got + " )");
         }
 
         // Eligibility and "touched".
@@ -508,7 +556,77 @@ int main() {
         }
     }
 
-    // ---- 6. a trained net separates leaky from clean ---------------------------------------------------
+    // ---- 6. the label against sampling noise -------------------------------------------------------------
+    AVER_INFO("=== the label is calibrated to the fresh samples' noise ===");
+    {
+        // Monte Carlo samples scattered as the shader does: exponential radiance (coefficient of variation 1, the
+        // heavy-ish tail of a real second bounce), 16 per frame, fixed cos 0.5 so the scalar is lum(L) / 2 exactly.
+        // The old state is the true mean times `oldFactor`: 1 = a perfect cell, 1.75 = 3 standard errors of the mean off.
+        constexpr u32 kTrials = 600, kSamples = 16;
+        const f32 Lbar[3] = {1.0f, 0.8f, 0.6f}, N[3] = {0.0f, 0.0f, 1.0f};
+        struct Result { f64 meanLabel, fullFraction, varRatio; };
+        Scene S;
+        auto run = [&](f32 oldFactor) {
+            Rng rng(11);
+            CaseParams p;
+            p.world[0] = 20;
+            p.nEff = 10;
+            p.customFresh = true;
+            for (int a = 0; a < 3; ++a) { p.L[a] = 0.5f * Lbar[a] * oldFactor; p.aniso[a] = 0.0f; }
+            const u32 cell = writeCase(S, p);
+            f64 sumLabel = 0.0, sumVar = 0.0, sumEf = 0.0, sumEf2 = 0.0;
+            u32 full = 0;
+            for (u32 t = 0; t < kTrials; ++t) {
+                clearAccum(S, cell);
+                for (u32 i = 0; i < kSamples; ++i) {
+                    const f32 g = -std::log(1.0f - rng.next());
+                    const f32 L[3] = {Lbar[0] * g, Lbar[1] * g, Lbar[2] * g};
+                    f32 dir[3];
+                    randomUnit(rng, dir);
+                    addSample(S, cell, L, N, dir, 0.5f);
+                }
+                const net::Features f = featuresOf(S, cell);
+                sumLabel += f.label;
+                full += f.label == 1.0f;
+                sumVar += f.varMean;
+                sumEf += f.Ef;
+                sumEf2 += static_cast<f64>(f.Ef) * f.Ef;
+            }
+            const f64 meanEf = sumEf / kTrials, varEf = sumEf2 / kTrials - meanEf * meanEf;
+            return Result{sumLabel / kTrials, static_cast<f64>(full) / kTrials, (sumVar / kTrials) / varEf};
+        };
+        const Result perfect = run(1.0f), bias3 = run(1.75f), bias6 = run(2.5f), bias12 = run(4.0f);
+        AVER_INFO("  mean label: perfect {:.3f} (label 1 in {:.0f}%), 3 SE off {:.3f}, 6 SE off {:.3f}, 12 SE off {:.3f}; "
+                  "estimated / true variance of Ef {:.3f}",
+                  perfect.meanLabel, 100.0 * perfect.fullFraction, bias3.meanLabel, bias6.meanLabel, bias12.meanLabel, perfect.varRatio);
+        check(perfect.meanLabel > 0.93 && perfect.fullFraction > 0.85,
+              "a perfect cell under noisy samples averages a label near 1 (" + std::to_string(perfect.meanLabel) + ")");
+        check(approx(perfect.varRatio, 1.0, 0.2), "the estimated variance of the fresh mean matches its true variance over trials (" +
+                                                       std::to_string(perfect.varRatio) + ")");
+        check(bias3.meanLabel < 0.65 && perfect.meanLabel - bias3.meanLabel > 0.3,
+              "a cell 3 standard errors off is clearly lower (" + std::to_string(bias3.meanLabel) + ")");
+        check(bias6.meanLabel < 0.25 && bias12.meanLabel < 0.02,
+              "6 standard errors off is near 0 and 12 is 0 (" + std::to_string(bias6.meanLabel) + ", " + std::to_string(bias12.meanLabel) + ")");
+
+        // The scatter's fixed point: the sum of squares reproduces the mean of squares of the scalar.
+        CaseParams p;
+        p.world[0] = 24;
+        p.customFresh = true;
+        const u32 cell = writeCase(S, p);
+        const f32 L1[3] = {2.0f, 1.0f, 0.5f}, L2[3] = {0.3f, 0.3f, 0.3f}, dir[3] = {0.0f, 1.0f, 0.0f};
+        addSample(S, cell, L1, N, dir, 0.25f);
+        addSample(S, cell, L2, N, dir, 1.0f);
+        const f64 s1 = net::lum(2.0f, 1.0f, 0.5f) * rc::kPi / 0.25 * rc::kDcToE, s2 = 0.3 * rc::kPi * rc::kDcToE;
+        check(approx(S.accum[rc::kSqBase + cell] / rc::kSqScale, s1 * s1 + s2 * s2, 2.0 / rc::kSqScale) && (S.accum[cell] & 0xFFFF) == 2,
+              "two scattered samples add their squared scalars in fixed point and count 2");
+        const net::Features f = featuresOf(S, cell);
+        check(approx(f.Ef, (s1 + s2) / 2.0, 1e-3 * (s1 + s2)), "Ef, from the SH payload, is the mean of the same scalar (" + std::to_string(f.Ef) +
+                                                                  " vs " + std::to_string((s1 + s2) / 2.0) + ")");
+        check(approx(f.varMean, (s1 * s1 + s2 * s2) / 2.0 - ((s1 + s2) / 2.0) * ((s1 + s2) / 2.0), 1e-3 * (s1 * s1 + s2 * s2)),
+              "and its variance of the mean is the sample variance over (n - 1) = 1 (" + std::to_string(f.varMean) + ")");
+    }
+
+    // ---- 7. a trained net separates leaky from clean ---------------------------------------------------
     AVER_INFO("=== a MlpReference-trained net separates leaky cells from clean ones ===");
     {
         Scene S;
@@ -572,7 +690,7 @@ int main() {
             const net::Features f = makeCase(k, leaky);
             eligibleCount += f.touched && f.eligible;
             if (k < kTrainCases) {
-                for (u32 i = 0; i < net::kInputs; ++i) trainIn.push_back(i == 3 ? f.trainIn3 : f.in[i]);
+                for (u32 i = 0; i < net::kInputs; ++i) trainIn.push_back(f.in[i]);
                 trainOut.push_back(f.label);
             } else {
                 for (u32 i = 0; i < net::kInputs; ++i) testIn.push_back(f.in[i]);
@@ -583,7 +701,7 @@ int main() {
         f64 cleanLabel = 0.0, leakyLabel = 0.0;
         for (u32 k = 0; k < kTrainCases; ++k) (k & 1u ? leakyLabel : cleanLabel) += trainOut[k];
         cleanLabel /= kTrainCases / 2; leakyLabel /= kTrainCases / 2;
-        check(cleanLabel > 0.9 && leakyLabel < 0.4, "the labels separate: clean " + std::to_string(cleanLabel) + ", leaky " + std::to_string(leakyLabel));
+        check(cleanLabel > 0.97 && leakyLabel < 0.2, "the labels separate: clean " + std::to_string(cleanLabel) + ", leaky " + std::to_string(leakyLabel));
 
         const nn::MlpDesc d = net::netDesc();
         nn::MlpReference m(d, net::netOptimiser());
@@ -617,7 +735,7 @@ int main() {
         const f64 cleanAfter = meanTrust(false), leakyAfter = meanTrust(true);
         AVER_INFO("  loss {:.4f} -> {:.4f}; held-out mean trust: clean {:.3f}, leaky {:.3f}", firstLoss, lastLoss, cleanAfter, leakyAfter);
         check(lastLoss < 0.25f * firstLoss, "the training loss falls to a quarter or less");
-        check(cleanAfter > 0.95, "after training, clean held-out cells keep a trust near 1 (" + std::to_string(cleanAfter) + ")");
+        check(cleanAfter > 0.95, "after training, clean held-out cells have a trust near 1 (" + std::to_string(cleanAfter) + ")");
         check(leakyAfter < 0.5, "leaky held-out cells fall below 0.5 (" + std::to_string(leakyAfter) + ")");
         check(cleanAfter - leakyAfter > 0.4, "the margin between clean and leaky mean trust is above 0.4 (" + std::to_string(cleanAfter - leakyAfter) + ")");
     }

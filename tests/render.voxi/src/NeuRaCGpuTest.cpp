@@ -418,7 +418,7 @@ struct Env {
 
     // Accepted count (low half), last frame's arrivals (high half), this frame's arrivals, and the number of
     // payload additions (summed normal x over its integer step) for one cell.
-    struct CellLoad { u32 accepted = 0, prev = 0, arrivals = 0, payloadCount = 0; };
+    struct CellLoad { u32 accepted = 0, prev = 0, arrivals = 0, payloadCount = 0; i32 sqSum = 0; };
     CellLoad readLoad(u32 idx, const f32 n[3]) {
         CellLoad l;
         u32 word = 0, arr = 0;
@@ -427,6 +427,7 @@ struct Env {
         i32 nsum[3] = {};
         readBytes(last.accum, (static_cast<u64>(rc::kPayloadBase) + static_cast<u64>(idx) * rc::kPayloadInts + 12) * 4,
                   12, nsum);
+        readBytes(last.accum, (static_cast<u64>(rc::kSqBase) + idx) * 4, 4, &l.sqSum);
         l.accepted = word & 0xFFFFu;
         l.prev = word >> 16;
         l.arrivals = arr;
@@ -594,7 +595,32 @@ void runGpu(rhi::IDevice& dev) {
         usize nonzero = 0;
         for (u32 v : arr) if (v) ++nonzero;
         check(nonzero == 3, "arrivals are non-zero in exactly 3 cells (the sample's cell per cascade), got " + std::to_string(nonzero));
+        // The sum of squares: each accepted sample adds round(s^2 * 2^11), s = lum(L) * PI / max(cos, 0.1) / (4 PI).
+        {
+            const f32 wgt = static_cast<f32>(rc::kPi) / std::max(base1.cosd, static_cast<f32>(rc::kMinCos));
+            const f32 sc = (0.2126f * base1.L[0] + 0.7152f * base1.L[1] + 0.0722f * base1.L[2]) * wgt * static_cast<f32>(rc::kDcToE);
+            const i64 one = std::llround(sc * sc * rc::kSqScale);
+            bool ok = true;
+            for (u32 c = 0; c < 3; ++c) {
+                const Env::CellLoad l = e.readLoad(idx1[c], n1);
+                ok = ok && std::llabs(static_cast<i64>(l.sqSum) - one * caps[c]) <= static_cast<i64>(caps[c]);   // +-1 per sample
+            }
+            check(ok && one > 0, "the sum of squares of each cell is cap x round(s^2 * 2048), one atomic per accepted sample (s^2 * 2048 = " +
+                                     std::to_string(one) + ")");
+            std::vector<i32> sq(rc::kCells);
+            check(e.readBytes(e.last.accum, static_cast<u64>(rc::kSqBase) * 4, rc::kCells * 4ull, sq.data()), "sum-of-squares block read");
+            usize sqNonzero = 0;
+            for (i32 v : sq) if (v) ++sqNonzero;
+            check(sqNonzero == 3, "the sum of squares is non-zero in exactly the same 3 cells, got " + std::to_string(sqNonzero));
+        }
         check(e.resolve(), "frame 1: resolve");
+        {
+            std::vector<i32> sq(rc::kCells);
+            check(e.readBytes(e.last.accum, static_cast<u64>(rc::kSqBase) * 4, rc::kCells * 4ull, sq.data()), "sum-of-squares block read after the resolve");
+            usize sqNonzero = 0;
+            for (i32 v : sq) if (v) ++sqNonzero;
+            check(sqNonzero == 0, "the resolve zeroes the sum of squares together with the payload, got " + std::to_string(sqNonzero) + " non-zero");
+        }
 
         f32 want[rc::kShFloats];
         expectedSh(base1, want);
@@ -982,10 +1008,16 @@ void buildNetScene(NetScene& S) {
                     const u32 n = u01() < 0.7f ? below(91) : 0u;
                     S.accum[idx] = static_cast<i32>(n | (below(40) << 16));
                     const u32 nUsed = std::min(n, rc::capForCascade(S.info, c));
-                    const f32 factor = uni(0.2f, 3.0f);
+                    // Half the cells near the old light (labels 1 or in between), half anywhere (labels 0 .. 1).
+                    const f32 factor = u01() < 0.5f ? uni(0.85f, 1.2f) : uni(0.2f, 3.0f);
+                    const f32 cv = uni(0.1f, 1.5f);   // spread of the fresh samples, as the sum of squares
                     const u32 pb = rc::kPayloadBase + idx * rc::kPayloadInts;
                     for (u32 k = 0; k < rc::kShFloats && nUsed; ++k)
                         S.accum[pb + k] = static_cast<i32>(std::llround(static_cast<f64>(sh[k] * factor) * nUsed * rc::kShScale));
+                    if (nUsed) {
+                        const f64 ef = 0.282095 * (0.2126 * sh[0] + 0.7152 * sh[1] + 0.0722 * sh[2]) * factor;   // the mean of the scalar
+                        S.accum[rc::kSqBase + idx] = static_cast<i32>(std::llround(nUsed * ef * ef * (1.0 + static_cast<f64>(cv) * cv) * rc::kSqScale));
+                    }
                 }
 }
 
@@ -1246,15 +1278,14 @@ void compareNetResult(const NetScene& S, const NetResult& r, f32 inferRate, f32 
             const net::Features& f = expectTrain[j];
             bool same = std::fabs(r.trainTgt[i] - f.label) <= 5e-4f;
             for (u32 k = 0; k < net::kInputs && same; ++k) {
-                const f32 want = k == 3 ? f.trainIn3 : f.in[k];
-                same = std::fabs(r.trainRec[i * net::kInputs + k] - want) <= 3e-4f;
+                same = std::fabs(r.trainRec[i * net::kInputs + k] - f.in[k]) <= 3e-4f;
             }
             if (same) { used[j] = true; found = true; }
         }
         if (!found) ++unmatched;
     }
     check(unmatched == 0 && r.trainTgt.size() == expectTrain.size(),
-          tag + ": every training record matches an expected one (input 3 = log2(1 + n) / 6) with its label (" +
+          tag + ": every training record matches an expected one (the same inputs as inference, input 3 = 1) with its label (" +
               std::to_string(unmatched) + " unmatched)");
 }
 

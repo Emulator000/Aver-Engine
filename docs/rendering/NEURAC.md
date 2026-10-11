@@ -144,7 +144,7 @@ include movers from the start, so lighting near them is not frozen.
 - At lookup, irradiance is the cosine-convolved SH, with ZH3-style sharpening (Roughton 2024) as a
   cheap upgrade on the diffuse term.
 - An **accumulator** per cascade: 12 signed fixed-point sums + 1 sample count = 13 × u32 per cell. It is
-  written only during the frame and cleared by the resolve. (As built: 17 ints per cell, 5.10 item 5 and 5.11.)
+  written only during the frame and cleared by the resolve. (As built: 18 ints per cell, 5.10 item 5, 5.11 and 5.12.)
 
 ### 5.4 Training samples — where they come from
 
@@ -321,10 +321,10 @@ since been run and measured (Status above), and items 4, 5 and 8 were changed ag
    soft `DisableReason::RequiresStagedRayDriven` (it warns in the UI, never greys the control, and
    `effective` still equals `requested`), and the renderer logs the fallback once. The split `CSRdGi`
    variant (`AVER_GI_SPLIT`) only reads the candidate buffer and never traces, so it needs no twin.
-8. **VRAM is about 79 MB (75 MiB), not 19 MB (5.3, 5.1).** Accumulator 53.5 MB (13,369,344 ints: 17 per
-   cell, the 15 payload ints plus the counts and arrivals words) plus cells 25.2 MB (786,432 x 32 B), about
-   four times the original estimate, because 15 ints per cell are accumulated rather than 13 and no packed
-   texture form is used for the sums. The network's lists add about 8 MB (5.12). The owner has accepted
+8. **VRAM is about 82 MB (78 MiB), not 19 MB (5.3, 5.1).** Accumulator 56.6 MB (14,155,776 ints: 18 per
+   cell, the 15 payload ints, the counts and arrivals words and the stage-2a sum of squares) plus cells
+   25.2 MB (786,432 x 32 B), about four times the original estimate, because 15 ints per cell are accumulated
+   rather than 13 and no packed texture form is used for the sums. The network's lists add about 8 MB (5.12). The owner has accepted
    this. If it proves too much: 48^3 cascades, or a 16-bit accumulator; neither is free.
 9. **Zero-init and reset are one mechanism.** The RHI has no buffer clear, so the resolve shader has a
    `CLEAR_ALL` flag (bit 0 of the info word) that zeroes every cell and the whole accumulator; creation
@@ -422,7 +422,8 @@ the fixes below are built, tested on the CPU and on WARP, and not yet judged in 
 7. **Trust field and accumulator layout (for stage 2a).** The normal word is
    `octU 10 | octV 10 | len 6 | trust 6` (63 = 1.0; length resolution 1/63, octahedral error under 0.15
    degrees). The accumulator is counts `[0, K)` as `accepted | prevArrivals << 16`, arrivals `[K, 2K)`,
-   then 15 payload ints per cell from `2K`, `K = kCells`: `kAccumInts = 17 * kCells` (13,369,344, 53.5 MB;
+   then 15 payload ints per cell from `2K`, `K = kCells`, then `K` sums of squares at `kSqBase = 17K`
+   (stage 2a, 5.12): `kAccumInts = 18 * kCells` (14,155,776, 56.6 MB;
    `info.accumInts` reaches table 0 through `Bindings`, no renderer change). `RcInfo` stays 80 bytes:
    `hdr1 = (alphaMin, relaxAlpha, asfloat(coarseCaps), netStrength)`. The resolve sets trust to 63 for a
    new or replaced cell and carries it for a valid one. The lookup weight gains `lerp(1, trust,
@@ -451,7 +452,7 @@ stage 2 network is off under Path Tracing (5.12).
 
 **Tests.** `NeuRaCTest` (CPU): normal-word round trip with trust, the `AVER_RC_*` literals including the new
 payload base, the wall case (the trained cell gets at least 0.5 of the 1D weight for both normal signs),
-rate and cap tables, `kAccumInts == 17 * kCells` and `sizeof(RcInfo) == 80`. `NeuRaCGpuTest` (WARP, or `hw`
+rate and cap tables, `kAccumInts == 18 * kCells`, the sum-of-squares headroom and `sizeof(RcInfo) == 80`. `NeuRaCGpuTest` (WARP, or `hw`
 for the adapter; skips with 77 without a device) runs the real hash, scatter, resolve and lookup shaders
 through a harness and compares them with the CPU mirrors: arrivals land in the predicted cells, caps and the
 accept rate across frames, the resolve blend / relax / trust carry / aging, lookup value and `remaining`
@@ -520,7 +521,7 @@ neighbours in the same cascade; one counts if its tag matches, `n_eff > 0` and a
 | 0 | `len` (planarity) |
 | 1 | `n_eff / 15` |
 | 2 | `age / 15` |
-| 3 | `log2(1 + n_fresh) / 6` in training; **1.0 at inference**, so sampling noise is not read as unreliability |
+| 3 | 1.0 in training and inference (the label no longer depends on `n_fresh`; the input is kept so the network keeps its shape) |
 | 4 | neighbour support, sum of weights / 6 |
 | 5 | neighbour disagreement, clamped to 2 and halved |
 | 6 | `clamp(log2((E_nbr + eps) / (Eo + eps)), -4, 4) / 4`, 0 with no support |
@@ -528,8 +529,16 @@ neighbours in the same cascade; one counts if its tag matches, `n_eff > 0` and a
 | 8 | `nu.y` |
 | 9 | `cascade / 2` |
 
-**Label** (training only): `tau* = 1 - min(1, 2 rho)`, `rho = |Ef - Eo| / (Ef + Eo + 1e-3)`: a cell whose
-fresh samples disagree with its old state is unreliable. The label cannot tell a leak from a real
+**Label** (training only), noise-calibrated: `z = |Ef - Eo| / sqrt(var + (0.05 Eo)^2 + 1e-6)`,
+`tau* = saturate(1 - max(z - 2, 0) / 3)` (1 up to two standard errors of the fresh mean, 0 from five). A cell
+whose fresh samples disagree with its old state beyond their sampling error is unreliable; a perfect cell
+under noisy samples scores 1 (the earlier `1 - min(1, 2 |Ef - Eo| / (Ef + Eo))` read the noise itself as
+error: mean label 0.44 on Caldera). `Eo` and `Ef` are the DC term of irradiance / PI in luminance
+(`0.282095 * c0`), the mean of the per-sample scalar `s = lum(L) * weight / (4 PI)` that the scatter squares
+into one extra accumulator int per accepted sample (fixed point `2^11`, `s <= 80`, 64 samples: 8.4e8, a 2x margin
+under int32). `var = max(sumSq / n - Ef^2, 0) / max(n - 1, 1)` is the variance of that mean. The DC term is
+what makes `Ef` and its variance come from the same samples; a purely directional change (same total light
+from another side) is invisible to the label. The label cannot tell a leak from a real
 lighting change; the relax hooks (5.11) and the warm-up bound the damage. Only **touched** cells get a
 record: those that took samples this frame and hold a valid old state (tag matches, age < 15). **Eligible**
 for training are touched cells with `n_fresh >= 8`, `n_eff >= 2` and `Eo + Ef > 1e-3`. Both lists are
@@ -568,7 +577,7 @@ off, `netStrength` 0, and stage-1 behaviour exact, when:
 No weights are saved: the tiny net converges in seconds. Trust bits stay in the cells but have no effect at
 strength 0.
 
-**Settings and views.** `voxi.neuracNet` (bool, default 0 since 2026-10-12: on Caldera the label read Monte Carlo noise as error, mean trust settled near 0.5 and the per-cell trust became a 25 cm pattern in the lookup coverage; it stays off until the label is noise-calibrated), `voxi.neuracNetStrength` (0-1, default 1).
+**Settings and views.** `voxi.neuracNet` (bool, default 0 since 2026-10-12: on Caldera the label read Monte Carlo noise as error, mean trust settled near 0.5 and the per-cell trust became a 25 cm pattern in the lookup coverage; the label is now noise-calibrated, so it can be re-enabled once a Caldera run shows the mean label and trust near 1 on steady cells), `voxi.neuracNetStrength` (0-1, default 1).
 Visualiser mode 5 shows trust (`--neurac-view 5`). Every 120 frames the log prints
 `[Voxi] NeuRaC net: step N, eligible N, mean label, mean pred, loss, mean trust` (the loss comes from the
 apply kernel, the `Mlp` has no loss readout). GPU span "Voxi NeuRaC net".
@@ -578,7 +587,8 @@ about 0.03, apply about 0.02); budget 0.5 ms. **UNVERIFIED.**
 
 **Tests.** `NeuRaCNetTest` (CPU, against `MlpReference`): identity init gives trust exactly 1; on synthetic
 cells, planar stable ones keep a high trust and leaky, fluctuating low-planarity ones get a clearly lower
-one; label, eligibility and mapping bounds; training batch at most `safeBatchLimit`. `NeuRaCGpuTest` (WARP)
+one; the label against scattered Monte Carlo samples (a perfect cell scores near 1, one three or more standard errors off clearly
+lower), eligibility and mapping bounds; training batch at most `safeBatchLimit`. `NeuRaCGpuTest` (WARP)
 compares `CSRcNetFeatures` records with the CPU feature builder and checks the `CSRcNetApply` bit writes.
 
 **How to judge it.** Its benefit is unverified. Look at the trust view for thin walls and corners, and the

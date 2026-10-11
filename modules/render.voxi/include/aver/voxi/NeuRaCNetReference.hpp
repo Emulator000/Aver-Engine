@@ -24,6 +24,10 @@ inline constexpr u32 kTrainTarget = 12288;    // RCN_TRAIN_TARGET
 inline constexpr u32 kMinFresh    = 8;        // RCN_MIN_FRESH
 inline constexpr u32 kMinNEff     = 2;        // RCN_MIN_NEFF
 inline constexpr f32 kEps         = 0.001f;   // RCN_EPS
+inline constexpr f32 kRelSlack    = 0.05f;    // RCN_REL_SLACK
+inline constexpr f32 kVarEps      = 0.000001f;   // RCN_VAR_EPS
+inline constexpr f32 kZFree       = 2.0f;     // RCN_Z_FREE
+inline constexpr f32 kZSpan       = 3.0f;     // RCN_Z_SPAN
 inline constexpr f32 kTrustDivisor = 0.85f;   // RCN_TRUST_DIV
 inline constexpr f32 kStatScale   = 16384.0f; // RCN_STAT_SCALE
 inline constexpr u32 kStatCount   = 8;        // RCN_STATS
@@ -85,10 +89,16 @@ inline bool thinKeep(f32 rate, u32 cell, u32 frame, u32 salt) {
 // ---------------------------------------------------------------- label, eligibility, trust
 inline f32 lum(f32 r, f32 g, f32 b) { return 0.2126f * r + 0.7152f * g + 0.0722f * b; }
 
-// How far the frame's mean moved the cell's own light: 1 = unmoved, 0 = changed by half or more.
-inline f32 label(f32 Eo, f32 Ef) {
-    const f32 rho = std::fabs(Ef - Eo) / (Ef + Eo + kEps);
-    return 1.0f - std::min(1.0f, 2.0f * rho);
+// How far the frame's mean moved the cell's own light, in standard errors of that mean: 1 up to kZFree of them
+// (a perfect cell scores 1 however noisy its fresh samples), 0 from kZFree + kZSpan. varMean = variance of Ef.
+inline f32 label(f32 Eo, f32 Ef, f32 varMean) {
+    const f32 z = std::fabs(Ef - Eo) / std::sqrt(varMean + (kRelSlack * Eo) * (kRelSlack * Eo) + kVarEps);
+    const f32 l = 1.0f - std::max(z - kZFree, 0.0f) / kZSpan;
+    return l < 0.0f ? 0.0f : (l > 1.0f ? 1.0f : l);
+}
+// Variance of the fresh mean from the mean of squares msq = sumSq / n and the mean Ef (unbiased, / (n - 1)).
+inline f32 meanVariance(f32 msq, f32 Ef, u32 n) {
+    return std::max(msq - Ef * Ef, 0.0f) / static_cast<f32>(std::max(n, 2u) - 1u);
 }
 // age < kAgeMax and the tag are the touched test (cellValid); this is the rest.
 inline bool eligible(u32 nFresh, u32 nEff, f32 Eo, f32 Ef) {
@@ -109,9 +119,9 @@ struct Features {
     bool touched  = false;   // took samples this frame and holds a valid old state: gets an inference record
     bool eligible = false;   // and may train
     u32  nFresh = 0;         // this frame's accepted samples, capped
-    f32  in[kInputs] = {};   // the inference record (input 3 = 1)
-    f32  trainIn3 = 0.0f;    // input 3 of the training record: log2(1 + nFresh) / 6
-    f32  Eo = 0.0f, Ef = 0.0f, label = 0.0f;
+    f32  in[kInputs] = {};   // the inference and training record (input 3 = 1)
+    f32  Eo = 0.0f, Ef = 0.0f, label = 0.0f;   // Eo, Ef: DC irradiance / PI luminance of the old state and the fresh mean
+    f32  varMean = 0.0f;     // sampling variance of Ef
 };
 
 // Face-neighbour order of the kernel: +x, -x, +y, -y, +z, -z.
@@ -139,7 +149,8 @@ inline f32 irradianceLum(const f32 sh[kShFloats], const f32 n[3]) {
 
 // The kernel's work on one cell, from the cell images before this frame's resolve. `nbWorld`-addressed neighbours are
 // read from `cells` through the toroidal index, so a neighbour outside the window fails its tag test, as on the GPU.
-// `accum` is the accumulator image (counts at [0, kCells), payload from kPayloadBase). Thinning is not applied here.
+// `accum` is the accumulator image (counts at [0, kCells), payload from kPayloadBase, sums of squares from kSqBase).
+// Thinning is not applied here.
 inline Features buildForCell(const RcCell* cells, const i32* accum, const RcInfo& info, u32 cell) {
     Features out;
     if (info.flags & kFlagClearAll) return out;   // the resolve clears every cell this frame
@@ -166,8 +177,13 @@ inline Features buildForCell(const RcCell* cells, const i32* accum, const RcInfo
     f32 fresh[kShFloats];
     for (u32 k = 0; k < kShFloats; ++k) fresh[k] = static_cast<f32>(accum[pb + k]) * shInv;
 
-    out.Eo = irradianceLum(old, nu);
-    out.Ef = irradianceLum(fresh, nu);
+    // The label's scalar is the DC term of irradiance / PI: the mean of the scatter's per-sample scalar, so Ef and its
+    // variance come from the same samples. The neighbour ratio below compares full irradiance.
+    out.Eo = lum(0.282095f * old[0], 0.282095f * old[1], 0.282095f * old[2]);
+    out.Ef = lum(0.282095f * fresh[0], 0.282095f * fresh[1], 0.282095f * fresh[2]);
+    const f32 eoFull = irradianceLum(old, nu);
+    const f32 msq = static_cast<f32>(accum[kSqBase + cell]) / (static_cast<f32>(n) * static_cast<f32>(kSqScale));
+    out.varMean = meanVariance(msq, out.Ef, n);
 
     f32 sumW = 0.0f, sumWE = 0.0f, wk[6], ek[6];
     for (int k = 0; k < 6; ++k) {
@@ -194,7 +210,7 @@ inline Features buildForCell(const RcCell* cells, const i32* accum, const RcInfo
         f32 dev = 0.0f;
         for (int k = 0; k < 6; ++k) dev += wk[k] * std::fabs(ek[k] - ebar);
         disagree = dev / (sumW * (ebar + kEps));
-        ratio = std::clamp(std::log2((ebar + kEps) / (out.Eo + kEps)), -4.0f, 4.0f) * 0.25f;
+        ratio = std::clamp(std::log2((ebar + kEps) / (eoFull + kEps)), -4.0f, 4.0f) * 0.25f;
     }
     const f32 l1 = lum(old[3], old[4], old[5]), l2 = lum(old[6], old[7], old[8]), l3 = lum(old[9], old[10], old[11]);
     const f32 aniso = std::sqrt(l1 * l1 + l2 * l2 + l3 * l3) / std::max(lum(old[0], old[1], old[2]), kEps);
@@ -209,8 +225,7 @@ inline Features buildForCell(const RcCell* cells, const i32* accum, const RcInfo
     out.in[7] = std::min(aniso, 2.0f) * 0.5f;
     out.in[8] = nu[1];
     out.in[9] = static_cast<f32>(cascade) * 0.5f;
-    out.trainIn3 = std::log2(1.0f + static_cast<f32>(n)) / 6.0f;
-    out.label = label(out.Eo, out.Ef);
+    out.label = label(out.Eo, out.Ef, out.varMean);
     out.eligible = eligible(n, nEff, out.Eo, out.Ef);
     return out;
 }

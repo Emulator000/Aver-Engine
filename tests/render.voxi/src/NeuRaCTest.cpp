@@ -79,7 +79,7 @@ int main() {
     AVER_INFO("=== layout constants ===");
     {
         check(rc::kCells == 786432u && rc::kCellsPerCascade == 262144u, "3 x 64^3 = 786,432 cells");
-        check(rc::kAccumInts == 13369344u && rc::kAccumBytes == 53477376ull, "accumulator is 13,369,344 ints = 53,477,376 B");
+        check(rc::kAccumInts == 14155776u && rc::kAccumBytes == 56623104ull, "accumulator is 14,155,776 ints = 56,623,104 B");
         check(rc::kCellsBytes == 25165824ull, "cells are 786,432 x 32 B = 25,165,824 B");
         check(sizeof(rc::RcInfo) == 80 && sizeof(rc::RcCell) == 32, "RcInfo is 80 B and RcCell is 32 B");
         check(rc::kResolveGroups == 12288u && rc::kResolveGroups * rc::kResolveGroupSize == rc::kCells,
@@ -87,7 +87,7 @@ int main() {
         check(rc::kCellSizeCm[0] == 25.0f && rc::kCellSizeCm[1] == 100.0f && rc::kCellSizeCm[2] == 400.0f,
               "cell sizes are 25 / 100 / 400 cm");
         const f64 total = static_cast<f64>(rc::kAccumBytes + rc::kCellsBytes) / (1024.0 * 1024.0);
-        check(total > 74.5 && total < 75.5, "the VRAM bill is ~75 MiB (78.6 MB): 3.2 MB over the 72 MiB the owner accepted");
+        check(total > 77.5 && total < 78.5, "the VRAM bill is ~78 MiB (81.8 MB): 3.1 MiB over the 75 MiB before the sum-of-squares block");
     }
 
     // ---- 2. fixed-point headroom ------------------------------------------------------------------
@@ -102,7 +102,14 @@ int main() {
         for (u32 i = 0; i < rc::kMaxCap; ++i) nsum += static_cast<std::int64_t>(std::llround(1.0 * rc::kNScale));
         check(nsum < 2147483647ll / 2, "64 unit normals sum to " + std::to_string(nsum) + ", far under int32 max");
         check(rc::kWorstSample > 480.0 && rc::kWorstSample < 500.0, "the documented worst sample is ~491");
-        check(rc::kShScale == 32768.0 && rc::kNScale == 65536.0, "scales are 2^15 and 2^16");
+        check(rc::kShScale == 32768.0 && rc::kNScale == 65536.0 && rc::kSqScale == 2048.0, "scales are 2^15, 2^16 and 2^11");
+        // The label's per-sample scalar luminance(L) * PI / max(cos, 0.1) / (4 PI), worst case 64 samples, int64 so the test cannot wrap.
+        check(approx(rc::kWorstScalar, 80.0, 1e-9), "the worst per-sample scalar is 32 * 10 / 4 = 80");
+        std::int64_t sqSum = 0;
+        for (u32 i = 0; i < rc::kMaxCap; ++i)
+            sqSum += static_cast<std::int64_t>(std::llround(rc::kWorstScalar * rc::kWorstScalar * rc::kSqScale));
+        check(sqSum < 2147483647ll / 2 && approx(static_cast<f64>(sqSum), rc::kWorstSqSum, 1.0),
+              "64 worst-case squared scalars sum to " + std::to_string(sqSum) + ", under half of int32 max");
     }
 
     // ---- 3. tags and cell indices ------------------------------------------------------------------
@@ -347,16 +354,18 @@ int main() {
     // ---- 7b. layout arithmetic -----------------------------------------------------------------------
     AVER_INFO("=== accumulator layout and RcInfo ===");
     {
-        check(rc::kAccumInts == 17u * rc::kCells, "kAccumInts == 17 * kCells (counts, arrivals, 15 payload ints per cell)");
+        check(rc::kAccumInts == 18u * rc::kCells, "kAccumInts == 18 * kCells (counts, arrivals, 15 payload ints, 1 sum of squares per cell)");
         check(rc::kArrivalsBase == rc::kCells && rc::kPayloadBase == 2u * rc::kCells,
               "arrivals start at kCells and the payload at 2 * kCells (1,572,864)");
-        check(rc::kPayloadBase + rc::kCells * rc::kPayloadInts == rc::kAccumInts,
-              "the payload region ends exactly at the end of the accumulator");
+        check(rc::kPayloadBase + rc::kCells * rc::kPayloadInts == rc::kSqBase && rc::kSqBase == 17u * rc::kCells &&
+                  rc::kSqBase + rc::kCells == rc::kAccumInts,
+              "the payload region ends where the sum-of-squares block starts, and that block ends the accumulator");
         const u64 lastPayload = static_cast<u64>(rc::kPayloadBase) + static_cast<u64>(rc::kCells - 1) * rc::kPayloadInts + 14u;
-        check(lastPayload == rc::kAccumInts - 1u, "the last cell's last payload int is the last accumulator int");
+        check(lastPayload == rc::kSqBase - 1u, "the last cell's last payload int is the last int before the sum-of-squares block");
+        check(static_cast<u64>(rc::kSqBase) + (rc::kCells - 1) == rc::kAccumInts - 1u, "the last cell's sum of squares is the last accumulator int");
         // Headroom: the worst per-cell sums keep their 2x margin under int32, and one cell's cap fits the
         // 8-bit coarse fields and the 16-bit accepted counter.
-        check(rc::kWorstShSum * 2.0 < 2147483647.0 && rc::kWorstNormalSum * 2.0 < 2147483647.0,
+        check(rc::kWorstShSum * 2.0 < 2147483647.0 && rc::kWorstNormalSum * 2.0 < 2147483647.0 && rc::kWorstSqSum * 2.0 < 2147483647.0,
               "the fixed-point sums keep their 2x margin under int32 max");
         check(rc::kMaxCap < 256u, "caps fit the 8-bit coarse fields and the 16-bit accepted counter");
         check(sizeof(rc::RcInfo) == 80 && rc::kInfoStride == 80, "RcInfo is still 80 B");
@@ -559,6 +568,8 @@ int main() {
         struct Lit { const char* name; f64 value; };
         const Lit lits[] = {
             {"AVER_RC_SH_SCALE", rc::kShScale},   {"AVER_RC_N_SCALE", rc::kNScale},
+            {"AVER_RC_SQ_SCALE", rc::kSqScale},   {"AVER_RC_DC_TO_E", rc::kDcToE},
+            {"AVER_RC_SQ_BASE", rc::kSqBase},
             {"AVER_RC_MAX_CAP", rc::kMaxCap},     {"AVER_RC_LMAX", rc::kLMax},
             {"AVER_RC_MIN_COS", rc::kMinCos},     {"AVER_RC_NEFF_MAX", rc::kNEffMax},
             {"AVER_RC_AGE_MAX", rc::kAgeMax},     {"AVER_RC_NORMAL_K", rc::kNormalK},
@@ -577,7 +588,7 @@ int main() {
 
         const Lit resolveLits[] = {
             {"RCR_RES", rc::kRes}, {"RCR_PER_CASC", rc::kCellsPerCascade}, {"RCR_CELLS", rc::kCells},
-            {"RCR_PAYLOAD", rc::kPayloadInts}, {"RCR_PAYLOAD_BASE", rc::kPayloadBase},
+            {"RCR_PAYLOAD", rc::kPayloadInts}, {"RCR_PAYLOAD_BASE", rc::kPayloadBase}, {"RCR_SQ_BASE", rc::kSqBase},
         };
         for (const Lit& l : resolveLits) {
             const f64 v = defineValue(resolve, l.name);
@@ -606,6 +617,12 @@ int main() {
               "the scatter trains interior cells only: relative 1 .. 62 (scatterCell's test)");
         check(has(io, "InterlockedAdd(gRcAccum[AVER_RC_CELLS + idx], 1);") && has(io, "AVER_RC_PAYLOAD_BASE + idx"),
               "every arrival does one atomic on the arrivals array and the payload sits at AVER_RC_PAYLOAD_BASE");
+        check(has(io, "InterlockedAdd(gRcAccum[AVER_RC_SQ_BASE + idx], sqFix, ignored);") &&
+                  has(io, "(int)round(sE * sE * AVER_RC_SQ_SCALE)") && has(io, "dot(L, float3(0.2126, 0.7152, 0.0722)) * wgt * AVER_RC_DC_TO_E"),
+              "an accepted sample adds one atomic: the square of lum(L) * weight / 4 PI, in fixed point, at AVER_RC_SQ_BASE + cell");
+        check(has(resolve, "gRcAccum[RCR_SQ_BASE + cell] = 0;") && resolve.find("gRcAccum[RCR_SQ_BASE + cell] = 0;") !=
+                  resolve.rfind("gRcAccum[RCR_SQ_BASE + cell] = 0;"),
+              "the resolve zeroes the sum of squares with the payload, on the clear-all path and after a resolved cell");
         check(has(io, "prev <= cap ? 1.0 : max((float)cap / (float)prev, (float)AVER_RC_MIN_ACCEPT_RATE)"),
               "the accept rate is cap / prev floored at AVER_RC_MIN_ACCEPT_RATE (acceptRate)");
         check(has(io, "0x9E3779B9u") && has(io, "0x85EBCA6Bu") && has(io, "0xC2B2AE35u") && has(io, "return h >> 16;"),

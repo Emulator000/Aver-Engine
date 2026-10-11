@@ -33,7 +33,7 @@ uint rcHash16(float3 hitPos, float3 dir2, uint c) {
 // trains only interior cells, so the cell holding a lookup point carries at least half its 1D weight.
 // Accepts at a rate set by last frame's arrival count, so the per-frame cap keeps a random subset
 // of arrivals rather than the first ones; the count atomic is the hard bound.
-void rcScatterCascade(uint c, float3 hitPos, float3 N, float3 dir2, float3 L, float wgt, RcInfo info) {
+void rcScatterCascade(uint c, float3 hitPos, float3 N, float3 dir2, float3 L, float wgt, int sqFix, RcInfo info) {
     const float size = asfloat(info.cas[c].w);
     const int3  cell = (int3)floor((hitPos + N * (0.5 * size)) / size);
     const int3  rel  = cell - info.cas[c].xyz;
@@ -65,6 +65,7 @@ void rcScatterCascade(uint c, float3 hitPos, float3 N, float3 dir2, float3 L, fl
     InterlockedAdd(gRcAccum[base + 12], (int)round(nn.x), ignored);
     InterlockedAdd(gRcAccum[base + 13], (int)round(nn.y), ignored);
     InterlockedAdd(gRcAccum[base + 14], (int)round(nn.z), ignored);
+    InterlockedAdd(gRcAccum[AVER_RC_SQ_BASE + idx], sqFix, ignored);   // the stage-2a label's noise term
 }
 
 // Scatter a Monte Carlo sample into every cascade whose interior holds it, finest first.
@@ -74,7 +75,11 @@ void rcScatter(float3 hitPos, float3 N, float3 dir2, float3 indY, float cosDir2)
     if (!all(isfinite(L)) || !all(isfinite(dir2)) || !all(isfinite(N))) return;
     const RcInfo info = gRcInfo[0];
     const float  wgt  = 3.14159265 / max(cosDir2, AVER_RC_MIN_COS);
-    [loop] for (uint c = 0; c < (uint)AVER_RC_CASCADES; ++c) rcScatterCascade(c, hitPos, N, dir2, L, wgt, info);
+    // The variance scalar: this sample's share of the DC term of irradiance / PI, which is what the net's label
+    // compares (voxi_neurac_net.hlsl), so the sum over samples is exactly n * Ef. Once per sample, not per cascade.
+    const float  sE   = dot(L, float3(0.2126, 0.7152, 0.0722)) * wgt * AVER_RC_DC_TO_E;
+    const int    sqFix = (int)round(sE * sE * AVER_RC_SQ_SCALE);
+    [loop] for (uint c = 0; c < (uint)AVER_RC_CASCADES; ++c) rcScatterCascade(c, hitPos, N, dir2, L, wgt, sqFix, info);
 }
 
 // ---- LOOKUP: cosine-convolved irradiance / PI at p for normal N, blended across cascades ----

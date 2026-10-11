@@ -1,5 +1,5 @@
 // Resolve: SH sums to running mean, zero accumulator for next frame.
-// ACCUMULATOR: counts [0, K) = accepted | prevArrivals << 16, arrivals [K, 2K), then 15 ints per cell.
+// ACCUMULATOR: counts [0, K) = accepted | prevArrivals << 16, arrivals [K, 2K), then 15 ints per cell, then K sums of squares.
 #include "voxi_neurac.hlsli"
 
 StructuredBuffer<RcInfo>      gRcInfo  : register(t0);
@@ -12,6 +12,7 @@ RWStructuredBuffer<RcCell>    gRcCells : register(u1);
 #define RCR_CELLS    786432u     // 3 * 64^3
 #define RCR_PAYLOAD  15u         // ints per cell after the counts and arrivals regions
 #define RCR_PAYLOAD_BASE 1572864u // 2 * RCR_CELLS
+#define RCR_SQ_BASE  13369344u   // 17 * RCR_CELLS: the sum-of-squares block
 
 #define RCR_FLAG_CLEAR_ALL 1u
 
@@ -37,6 +38,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
         gRcAccum[cell] = 0;
         gRcAccum[RCR_CELLS + cell] = 0;
         [unroll] for (uint k = 0; k < RCR_PAYLOAD; ++k) gRcAccum[payloadBase + k] = 0;
+        gRcAccum[RCR_SQ_BASE + cell] = 0;
         return;
     }
 
@@ -133,4 +135,5 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
 
     // Reset the payload for next frame's scatter (counts and arrivals were handled above).
     [unroll] for (uint k = 0; k < RCR_PAYLOAD; ++k) gRcAccum[payloadBase + k] = 0;
+    gRcAccum[RCR_SQ_BASE + cell] = 0;
 }
