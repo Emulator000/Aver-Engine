@@ -673,7 +673,7 @@ covers the node's pin shape.
 
 ## Game systems
 
-Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals and crowds/hearing/cover. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. The editor palette rows are `sandbox/src/GraphNodeDefsGameSystems.hpp` and `GraphNodeDefsSynapseAi.hpp`.
+Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals and crowds/hearing/cover. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. The editor palette rows are `sandbox/src/GraphNodeDefsGameSystems.hpp`, `GraphNodeDefsSynapseAi.hpp` and `GraphNodeDefsGas.hpp`. An attribute marked *(optional)* may be left out; every other one fails the compile by name when missing.
 
 ### Events
 
@@ -782,6 +782,105 @@ Timers and events, the behaviour-tree blackboard, streamed audio, animation stat
 | `AN_SquadSetTarget` | `exec` (in, exec), `squadId` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the squad's target position. |
 | `AN_GetSquadSlot` | `entity` (in, int), `role` (out, int), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | — | D | The entity's role (0 none, 1 anchor, 2 flank left, 3 flank right, 4 support) and slot position. |
 
+
+### Enhanced Input
+
+Triggers and modifiers on a named action, and its live state. Actions are addressed by **name** (`action=`), so no handle pin is needed. Specs are the `.ocinput` text (`hold:0.5`, `tap`, `combo:0.4:A,B`, `deadzone:0.2`); a spec the parser rejects makes the node's `success` false. Rows: `GraphGameSystemNodeTable.cs`, owner `InputGraph` (`Aver.Framework/InputGraph.cs`). Tests: `Aver.Graph.Tests/EnhancedInputTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `InputActionState` | `state` (out, int), `started` (out, bool), `ongoing` (out, bool), `triggered` (out, bool), `completed` (out, bool), `canceled` (out, bool), `elapsed` (out, float), `triggeredTime` (out, float), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | `action=` | D | Everything the last update knows about the action `action=`: `state` (0 none, 1 ongoing, 2 triggered), this frame's event flags, seconds held, seconds since it triggered, and its value. `success` is false for an unknown action. |
+| `AddInputTrigger` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | `action=`, `trigger=` | P | Appends a trigger such as `hold:0.5` or `tap` to the action `action=`. Not idempotent: run Clear Input Config first in OnStart. |
+| `AddInputModifier` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | `action=`, `modifier=` | P | Appends a modifier such as `deadzone:0.2` to the action `action=`. Not idempotent. |
+| `ClearInputConfig` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | `action=` | P | Drops the action's own triggers and modifiers. |
+| `OnInputAction` | `exec` (out, exec) | `action=`, `event=` | X | Entry node: runs when the action `action=` raises `event=` (Started, Ongoing, Triggered, Completed or Canceled). The editor keeps `ENTRY e Input.<action>.<event>` in step with the two attributes. `AN_EventPayload` index 0 to 3 reads x, y, seconds held, seconds since triggered. |
+
+`OnInputAction` is the same runtime as `AN_OnEvent`: `GraphTimerEvents.BindGraph` accepts either node type. The editor writes and keeps `ENTRY <node> Input.<action>.<event>` in step with the two attributes (it stays empty until both are set); a hand-written equivalent is `NODE e AN_OnEvent` with `ENTRY e Input.Jump.Triggered`.
+
+### Gameplay abilities
+
+Tags, attributes, effects and abilities (GAS, `docs/plans/wave2/GAS.md`). Rows: `GraphGasNodeTable.cs`, owner `GasGraph` (`Aver.Framework/Gas/GasGraph.cs`). Tests: `Aver.Graph.Tests/GasNodeTests.cs`.
+
+**One rule for every row.** A name can be given two ways: an **id pin** (from an `AN_Gas*Id` node) or the **attribute**. A non-zero id pin wins; with both empty the call fails (`false`, `0`, handle `0`) and logs once. `entity` pins are the owner; `0` means "not given" and fails.
+
+**Entries need no node.** Use `AN_OnEvent` with `ENTRY` set to the bus event: `GAS.AbilityActivated.<Ability>`, `GAS.AttributeChanged.<Attribute>` (`AN_EventPayload` index 0 = id, 1 = new value, 2 = old), `GAS.TagChanged.<Tag>`, `GAS.GameplayEvent.<Tag>`. Ability bodies are graphs on those events; `GameplayAbility` subclasses are C#-only. An effect with several SetByCaller values is C#-only (the node carries one).
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `AN_GasTagId` | `tagId` (out, int) | `tag=` | D | The id of the tag `tag=`, registering it if new. Feed it to the `tagId` pins. |
+| `AN_GasAttributeId` | `attrId` (out, int) | `attribute=` | D | The id of the attribute `attribute=` (e.g. `Health`). Feed it to the attribute nodes. |
+| `AN_GasEffectId` | `effectId` (out, int) | `effect=` | D | The id of the `.ocgas` effect `effect=`; 0 if no effect has that name. |
+| `AN_GasAbilityId` | `abilityId` (out, int) | `ability=` | D | The id of the `.ocgas` ability `ability=`; 0 if no ability has that name. |
+| `AN_GasHasTag` | `entity` (in, int), `tagId` (in, int), `has` (out, bool) | `tag=` (optional) | D | True if the entity owns the tag or a child of it (`State.Stunned` matches `State.Stunned.Hard`). A non-zero `tagId` wins over `tag=`; with neither the call fails. |
+| `AN_GasHasTags` | `entity` (in, int), `all` (in, bool), `has` (out, bool) | `tags=` | D | True if the entity owns all (`all` true) or any of the comma-separated `tags=`. |
+| `AN_GasTagCount` | `entity` (in, int), `tagId` (in, int), `count` (out, int) | `tag=` (optional) | D | How many copies of the tag the entity owns (several effects can grant one). A non-zero `tagId` wins over `tag=`; with neither the call fails. |
+| `AN_GasAddTag` | `exec` (in, exec), `entity` (in, int), `tagId` (in, int), `count` (in, int), `then` (out, exec), `success` (out, bool) | `tag=` (optional) | P | Adds the tag `count` times as a loose tag, creating the entity's ability system if it has none. A non-zero `tagId` wins over `tag=`; with neither the call fails. |
+| `AN_GasRemoveTag` | `exec` (in, exec), `entity` (in, int), `tagId` (in, int), `count` (in, int), `then` (out, exec), `success` (out, bool) | `tag=` (optional) | P | Removes `count` loose copies of the tag; `success` is false if the count did not change. A non-zero `tagId` wins over `tag=`; with neither the call fails. |
+| `AN_GasGetAttribute` | `entity` (in, int), `attrId` (in, int), `value` (out, float), `base` (out, float), `success` (out, bool) | `attribute=` (optional) | D | `value` is the current (modified) value, `base` the stored one. A non-zero `attrId` wins over `attribute=`. |
+| `AN_GasSetAttribute` | `exec` (in, exec), `entity` (in, int), `attrId` (in, int), `value` (in, float), `then` (out, exec), `success` (out, bool) | `attribute=` (optional) | P | Sets the attribute's base value. Active effects keep their modifiers on top. |
+| `AN_GasAddAttributeSet` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `set=` | P | Gives the entity the `.ocgas` attribute set `set=` with its default values, creating its ability system if needed. |
+| `AN_GasApplyEffect` | `exec` (in, exec), `target` (in, int), `source` (in, int), `effectId` (in, int), `callerValue` (in, float), `then` (out, exec), `handle` (out, int), `applied` (out, bool) | `effect=` (optional), `callertag=` (optional) | P | Applies an effect to `target`; `source` 0 means the target itself. `callerValue` fills the effect's SetByCaller magnitude named by `callertag=`. `handle` is 0 and `applied` false when it was refused. A non-zero `effectId` wins over `effect=`. |
+| `AN_GasRemoveEffect` | `exec` (in, exec), `entity` (in, int), `handle` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Removes the active effect with this handle. |
+| `AN_GasRemoveEffectsByTag` | `exec` (in, exec), `entity` (in, int), `tagId` (in, int), `then` (out, exec), `count` (out, int) | `tag=` (optional) | P | Removes the active effects that carry the tag; `count` is how many went. A non-zero `tagId` wins over `tag=`; with neither the call fails. |
+| `AN_GasRemoveEffectsByDef` | `exec` (in, exec), `entity` (in, int), `effectId` (in, int), `then` (out, exec), `count` (out, int) | `effect=` (optional) | P | Removes every active instance of one effect definition. A non-zero `effectId` wins over `effect=`. |
+| `AN_GasEffectInfo` | `entity` (in, int), `effectId` (in, int), `active` (out, bool), `stacks` (out, int), `remaining` (out, float), `handle` (out, int) | `effect=` (optional) | D | Whether the effect is active on the entity, with its stack count, seconds left (1e30 = infinite) and handle. |
+| `AN_GasGrantAbility` | `exec` (in, exec), `entity` (in, int), `abilityId` (in, int), `level` (in, int), `then` (out, exec), `handle` (out, int) | `ability=` (optional) | P | Gives the entity the ability at `level`, creating its ability system if needed. `handle` 0 means it failed. |
+| `AN_GasRevokeAbility` | `exec` (in, exec), `entity` (in, int), `abilityId` (in, int), `then` (out, exec), `success` (out, bool) | `ability=` (optional) | P | Takes the ability away, ending it first if it is running. |
+| `AN_GasTryActivate` | `exec` (in, exec), `entity` (in, int), `abilityId` (in, int), `target` (in, int), `then` (out, exec), `success` (out, bool), `reason` (out, int) | `ability=` (optional) | P | Checks requirements, cost and cooldown, then starts the ability. `reason` is the failure code: 0 none, 1 no ability system, 2 not granted, 3 already active, 4 missing required tag, 5 blocked by tag, 6 blocked by ability, 7 on cooldown, 8 cannot afford, 9 refused by the behaviour, 10 no authority. |
+| `AN_GasTryActivateByTag` | `exec` (in, exec), `entity` (in, int), `tagId` (in, int), `target` (in, int), `then` (out, exec), `success` (out, bool), `abilityId` (out, int), `reason` (out, int) | `tag=` (optional) | P | Starts a granted ability whose tags match; `abilityId` says which. `reason` as in Try Activate Ability. |
+| `AN_GasCanActivate` | `entity` (in, int), `abilityId` (in, int), `can` (out, bool), `reason` (out, int) | `ability=` (optional) | D | The same checks as Try Activate Ability, without starting anything. |
+| `AN_GasCommitAbility` | `exec` (in, exec), `entity` (in, int), `abilityId` (in, int), `then` (out, exec), `success` (out, bool) | `ability=` (optional) | P | Pays the running ability's cost and starts its cooldown together. False, with nothing paid, if it cannot be afforded. |
+| `AN_GasEndAbility` | `exec` (in, exec), `entity` (in, int), `abilityId` (in, int), `cancelled` (in, bool), `then` (out, exec), `success` (out, bool) | `ability=` (optional) | P | Ends the running ability; `cancelled` tells listeners it did not finish. |
+| `AN_GasCancelByTag` | `exec` (in, exec), `entity` (in, int), `tagId` (in, int), `then` (out, exec), `count` (out, int) | `tag=` (optional) | P | Cancels the running abilities that carry the tag; `count` is how many. |
+| `AN_GasIsAbilityActive` | `entity` (in, int), `abilityId` (in, int), `active` (out, bool) | `ability=` (optional) | D | True while the ability is running on the entity. |
+| `AN_GasCooldown` | `entity` (in, int), `abilityId` (in, int), `remaining` (out, float), `onCooldown` (out, bool) | `ability=` (optional) | D | Seconds of cooldown left (0 when ready). |
+| `AN_GasSendEvent` | `exec` (in, exec), `entity` (in, int), `instigator` (in, int), `tagId` (in, int), `magnitude` (in, float), `then` (out, exec), `triggered` (out, int) | `tag=` (optional) | P | Sends a gameplay event to the entity; `triggered` is how many abilities it started. Listen with `AN_OnEvent` and `ENTRY e GAS.GameplayEvent.<Tag>`. |
+
+### Data tables
+
+Read rows and cells of a `.csv` or `.json` data table (`docs/DATA_TABLES.md`). `table=` is the table path, `column=` a column name, `row=` a row name; none can be a pin because graphs have no string pins, so dynamic lookup goes by int column (`AN_FindDataTableRowByInt`) and the `row` pin carries the index from there. A failed lookup is `found`/`success` false with zeroed outputs, never an error. Rows: `GraphGameSystemNodeTable.cs`, owner `DataContentGraph`. Tests: `Aver.Graph.Tests/DataLocNodeTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `AN_FindDataTableRow` | `row` (out, int), `found` (out, bool) | `table=`, `row=` | D | The index of the row named `row=` in the table `table=`. |
+| `AN_FindDataTableRowByInt` | `value` (in, int), `row` (out, int), `found` (out, bool) | `table=`, `column=` | D | The first row of `table=` whose `column=` holds `value`. |
+| `AN_DataTableRowCount` | `count` (out, int) | `table=` | D | How many rows `table=` has. |
+| `AN_GetDataTableInt` | `row` (in, int), `value` (out, int), `success` (out, bool) | `table=`, `column=` | D | The cell at `row` in `column=` of `table=`, as an int. |
+| `AN_GetDataTableFloat` | `row` (in, int), `value` (out, float), `success` (out, bool) | `table=`, `column=` | D | The cell as a float. |
+| `AN_GetDataTableBool` | `row` (in, int), `value` (out, bool), `success` (out, bool) | `table=`, `column=` | D | The cell as a bool. |
+| `AN_GetDataTableVec3` | `row` (in, int), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | `table=`, `column=` | D | The cell as a vector. |
+| `AN_SetUiTextFromTable` | `exec` (in, exec), `widget` (in, int), `row` (in, int), `then` (out, exec), `success` (out, bool) | `table=`, `column=` | P | Sets a widget's text to the cell; a localization reference in the cell still resolves. |
+
+### Localization
+
+Culture switching (`docs/LOCALIZATION.md`). Text itself needs no node: write a reference into `AN_SetUiText` as `text=@UI:hud.ammo=Ammo` (table `UI`, key `hud.ammo`, default text `Ammo`) and the UI resolves it. The NODE-line parser keeps the `=` and `@` after the first `=`, does **not** strip quotes, and splits on whitespace, so a reference cannot contain a space. React to a language change with `AN_OnEvent` and `ENTRY e loc.culture_changed`. Owner `LocGraph`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `AN_SetCulture` | `exec` (in, exec), `then` (out, exec), `success` (out, bool) | `culture=` | P | Switches the game language to `culture=` (e.g. `fr` or `pt-BR`); false if no such culture is available. |
+| `AN_IsCulture` | `matches` (out, bool) | `culture=` | D | True if the active culture equals `culture=` or starts with it and a dash (`fr` matches `fr-CA`). |
+| `AN_CultureCount` | `count` (out, int) | — | D | How many cultures the project provides. |
+| `AN_CurrentCultureIndex` | `index` (out, int) | — | D | The active culture's position in the list, -1 if unknown. |
+| `AN_SetCultureByIndex` | `exec` (in, exec), `index` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Switches to the culture at this position in the list. |
+| `AN_SetUiItemsToCultures` | `exec` (in, exec), `widget` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Fills a Choice or List widget with the cultures' native names and selects the current one. |
+
+### Montages and root motion
+
+Play authored montages in slots and sections, and use or read the root motion animations carry (`docs/ANIM_MONTAGES.md`). The entity needs a skeleton. Montage events and notifies need no node: they arrive as graph events by name (`AN_OnEvent` or `CustomEvent`). Layered and additive weights are state machine parameters, driven by `SetAnimParamFloat`. Rows: `GraphGameSystemNodeTable.cs`, owners `MontageGraphInterop` and `RootMotionGraphInterop`. Tests: `Aver.Graph.Tests/MontageNodeTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `PlayMontage` | `exec` (in, exec), `entity` (in, int), `rate` (in, float), `blendIn` (in, float), `then` (out, exec), `success` (out, bool) | `montage=`, `section=` (optional), `slot=` (optional) | P | Plays the `.ocmontage` `montage=` on the entity, from `section=` (default the first) in `slot=` (default the montage's own). Negative `blendIn` uses the montage's. The entity needs a skeleton. |
+| `StopMontage` | `exec` (in, exec), `entity` (in, int), `blendOut` (in, float), `then` (out, exec), `success` (out, bool) | `montage=` (optional) | P | Blends `montage=` out; empty stops every montage on the entity. 0 cuts, negative uses the montage's own blend. |
+| `StopMontageSlot` | `exec` (in, exec), `entity` (in, int), `blendOut` (in, float), `then` (out, exec), `success` (out, bool) | `slot=` | P | Blends out every montage in the slot `slot=`. |
+| `JumpToMontageSection` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `montage=`, `section=` | P | Jumps a playing montage to `section=` at once, keeping its blend weight. |
+| `SetMontageNextSection` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `montage=`, `from=`, `to=` (optional) | P | Changes where section `from=` goes when it ends. An empty `to=` restores the authored link. |
+| `SetMontageRate` | `exec` (in, exec), `entity` (in, int), `rate` (in, float), `then` (out, exec), `success` (out, bool) | `montage=` | P | Sets a playing montage's speed; 0 pauses it. |
+| `IsMontagePlaying` | `entity` (in, int), `result` (out, bool) | `montage=` (optional) | D | True while `montage=` (empty = any) plays or blends out. |
+| `GetMontageState` | `entity` (in, int), `found` (out, bool), `position` (out, float), `length` (out, float), `weight` (out, float) | `montage=` (optional) | D | Position and length in montage seconds and the blend weight of `montage=` (empty = the newest). `found` is false when nothing plays. |
+| `IsInMontageSection` | `entity` (in, int), `result` (out, bool) | `montage=` (optional), `section=` | D | True while `montage=` (empty = the newest) is inside `section=`. |
+| `SetRootMotion` | `exec` (in, exec), `entity` (in, int), `mode` (in, int), `axes` (in, int), `scale` (in, float), `then` (out, exec), `success` (out, bool) | — | P | How the entity uses the root motion its animations carry. `mode`: 0 none, 1 ignore (the pose stays in place), 2 apply (the entity moves), 3 accumulate (read it with Consume Root Motion). `axes` is a bit mask (1 X, 2 Y, 4 Z, 8 yaw; default 11 is X, Y and yaw). `scale` multiplies the travel. |
+| `ConsumeRootMotion` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool), `x` (out, float), `y` (out, float), `z` (out, float), `yaw` (out, float), `seconds` (out, float) | — | P | Reads the root motion accumulated since the last read (centimetres in the entity's own frame, `yaw` in degrees, over `seconds`) and clears it. It collects in mode 3. |
 
 ## Aliases invisible to the palette
 

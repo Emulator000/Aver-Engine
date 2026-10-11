@@ -484,6 +484,14 @@ void GraphEditor::syncEventEntry(const std::string& nodeId, const std::string& e
     if (!eventName.empty()) graph_.entryPoints.emplace_back(nodeId, eventName);
 }
 
+// OnInputAction's ENTRY name is composed from its action= and event= attributes, the bus event
+// EnhancedInput.PumpEvents raises (docs/plans/wave2/ENHANCED_INPUT.md section 6); empty until both are set.
+static std::string inputActionEntryName(const fmt::OcGraphNode& n) {
+    const std::string action = getNodeAttribute(n, "action").value;
+    const std::string event = getNodeAttribute(n, "event").value;
+    return action.empty() || event.empty() ? std::string() : "Input." + action + "." + event;
+}
+
 // Which node vocabulary the open graph belongs to, read from the file's own DOMAIN record -- the same
 // answer the compiler gives, so the palette never offers a node the compiler would then refuse.
 GraphNodeDomain GraphEditor::openGraphDomain() const {
@@ -595,6 +603,9 @@ std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canv
         if (desc->typeId == "CustomEvent") {
             eventName = makeUniqueEventName("MyEvent");
             setNodeAttribute(graph_.nodes.back(), "name", eventName);
+        } else if (desc->typeId == "OnInputAction") {
+            setNodeAttribute(graph_.nodes.back(), "event", "Triggered");
+            eventName = inputActionEntryName(graph_.nodes.back());
         }
         syncEventEntry(node.id, eventName);
     }
@@ -1282,6 +1293,8 @@ void GraphEditor::pasteClipboard(Vec2 canvasPos) {
             if (desc->typeId == "CustomEvent") {
                 eventName = makeUniqueEventName("MyEvent");
                 setNodeAttribute(graph_.nodes.back(), "name", eventName);
+            } else if (desc->typeId == "OnInputAction") {
+                eventName = inputActionEntryName(graph_.nodes.back());
             }
             syncEventEntry(n.id, eventName);
         }
@@ -1478,6 +1491,8 @@ bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key
         // half. Renaming the attribute without the record leaves a graph that looks renamed and
         // has silently stopped firing.
         if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, value);
+        // OnInputAction's ENTRY is Input.<action>.<event>: either half changing recomposes it.
+        if ((key == "action" || key == "event") && n.type == "OnInputAction") syncEventEntry(n.id, inputActionEntryName(n));
         // A Const node writes its literal twice: the NODE line's `value=` (this row) and the output
         // PIN's default (written at spawn). OcGraphParser.cs turns both into a ConstantOutput for the
         // same node id and the compiler takes FirstOrDefault, so the attribute wins today only because
@@ -1504,6 +1519,7 @@ bool GraphEditor::clearAttribute(const std::string& nodeId, const std::string& k
         // The ENTRY record goes with it (setAttribute's reason in reverse): an ENTRY with no event
         // name can't be expressed, so clearing the name means the node stops being an entry point.
         if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, "");
+        if ((key == "action" || key == "event") && n.type == "OnInputAction") syncEventEntry(n.id, "");
         dirty_ = true;
         return true;
     }
@@ -2869,8 +2885,10 @@ void GraphEditor::drawEventGraph(float dpi) {
 
                 // The action picker: a convenience dropdown beside the free-text field, sourced from the
                 // project's INPUT.SCHEME (refreshSchemeActionsIfNeeded). Reachable only for
-                // InputAction/InputActionPressed/InputActionReleased/RebindAction/GetActionKey
-                // (GraphNodeDefs.hpp), like the var== branch above (no separate node-type check needed).
+                // InputAction/InputActionPressed/InputActionReleased/RebindAction/GetActionKey and the
+                // Enhanced Input nodes (InputActionState, AddInputTrigger, AddInputModifier,
+                // ClearInputConfig, OnInputAction) -- any node declaring an `action` attribute
+                // (GraphNodeDefs.hpp, GraphNodeDefsGameSystems.hpp), like the var== branch above (no separate node-type check needed).
                 // Free text stays the source of truth -- InputText above accepts any name (even one a
                 // C# script pushed with no scheme behind it), so this flags an unrecognised name rather
                 // than refusing it. Falls back to the plain InputText row above with nothing added when

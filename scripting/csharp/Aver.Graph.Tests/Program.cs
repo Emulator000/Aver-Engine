@@ -191,6 +191,8 @@ static int Main()
         // CustomEvent -- an entry point whose event name is the author's. See CustomEventTests.cs
         // for why proving it needs NO runtime machinery is worth more than the node itself.
         failures += CustomEventTests.RunAll();
+        // Enhanced Input: trigger/modifier spec factories and the OnInputAction entry binding.
+        failures += EnhancedInputTests.RunAll();
 
         // GAP 3: FireEvent -- cross-entity events. The router (Aver.Graph.GraphEvents) lives in THIS
         // assembly, so unlike every prior GraphInterop wrapper's own tests, the reentrancy-guard tests
@@ -263,6 +265,11 @@ static int Main()
         // The table-driven game-systems nodes (timers/events, blackboard, streamed audio, anim state
         // machines, game UI, prefabs, decals, crowds): row-vs-method validation and IL validity.
         failures += GameSystemNodeTests.RunAll();
+        // Wave-2 node families (docs/plans/wave2): gameplay abilities, data tables and localization,
+        // montages and root motion. The Enhanced Input node tests run inside EnhancedInputTests above.
+        failures += GasNodeTests.RunAll();
+        failures += DataLocNodeTests.RunAll();
+        failures += MontageNodeTests.RunAll();
 
         // Self: the node that makes a canvas-authored graph able to name its own entity at all.
         // See SelfNodeTests.cs's header for why its absence, not polish, is what kept every

@@ -1051,6 +1051,36 @@ static void testCustomEventKeepsItsNameAndEntryInStep() {
           "and what it wrote reloads -- err='" + err + "'");
 }
 
+// OnInputAction's ENTRY is composed from two attributes, Input.<action>.<event>: the record follows
+// both, and is absent while either is empty (an ENTRY with no event name cannot be written).
+static void testOnInputActionKeepsItsEntryInStep() {
+    AVER_INFO("=== an OnInputAction's action= and event= attributes and its ENTRY record are edited together ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "on_input_action.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME I\n");
+    GraphEditor ed(tmp);
+
+    const std::string id = ed.addNodeFromCatalog("OnInputAction", Vec2{20.0f, 20.0f});
+    check(!id.empty(), "the catalog knows OnInputAction");
+    const fmt::OcGraphNode* node = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == id) node = &n;
+    check(node != nullptr && getNodeAttribute(*node, "event").value == "Triggered", "it arrives with event=Triggered");
+    check(entryNameOf(ed, id).empty(), "and no ENTRY until an action is chosen");
+
+    check(ed.setAttribute(id, "action", "Jump"), "choosing an action succeeds");
+    check(entryNameOf(ed, id) == "Input.Jump.Triggered", "and the ENTRY record is Input.Jump.Triggered");
+    check(ed.setAttribute(id, "event", "Completed"), "changing the event succeeds");
+    check(entryNameOf(ed, id) == "Input.Jump.Completed", "and the ENTRY record followed it");
+    check(ed.clearAttribute(id, "action"), "clearing the action succeeds");
+    check(entryNameOf(ed, id).empty(), "and the ENTRY record went with it");
+    check(ed.setAttribute(id, "action", "Fire"), "choosing another action succeeds");
+    check(entryNameOf(ed, id) == "Input.Fire.Completed", "and the ENTRY record is back");
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds (why='" + why + "')");
+    check(readFile(tmp).find("ENTRY " + id + " Input.Fire.Completed") != std::string::npos,
+          "and the ENTRY record reached the file");
+}
+
 // ================================================================================ comment boxes ===
 static void testCommentBoxesRoundTripAndCarryTheirContents() {
     AVER_INFO("=== comment boxes: round trip, creation, contents, and a title that cannot break the file ===");
@@ -1912,6 +1942,7 @@ int main() {
     testAddingAnEventNodeAlsoDeclaresItsEntry();
     testDeletingANodeTakesItsEntryAndOutRecords();
     testCustomEventKeepsItsNameAndEntryInStep();
+    testOnInputActionKeepsItsEntryInStep();
     testCommentBoxesRoundTripAndCarryTheirContents();
     testFramingAndAutoLayout();
     testFunctionsInTheEditor();

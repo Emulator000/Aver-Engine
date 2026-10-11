@@ -1,6 +1,7 @@
 #pragma once
 // Palette entries for the game-systems node families: timers and events, blackboard, streamed audio,
-// animation state machines, game UI, prefabs and decals. NOT standalone: include it from
+// animation state machines, game UI, prefabs and decals, Enhanced Input, data tables, localization and
+// montages. (Gameplay abilities are in GraphNodeDefsGas.hpp.) NOT standalone: include it from
 // GraphNodeDefs.hpp inside namespace aver::editor::detail, after pin()/attr() are defined and before
 // buildCatalog(), then call appendGameSystemNodeDefs(t) just before buildCatalog returns.
 //
@@ -147,4 +148,92 @@ inline void appendGameSystemNodeDefs(std::vector<GraphNodeDesc>& t) {
         pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"AN_SetDecalCapacity", "Set Decal Capacity", "Decal", {
         pin("exec", "exec", false), pin("capacity", "int", false, "256"), pin("then", "exec", true), pin("success", "bool", true)}});
+
+    // ---- Enhanced Input (docs/plans/wave2/ENHANCED_INPUT.md) ----
+    t.push_back({"InputActionState", "Input Action State", "Input", {
+        pin("state", "int", true), pin("started", "bool", true), pin("ongoing", "bool", true), pin("triggered", "bool", true), pin("completed", "bool", true), pin("canceled", "bool", true), pin("elapsed", "float", true), pin("triggeredTime", "float", true), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)},
+        {attr("action", "Action")}});
+    t.push_back({"AddInputTrigger", "Add Input Trigger", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("action", "Action"), attr("trigger", "Trigger spec")}});
+    t.push_back({"AddInputModifier", "Add Input Modifier", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("action", "Action"), attr("modifier", "Modifier spec")}});
+    t.push_back({"ClearInputConfig", "Clear Input Config", "Input", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("action", "Action")}});
+    t.push_back({"OnInputAction", "On Input Action", "Event", {
+        pin("exec", "exec", true)},
+        {attr("action", "Action"), attr("event", "Event (Started, Ongoing, Triggered, Completed, Canceled)")}});
+    // ---- data tables and localization (docs/plans/wave2/DATA_TABLES_LOCALIZATION.md) ----
+    t.push_back({"AN_FindDataTableRow", "Find Data Table Row", "Data", {
+        pin("row", "int", true), pin("found", "bool", true)},
+        {attr("table", "Data table"), attr("row", "Row name")}});
+    t.push_back({"AN_FindDataTableRowByInt", "Find Data Table Row By Int", "Data", {
+        pin("value", "int", false), pin("row", "int", true), pin("found", "bool", true)},
+        {attr("table", "Data table"), attr("column", "Column")}});
+    t.push_back({"AN_DataTableRowCount", "Data Table Row Count", "Data", {
+        pin("count", "int", true)},
+        {attr("table", "Data table")}});
+    t.push_back({"AN_GetDataTableInt", "Get Data Table Int", "Data", {
+        pin("row", "int", false), pin("value", "int", true), pin("success", "bool", true)},
+        {attr("table", "Data table"), attr("column", "Column")}});
+    t.push_back({"AN_GetDataTableFloat", "Get Data Table Float", "Data", {
+        pin("row", "int", false), pin("value", "float", true), pin("success", "bool", true)},
+        {attr("table", "Data table"), attr("column", "Column")}});
+    t.push_back({"AN_GetDataTableBool", "Get Data Table Bool", "Data", {
+        pin("row", "int", false), pin("value", "bool", true), pin("success", "bool", true)},
+        {attr("table", "Data table"), attr("column", "Column")}});
+    t.push_back({"AN_GetDataTableVec3", "Get Data Table Vec3", "Data", {
+        pin("row", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)},
+        {attr("table", "Data table"), attr("column", "Column")}});
+    t.push_back({"AN_SetUiTextFromTable", "Set UI Text From Table", "Data", {
+        pin("exec", "exec", false), pin("widget", "int", false), pin("row", "int", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("table", "Data table"), attr("column", "Column")}});
+    t.push_back({"AN_SetCulture", "Set Culture", "Localization", {
+        pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("culture", "Culture")}});
+    t.push_back({"AN_IsCulture", "Is Culture", "Localization", {
+        pin("matches", "bool", true)},
+        {attr("culture", "Culture")}});
+    t.push_back({"AN_CultureCount", "Culture Count", "Localization", {
+        pin("count", "int", true)}});
+    t.push_back({"AN_CurrentCultureIndex", "Current Culture Index", "Localization", {
+        pin("index", "int", true)}});
+    t.push_back({"AN_SetCultureByIndex", "Set Culture By Index", "Localization", {
+        pin("exec", "exec", false), pin("index", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AN_SetUiItemsToCultures", "Set UI Items To Cultures", "Localization", {
+        pin("exec", "exec", false), pin("widget", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    // ---- montages and root motion (docs/plans/wave2/MONTAGES_ROOT_MOTION.md) ----
+    t.push_back({"PlayMontage", "Play Montage", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("rate", "float", false, "1"), pin("blendIn", "float", false, "-1"), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("montage", "Montage"), attr("section", "Section"), attr("slot", "Slot")}});
+    t.push_back({"StopMontage", "Stop Montage", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("blendOut", "float", false, "-1"), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("montage", "Montage")}});
+    t.push_back({"StopMontageSlot", "Stop Montage Slot", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("blendOut", "float", false, "-1"), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("slot", "Slot")}});
+    t.push_back({"JumpToMontageSection", "Jump To Montage Section", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("montage", "Montage"), attr("section", "Section")}});
+    t.push_back({"SetMontageNextSection", "Set Montage Next Section", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("montage", "Montage"), attr("from", "From section"), attr("to", "To section (empty = authored)")}});
+    t.push_back({"SetMontageRate", "Set Montage Rate", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("rate", "float", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("montage", "Montage")}});
+    t.push_back({"IsMontagePlaying", "Is Montage Playing", "Animation", {
+        pin("entity", "int", false), pin("result", "bool", true)},
+        {attr("montage", "Montage")}});
+    t.push_back({"GetMontageState", "Get Montage State", "Animation", {
+        pin("entity", "int", false), pin("found", "bool", true), pin("position", "float", true), pin("length", "float", true), pin("weight", "float", true)},
+        {attr("montage", "Montage")}});
+    t.push_back({"IsInMontageSection", "Is In Montage Section", "Animation", {
+        pin("entity", "int", false), pin("result", "bool", true)},
+        {attr("montage", "Montage"), attr("section", "Section")}});
+    t.push_back({"SetRootMotion", "Set Root Motion", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("mode", "int", false), pin("axes", "int", false, "11"), pin("scale", "float", false, "1"), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"ConsumeRootMotion", "Consume Root Motion", "Animation", {
+        pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("yaw", "float", true), pin("seconds", "float", true)}});
 }

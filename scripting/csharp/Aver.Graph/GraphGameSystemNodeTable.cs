@@ -83,5 +83,39 @@ internal static partial class GameSystemNodes
         Reg("an_squadjoin", GenericKind.Exec, typeof(GraphInteropSynapseAi), "SquadJoinForGraph", "entity:int,squadId:int=0,spacingCm:float=200", "success:bool", "p:entity,p:squadId,p:spacingCm", "success"),
         Reg("an_squadsettarget", GenericKind.Exec, typeof(GraphInteropSynapseAi), "SquadSetTargetForGraph", "squadId:int=0,x:float,y:float,z:float", "success:bool", "p:squadId,p:x,p:y,p:z", "success"),
         Reg("an_getsquadslot", GenericKind.Pure, typeof(GraphInteropSynapseAi), "GetSquadSlotForGraph", "entity:int", "role:int,x:float,y:float,z:float,success:bool", "p:entity,>role,>x,>y,>z", "success"),
-    };
+
+        // ---- Enhanced Input (docs/plans/wave2/ENHANCED_INPUT.md) ----
+        Reg("inputactionstate", GenericKind.Pure, typeof(InputGraph), "ActionStateForGraph", "", "state:int,started:bool,ongoing:bool,triggered:bool,completed:bool,canceled:bool,elapsed:float,triggeredTime:float,x:float,y:float,z:float,success:bool", "@action,>state,>started,>ongoing,>triggered,>completed,>canceled,>elapsed,>triggeredTime,>x,>y,>z", "success"),
+        Reg("addinputtrigger", GenericKind.Exec, typeof(InputGraph), "AddTriggerForGraph", "", "success:bool", "@action,@trigger", "success"),
+        Reg("addinputmodifier", GenericKind.Exec, typeof(InputGraph), "AddModifierForGraph", "", "success:bool", "@action,@modifier", "success"),
+        Reg("clearinputconfig", GenericKind.Exec, typeof(InputGraph), "ClearConfigForGraph", "", "success:bool", "@action", "success"),
+        Reg("oninputaction", GenericKind.Trigger, typeof(GraphTimerEvents), "", "", "", "", null),
+        // ---- data tables and localization (docs/plans/wave2/DATA_TABLES_LOCALIZATION.md) ----
+        Reg("an_finddatatablerow", GenericKind.Pure, typeof(DataContentGraph), "FindRowForGraph", "", "row:int,found:bool", "@table,@row,>row", "found"),
+        Reg("an_finddatatablerowbyint", GenericKind.Pure, typeof(DataContentGraph), "FindRowByIntForGraph", "value:int", "row:int,found:bool", "@table,@column,p:value,>row", "found"),
+        Reg("an_datatablerowcount", GenericKind.Pure, typeof(DataContentGraph), "RowCountForGraph", "", "count:int", "@table", "count"),
+        Reg("an_getdatatableint", GenericKind.Pure, typeof(DataContentGraph), "GetIntForGraph", "row:int", "value:int,success:bool", "@table,@column,p:row,>value", "success"),
+        Reg("an_getdatatablefloat", GenericKind.Pure, typeof(DataContentGraph), "GetFloatForGraph", "row:int", "value:float,success:bool", "@table,@column,p:row,>value", "success"),
+        Reg("an_getdatatablebool", GenericKind.Pure, typeof(DataContentGraph), "GetBoolForGraph", "row:int", "value:bool,success:bool", "@table,@column,p:row,>value", "success"),
+        Reg("an_getdatatablevec3", GenericKind.Pure, typeof(DataContentGraph), "GetVec3ForGraph", "row:int", "x:float,y:float,z:float,success:bool", "@table,@column,p:row,>x,>y,>z", "success"),
+        Reg("an_setuitextfromtable", GenericKind.Exec, typeof(DataContentGraph), "SetUiTextForGraph", "widget:int,row:int", "success:bool", "p:widget,@table,@column,p:row", "success"),
+        Reg("an_setculture", GenericKind.Exec, typeof(LocGraph), "SetCultureForGraph", "", "success:bool", "@culture", "success"),
+        Reg("an_isculture", GenericKind.Pure, typeof(LocGraph), "IsCultureForGraph", "", "matches:bool", "@culture", "matches"),
+        Reg("an_culturecount", GenericKind.Pure, typeof(LocGraph), "CultureCountForGraph", "", "count:int", "", "count"),
+        Reg("an_currentcultureindex", GenericKind.Pure, typeof(LocGraph), "CurrentCultureIndexForGraph", "", "index:int", "", "index"),
+        Reg("an_setculturebyindex", GenericKind.Exec, typeof(LocGraph), "SetCultureByIndexForGraph", "index:int", "success:bool", "p:index", "success"),
+        Reg("an_setuiitemstocultures", GenericKind.Exec, typeof(LocGraph), "SetUiItemsToCulturesForGraph", "widget:int", "success:bool", "p:widget", "success"),
+        // ---- montages and root motion (docs/plans/wave2/MONTAGES_ROOT_MOTION.md) ----
+        Reg("playmontage", GenericKind.Exec, typeof(MontageGraphInterop), "PlayMontageForGraph", "entity:int,rate:float=1,blendIn:float=-1", "success:bool", "p:entity,@montage,@section?,@slot?,p:rate,p:blendIn", "success"),
+        Reg("stopmontage", GenericKind.Exec, typeof(MontageGraphInterop), "StopMontageForGraph", "entity:int,blendOut:float=-1", "success:bool", "p:entity,@montage?,p:blendOut", "success"),
+        Reg("stopmontageslot", GenericKind.Exec, typeof(MontageGraphInterop), "StopMontageSlotForGraph", "entity:int,blendOut:float=-1", "success:bool", "p:entity,@slot,p:blendOut", "success"),
+        Reg("jumptomontagesection", GenericKind.Exec, typeof(MontageGraphInterop), "JumpToMontageSectionForGraph", "entity:int", "success:bool", "p:entity,@montage,@section", "success"),
+        Reg("setmontagenextsection", GenericKind.Exec, typeof(MontageGraphInterop), "SetMontageNextSectionForGraph", "entity:int", "success:bool", "p:entity,@montage,@from,@to?", "success"),
+        Reg("setmontagerate", GenericKind.Exec, typeof(MontageGraphInterop), "SetMontageRateForGraph", "entity:int,rate:float", "success:bool", "p:entity,@montage,p:rate", "success"),
+        Reg("ismontageplaying", GenericKind.Pure, typeof(MontageGraphInterop), "IsMontagePlayingForGraph", "entity:int", "result:bool", "p:entity,@montage?", "result"),
+        Reg("getmontagestate", GenericKind.Pure, typeof(MontageGraphInterop), "GetMontageStateForGraph", "entity:int", "found:bool,position:float,length:float,weight:float", "p:entity,@montage?,>position,>length,>weight", "found"),
+        Reg("isinmontagesection", GenericKind.Pure, typeof(MontageGraphInterop), "IsInMontageSectionForGraph", "entity:int", "result:bool", "p:entity,@montage?,@section", "result"),
+        Reg("setrootmotion", GenericKind.Exec, typeof(RootMotionGraphInterop), "SetRootMotionForGraph", "entity:int,mode:int,axes:int=11,scale:float=1", "success:bool", "p:entity,p:mode,p:axes,p:scale", "success"),
+        Reg("consumerootmotion", GenericKind.Exec, typeof(RootMotionGraphInterop), "ConsumeRootMotionForGraph", "entity:int", "success:bool,x:float,y:float,z:float,yaw:float,seconds:float", "p:entity,>x,>y,>z,>yaw,>seconds", "success"),
+    }.Concat(GasTable()).ToArray();
 }

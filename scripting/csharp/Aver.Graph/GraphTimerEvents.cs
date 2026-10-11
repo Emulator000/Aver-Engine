@@ -16,6 +16,10 @@ public static class GraphTimerEvents
     /// <summary>The node type a graph uses for an event entry; its ENTRY name is the bus event name.</summary>
     public const string OnEventNodeType = "AN_OnEvent";
 
+    /// <summary>The input-action entry node: same runtime as <see cref="OnEventNodeType"/>, its ENTRY is
+    /// the bus event <c>Input.&lt;action&gt;.&lt;event&gt;</c> that <c>EnhancedInput.PumpEvents</c> raises.</summary>
+    public const string OnInputActionNodeType = "OnInputAction";
+
     private static readonly Dictionary<int, List<EventSubscription>> s_bound = new();
 
     /// <summary>AN_SetTimer: fires graph event <paramref name="eventName"/> on <paramref name="target"/>
@@ -70,7 +74,8 @@ public static class GraphTimerEvents
         foreach (var (nodeId, eventName) in graph.EntryPoints)
         {
             if (!graph.Nodes.TryGetValue(nodeId, out Node? node) ||
-                !node.Type.Equals(OnEventNodeType, StringComparison.OrdinalIgnoreCase)) continue;
+                !(node.Type.Equals(OnEventNodeType, StringComparison.OrdinalIgnoreCase) ||
+                  node.Type.Equals(OnInputActionNodeType, StringComparison.OrdinalIgnoreCase))) continue;
             string name = eventName;
             EventSubscription s = Events.Subscribe(name, _ => GraphEvents.FireEventForGraph(entity, name), owner: entity);
             if (!s.IsValid) continue;
