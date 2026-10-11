@@ -317,21 +317,24 @@ RWTexture2D<float4>       gRdReflTex   : register(u15);
 Texture2D<float4>              gRdLocalHist   : register(t19);
 RWTexture2D<float4>            gRdLocalOut    : register(u19);
 
-// The sun's visibility over a 5x5 around pixel, weighted by view-depth similarity (as rdLocalVisTap):
-// NRD2's sun-outside-the-filter path. Only the penumbra is noisy (its few rays a pixel, no history on NRD2
-// frames), so this softens that band by two pixels and leaves the lit shading itself untouched.
-float3 rdSunVisFiltered(uint2 pixel, float3 centre) {
+// NRD2 frames' exact-light visibility (raw, no history), weighted by view-depth similarity (as rdLocalVisTap).
+// The sun (it goes outside NRD2's filter) takes rtShadowSpatial's kernel, the Gaussian of rtShadowDenoise's
+// radius FidelityFX frames apply: a wider average erased thin shadows (wires, poles). A lamp keeps the 5x5 mean.
+float3 rdSunVisFiltered(uint2 pixel, float3 centre, bool sun) {
     const float zc = gRdSunVisTex[pixel].a;
-    if (zc <= 0.0) return centre;
+    const int   radius = sun ? min((int)gRtDenoiseParams.x, 2) : 2;
+    if (zc <= 0.0 || radius <= 0) return centre;
+    const float inv2s2 = sun ? 2.0 / (float)(radius * radius) : 0.0;   // sigma = radius / 2
     const int2 lo = int2(gSceneViewportCur.xy);
     const int2 hi = lo + max(int2(gSceneViewportCur.zw), int2(1, 1)) - 1;
     float3 sum  = centre;
     float  wsum = 1.0;
     [unroll] for (int oy = -2; oy <= 2; ++oy) {
         [unroll] for (int ox = -2; ox <= 2; ++ox) {
-            if (ox == 0 && oy == 0) continue;
+            if ((ox == 0 && oy == 0) || max(abs(ox), abs(oy)) > radius) continue;
             const float4 t = gRdSunVisTex[uint2(clamp(int2(pixel) + int2(ox, oy), lo, hi))];
-            const float  w = (t.a > 0.0) ? saturate(1.0 - abs(t.a - zc) / (zc * 0.03 + 1.0)) : 0.0;
+            const float  w = (t.a > 0.0) ? saturate(1.0 - abs(t.a - zc) / (zc * 0.03 + 1.0)) *
+                                            exp(-(float)(ox * ox + oy * oy) * inv2s2) : 0.0;
             if (w > 0.0) { sum += t.rgb * w; wsum += w; }
         }
     }
@@ -2067,9 +2070,6 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 sunVis = float3(1.0, 1.0, 1.0);   // ablated: fully lit, no ray
 #else
     float3 sunVis = gRdSunVisTex[uint2(i.pos.xy)].rgb;
-#if AVER_NRD2
-    if (rtNrd2SunClean()) sunVis = rdSunVisFiltered(uint2(i.pos.xy), sunVis);
-#endif
 #endif
 #else
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
@@ -2118,8 +2118,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 nrdD = 0.0, nrdS = 0.0;
     float4 nrdDOut = 0.0, nrdSOut = 0.0;   // what was written to NRD2's D and S (Path Tracing accumulates them)
     float3 radiance = 0.0;
+    // Sun outside the filter: a directional exact light (the sun) goes to the clean term, not D and S.
+    float3 nrdSunCleanD = 0.0, nrdSunCleanS = 0.0;
     if (!ptRef && lightSlots.x >= 0.0) {
-        rdListLightSplit((uint)lightSlots.x, s, wpos, sunVis, nrdD, nrdS);
+        const uint e0 = (uint)lightSlots.x;
+        if (!rtNrd2SunClean())
+            rdListLightSplit(e0, s, wpos, sunVis, nrdD, nrdS);
+        else if (aversLightKind(gRdLocalLights[e0]) == AVER_LIGHT_DIRECTIONAL)
+            rdListLightSplit(e0, s, wpos, rdSunVisFiltered(uint2(i.pos.xy), sunVis, true), nrdSunCleanD, nrdSunCleanS);
+        else
+            rdListLightSplit(e0, s, wpos, rdSunVisFiltered(uint2(i.pos.xy), sunVis, false), nrdD, nrdS);
         rdTailLightsSplit(s, wpos, (uint)lightSlots.x, rdLocalVisFiltered(uint2(i.pos.xy)), nrdD, nrdS);
     }
 #else
@@ -2140,6 +2148,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     float3 nrdD = 0.0, nrdS = 0.0;
     float4 nrdDOut = 0.0, nrdSOut = 0.0;
     float3 radiance = 0.0;
+    const float3 nrdSunCleanD = 0.0, nrdSunCleanS = 0.0;   // the sun is `sun` here (nrd2ShadeSplit)
 #else
     float3 radiance = averShadeDirect(0.0, s, sun);
 #endif
@@ -2294,7 +2303,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         ind.diffuse -= ind.ambient * ind.ambientScale * ind.occlusion * s.occlusion * gVoxelParams.y;
     const float aoView = ind.occlusion * s.occlusion;   // ViewDebug::AmbientOcclusion (vmode 6)
 #if AVER_NRD2
-    float3 nrdSunClean = 0.0;
+    float3 nrdSunClean = nrdSunCleanD + nrdSunCleanS;
     nrd2ShadeSplit(s, sun, ind, rtNrd2SunClean() && !ptRef, nrdD, nrdS, nrdSunClean);
     radiance = s.emissive + nrdSunClean;
     {

@@ -524,6 +524,15 @@ noisier than FidelityFX's (no temporal shadow history: its texture u2 is NRD2's 
 frames). The network was trained with the sun inside D: retrain in-engine (NRD2.md "Training") for its best,
 though the resolve is unchanged. Not measured yet (owner tests): `voxi.nrd2SunClean 0` is the A/B.
 
+**Fix (2026-10-11): it never took effect.** Under unified lights (UNIFIED_LIGHTS.md) Stage B's `sun` carries no
+radiance; the sun is the pixel's exact light, shaded by `rdListLightSplit` straight into D and S. So the sun still
+went through the pyramid and resolve, and with the 5x5 mean on its visibility, thin shadows (tram wires, poles,
+palm leaves) faded on NRD2 frames while FidelityFX frames kept them. Now a directional exact light goes to the
+clean term, and its visibility takes `rtShadowSpatial`'s kernel instead of the 5x5 mean: a Gaussian of
+`rtShadowDenoise`'s radius (sigma = radius / 2, at most 2), depth-weighted. A lamp as the exact light (night)
+stays in D with the 5x5 mean, as before. On Caldera_Capital's dock view (Epic, scale 0.5, 400 frames) the NRD2
+frame's mean absolute difference from FidelityFX halved (2.16 to 1.09 of 255) and the wire and pole shadows match.
+
 ## Object stop, shared with NeuRAA (2026-10-10)
 
 NRD2's stops were depth and normal only, so where two objects meet at a similar depth and facing (a post on a
