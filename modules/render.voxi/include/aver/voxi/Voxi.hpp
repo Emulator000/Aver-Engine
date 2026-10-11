@@ -126,6 +126,11 @@ struct Settings {
     // Cached traces HalfResolution pixels and trains a world-space SH cache (D3D12-only, staged ray-driven).
     enum class RestirVisibility : u32 { NoRay = 0, Reconstructed = 1, HalfResolution = 2, Full = 3, Cached = 4 };
     u32 giRestirVisibility = 2;   // must equal ladder::giRestirVisibility(Quality::Medium)
+    // NeuRaC stage 2 (docs/rendering/NEURAC.md): a small network learns a per-cell trust that scales the cache
+    // lookup's weights, warming in over ~900 frames. Only while Cached is live and Path Tracing is off.
+    // neuracNetStrength scales the trust's effect (0 = stage-1 weights exactly, 1 = full).
+    bool neuracNet = true;
+    f32 neuracNetStrength = 1.0f;
 
     // ---- ReSTIR GI spatial reuse control: pin the tap count or disable spatial reuse ----
     // 15 = AUTO (2 taps at rest, fewer in motion). 0 disables spatial reuse. 1..8 pin the tap count.

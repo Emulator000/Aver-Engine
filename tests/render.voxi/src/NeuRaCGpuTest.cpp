@@ -10,12 +10,15 @@
 //   c) the per-cell cap per cascade (64 / 16 / 8) and the load-adaptive accept rate across frames
 //   d) the resolve: first-sample mean, running blend, relaxAlpha, trust carry, stale-tag replacement, aging
 //   e) rcLookup (value and remaining) vs a CPU lookup built from lookupCornerWeight, with and without trust
+//   g-i) stage 2a: voxi_neurac_net.hlsl's Reset/Features/Finish/Apply vs NeuRaCNetReference.hpp on a synthetic cell
+//      buffer: counters, inference and training records, hash thinning, the trust bits Apply writes, its stats
 #include "aver/core/Log.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 #include "aver/voxi/NeuRaC.hpp"
 #include "aver/voxi/NeuRaCLayout.hpp"
+#include "aver/voxi/NeuRaCNetReference.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -913,6 +917,457 @@ void runGpu(rhi::IDevice& dev) {
     }
 }
 
+// ================================================================================ stage 2a: the net kernels
+// voxi_neurac_net.hlsl against NeuRaCNetReference.hpp's buildForCell, on a synthetic cell buffer: dense random cells in a
+// box [-6, 6)^3 of every cascade, in a window whose origin is -32 so negative cells and tags are exercised. The kernels
+// are compiled from the real shader file with the layout NeuRaCNet.cpp binds (t0, u0..u11); the Mlp is not involved.
+//   g) CSRcNetReset/Features/Finish: counters, raw totals, inference records and training records vs the CPU
+//   h) hash thinning at rate 0.5 on both lists: exactly the cells thinKeep selects
+//   i) CSRcNetApply: trust bits written only where the cell is still valid and the prediction is finite, the other
+//      bits untouched, the stats sums
+namespace net = aver::voxi::neurac::net;
+
+struct NetScene {
+    std::vector<rc::RcCell> cells;
+    std::vector<i32> accum;
+    rc::RcInfo info{};
+    std::vector<u32> region;   // every cell index inside the box
+    NetScene() : cells(rc::kCells), accum(rc::kAccumInts, 0) {}
+};
+
+void buildNetScene(NetScene& S) {
+    S.info.frameIndex = 37;
+    S.info.ageStepFrames = 16;
+    S.info.sampleCap = 64;
+    S.info.alphaMin = 0.0625f;
+    S.info.coarseCaps = rc::kDefaultCoarseCap1 | (rc::kDefaultCoarseCap2 << 8);
+    for (u32 c = 0; c < rc::kCascades; ++c) {
+        for (int a = 0; a < 3; ++a) S.info.cas[c].originCell[a] = -32;
+        S.info.cas[c].cellSizeCm = rc::kCellSizeCm[c];
+    }
+    Lcg rng;
+    rng.s = 777u;
+    const auto u01 = [&] { return rng.next() * 0.5f + 0.5f; };
+    const auto uni = [&](f32 a, f32 b) { return a + (b - a) * u01(); };
+    const auto below = [&](u32 n) { return std::min(n - 1u, static_cast<u32>(u01() * static_cast<f32>(n))); };
+    for (u32 c = 0; c < rc::kCascades; ++c)
+        for (i32 z = -6; z < 6; ++z)
+            for (i32 y = -6; y < 6; ++y)
+                for (i32 x = -6; x < 6; ++x) {
+                    const u32 idx = rc::cellIndex(c, x, y, z);
+                    S.region.push_back(idx);
+                    if (u01() < 0.15f) continue;   // an empty cell
+                    f32 nu[3];
+                    do { for (f32& v : nu) v = rng.next(); } while (dot3(nu, nu) < 0.05f);
+                    normalize3(nu);
+                    const f32 len = uni(0.2f, 1.0f);
+                    const u32 trust6 = below(64), nEff = 1 + below(15), age = below(16);
+                    const u32 tag = rc::tagPack(x, y, z) ^ (u01() < 0.1f ? 1u : 0u);
+                    f32 sh[rc::kShFloats];
+                    const f32 base = uni(0.05f, 3.0f);
+                    const f32 a1 = uni(-0.3f, 0.3f), a2 = uni(-0.3f, 0.3f), a3 = uni(-0.3f, 0.3f);
+                    for (int ch = 0; ch < 3; ++ch) {
+                        sh[ch] = 3.5449077f * base * uni(0.6f, 1.0f);
+                        sh[3 + ch] = a1 * sh[ch]; sh[6 + ch] = a2 * sh[ch]; sh[9 + ch] = a3 * sh[ch];
+                    }
+                    u32 w[6];
+                    rc::packSh(sh, w);
+                    rc::RcCell& cell = S.cells[idx];
+                    cell.a[0] = w[0]; cell.a[1] = w[1]; cell.a[2] = w[2]; cell.a[3] = w[3];
+                    cell.b[0] = w[4]; cell.b[1] = w[5];
+                    const f32 v[3] = {nu[0] * len, nu[1] * len, nu[2] * len};
+                    cell.b[2] = rc::packNormal(v, trust6);
+                    cell.b[3] = rc::metaPack(tag, nEff, age);
+                    // This frame's samples: a mean that differs from the old light by a random factor.
+                    const u32 n = u01() < 0.7f ? below(91) : 0u;
+                    S.accum[idx] = static_cast<i32>(n | (below(40) << 16));
+                    const u32 nUsed = std::min(n, rc::capForCascade(S.info, c));
+                    const f32 factor = uni(0.2f, 3.0f);
+                    const u32 pb = rc::kPayloadBase + idx * rc::kPayloadInts;
+                    for (u32 k = 0; k < rc::kShFloats && nUsed; ++k)
+                        S.accum[pb + k] = static_cast<i32>(std::llround(static_cast<f64>(sh[k] * factor) * nUsed * rc::kShScale));
+                }
+}
+
+struct NetEnv {
+    rhi::IDevice* dev = nullptr;
+    rhi::IResourceFactory* res = nullptr;
+    rhi::PipelineHandle ps[4] = {};
+    rhi::BindingSetHandle set = 0;
+    rhi::BufferHandle info = 0, accum = 0, cells = 0, infRec = 0, trainRec = 0, trainTgt = 0, infCnt = 0, trainCnt = 0,
+                      recCell = 0, recLabel = 0, infOut = 0, state = 0, stats = 0;
+
+    ~NetEnv() {
+        if (!res) return;
+        res->waitIdle();
+        if (set) res->destroyBindingSet(set);
+        for (rhi::PipelineHandle p : ps) if (p) res->destroyPipeline(p);
+        for (rhi::BufferHandle b : {info, accum, cells, infRec, trainRec, trainTgt, infCnt, trainCnt, recCell, recLabel, infOut, state, stats})
+            if (b) res->destroyBuffer(b);
+    }
+
+    bool create() {
+        res = dev->resources();
+        const std::string& source = rhi::shaderFile("voxi_neurac_net.hlsl");
+        if (source.empty()) return false;
+        const char* entries[4] = {"CSRcNetReset", "CSRcNetFeatures", "CSRcNetFinish", "CSRcNetApply"};
+        for (u32 k = 0; k < 4; ++k) {
+            rhi::ShaderDesc sd{};
+            sd.source = source.c_str();
+            sd.entry = entries[k];
+            sd.stage = rhi::ShaderStage::Compute;
+            sd.minShaderModel = 62;
+            const rhi::ShaderHandle cs = res->createShader(sd);
+            if (!cs) return false;
+            rhi::ComputePipelineDesc pd{};
+            pd.cs = cs;
+            pd.layout.srvCount = 1;
+            pd.layout.uavCount = 12;
+            pd.layout.slotKindsDeclared = true;
+            pd.layout.srvKinds[0] = rhi::SlotKind::StructuredBuffer;
+            for (u32 i = 0; i < 12; ++i) pd.layout.uavKinds[i] = rhi::SlotKind::StructuredBuffer;
+            ps[k] = res->createComputePipeline(pd);
+            res->destroyShader(cs);
+            if (!ps[k]) return false;
+        }
+        const auto make = [&](u64 bytes, rhi::BufferKind kind, bool uav, const char* name) {
+            rhi::BufferDesc bd{};
+            bd.bytes = bytes;
+            bd.kind = kind;
+            bd.allowUnorderedAccess = uav;
+            bd.debugName = name;
+            return res->createBuffer(bd);
+        };
+        const rhi::BufferKind def = rhi::BufferKind::Default;
+        info = make(rc::kInfoStride, rhi::BufferKind::Upload, false, "net test info");
+        accum = make(rc::kAccumBytes, def, true, "net test accum");
+        cells = make(rc::kCellsBytes, def, true, "net test cells");
+        infRec = make(static_cast<u64>(net::kMaxInfer) * net::kInputs * 4, def, true, "net test inference records");
+        trainRec = make(static_cast<u64>(net::kMaxTrain) * net::kInputs * 4, def, true, "net test training records");
+        trainTgt = make(static_cast<u64>(net::kMaxTrain) * 4, def, true, "net test training targets");
+        infCnt = make(8, def, true, "net test inference count");
+        trainCnt = make(8, def, true, "net test training count");
+        recCell = make(static_cast<u64>(net::kMaxInfer) * 8, def, true, "net test record cells");
+        recLabel = make(static_cast<u64>(net::kMaxInfer) * 4, def, true, "net test record labels");
+        infOut = make(static_cast<u64>(net::kMaxInfer) * 4, def, true, "net test predictions");
+        state = make(16, def, true, "net test state");
+        stats = make(net::kStatCount * 4, def, true, "net test stats");
+        if (!info || !accum || !cells || !infRec || !trainRec || !trainTgt || !infCnt || !trainCnt || !recCell || !recLabel ||
+            !infOut || !state || !stats)
+            return false;
+
+        rhi::BindingSetDesc bsd{};
+        bsd.srvCount = 1;
+        bsd.uavCount = 12;
+        bsd.srvKinds[0] = rhi::SlotKind::StructuredBuffer;
+        for (u32 i = 0; i < 12; ++i) bsd.uavKinds[i] = rhi::SlotKind::StructuredBuffer;
+        set = res->createBindingSet(bsd);
+        if (!set) return false;
+        res->setSrvBuffer(set, 0, info, rc::kInfoStride, 1, 0);
+        res->setUavBuffer(set, 0, accum, 4, rc::kAccumInts, 0);
+        res->setUavBuffer(set, 1, cells, rc::kCellStride, rc::kCells, 0);
+        res->setUavBuffer(set, 2, infRec, 4, net::kMaxInfer * net::kInputs, 0);
+        res->setUavBuffer(set, 3, trainRec, 4, net::kMaxTrain * net::kInputs, 0);
+        res->setUavBuffer(set, 4, trainTgt, 4, net::kMaxTrain, 0);
+        res->setUavBuffer(set, 5, infCnt, 4, 2, 0);
+        res->setUavBuffer(set, 6, trainCnt, 4, 2, 0);
+        res->setUavBuffer(set, 7, recCell, 8, net::kMaxInfer, 0);
+        res->setUavBuffer(set, 8, recLabel, 4, net::kMaxInfer, 0);
+        res->setUavBuffer(set, 9, infOut, 4, net::kMaxInfer, 0);
+        res->setUavBuffer(set, 10, state, 4, 4, 0);
+        res->setUavBuffer(set, 11, stats, 4, net::kStatCount, 0);
+        return true;
+    }
+
+    // Copies host data into a Default buffer through a throwaway Upload buffer.
+    bool upload(rhi::BufferHandle dst, const void* data, u64 bytes, u64 dstOffset = 0) {
+        rhi::BufferDesc bd{};
+        bd.bytes = bytes;
+        bd.kind = rhi::BufferKind::Upload;
+        bd.debugName = "net test staging";
+        const rhi::BufferHandle up = res->createBuffer(bd);
+        if (!up) return false;
+        const bool wrote = res->writeBuffer(up, data, bytes, 0);
+        using rhi::ResourceState;
+        const bool ran = wrote && dev->runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+            ctx.bufferBarrier(dst, ResourceState::Common, ResourceState::CopyDest);
+            ctx.copyBuffer(dst, up, bytes, dstOffset, 0);
+            ctx.bufferBarrier(dst, ResourceState::CopyDest, ResourceState::Common);
+        });
+        res->waitIdle();
+        res->destroyBuffer(up);
+        return ran;
+    }
+
+    bool readBack(rhi::BufferHandle src, u64 offset, u64 bytes, void* out) {
+        if (bytes == 0) return true;
+        rhi::BufferDesc bd{};
+        bd.bytes = bytes;
+        bd.kind = rhi::BufferKind::Readback;
+        bd.debugName = "net test readback";
+        const rhi::BufferHandle rb = res->createBuffer(bd);
+        if (!rb) return false;
+        using rhi::ResourceState;
+        const bool ran = dev->runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+            ctx.bufferBarrier(src, ResourceState::Common, ResourceState::CopySource);
+            ctx.copyBuffer(rb, src, bytes, 0, offset);
+            ctx.bufferBarrier(src, ResourceState::CopySource, ResourceState::Common);
+        });
+        const bool ok = ran && res->readBuffer(rb, out, bytes, 0);
+        res->waitIdle();
+        res->destroyBuffer(rb);
+        return ok;
+    }
+
+    // Reset, Features, Finish in one submission, the barriers NeuRaCNet::recordPre uses.
+    bool runFeatures() {
+        using rhi::ResourceState;
+        const auto lists = {infRec, trainRec, trainTgt, infCnt, trainCnt, recCell, recLabel, state, stats};
+        return dev->runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+            for (rhi::BufferHandle b : lists) ctx.bufferBarrier(b, ResourceState::Common, ResourceState::UnorderedAccess);
+            const auto go = [&](u32 k, u32 groups) {   // pipeline first, then the set, as NeuRaCNet does
+                ctx.setPipeline(ps[k]);
+                ctx.setBindingSet(set);
+                ctx.dispatch(groups, 1, 1);
+            };
+            go(0, 1);
+            ctx.uavBarrierBuffer(infCnt);
+            ctx.uavBarrierBuffer(trainCnt);
+            ctx.uavBarrierBuffer(stats);
+            go(1, rc::kResolveGroups);
+            ctx.uavBarrierBuffer(infCnt);
+            ctx.uavBarrierBuffer(trainCnt);
+            ctx.uavBarrierBuffer(state);
+            go(2, 1);
+            for (rhi::BufferHandle b : lists) ctx.bufferBarrier(b, ResourceState::UnorderedAccess, ResourceState::Common);
+        });
+    }
+    bool runApply() {
+        using rhi::ResourceState;
+        const auto lists = {infCnt, recCell, recLabel, infOut, stats};
+        return dev->runStandaloneCompute([&](rhi::IRenderContext& ctx) {
+            for (rhi::BufferHandle b : lists) ctx.bufferBarrier(b, ResourceState::Common, ResourceState::UnorderedAccess);
+            ctx.setPipeline(ps[3]);
+            ctx.setBindingSet(set);
+            ctx.dispatch(net::kMaxInfer / 64u, 1, 1);
+            for (rhi::BufferHandle b : lists) ctx.bufferBarrier(b, ResourceState::UnorderedAccess, ResourceState::Common);
+        });
+    }
+};
+
+struct NetResult {
+    u32 inf[2] = {}, train[2] = {}, st[4] = {};
+    std::vector<u32> recCell;      // 2 per record: cell index, expected tag
+    std::vector<f32> recLabel, infRec, trainRec, trainTgt;
+};
+
+bool readNetResult(NetEnv& e, NetResult& r) {
+    bool ok = e.readBack(e.infCnt, 0, 8, r.inf) && e.readBack(e.trainCnt, 0, 8, r.train) && e.readBack(e.state, 0, 16, r.st);
+    if (!ok) return false;
+    const u32 ni = std::min(r.inf[0], net::kMaxInfer), nt = std::min(r.train[0], net::kMaxTrain);
+    r.recCell.resize(static_cast<usize>(ni) * 2);
+    r.recLabel.resize(ni);
+    r.infRec.resize(static_cast<usize>(ni) * net::kInputs);
+    r.trainRec.resize(static_cast<usize>(nt) * net::kInputs);
+    r.trainTgt.resize(nt);
+    return e.readBack(e.recCell, 0, static_cast<u64>(ni) * 8, r.recCell.data()) &&
+           e.readBack(e.recLabel, 0, static_cast<u64>(ni) * 4, r.recLabel.data()) &&
+           e.readBack(e.infRec, 0, static_cast<u64>(ni) * net::kInputs * 4, r.infRec.data()) &&
+           e.readBack(e.trainRec, 0, static_cast<u64>(nt) * net::kInputs * 4, r.trainRec.data()) &&
+           e.readBack(e.trainTgt, 0, static_cast<u64>(nt) * 4, r.trainTgt.data());
+}
+
+// Checks the GPU's lists against the cells the CPU says to process, after thinning at the given rates.
+void compareNetResult(const NetScene& S, const NetResult& r, f32 inferRate, f32 trainRate, const std::string& tag) {
+    std::map<u32, net::Features> expectInf;      // cell -> features of the cells that should have a record
+    std::vector<net::Features> expectTrain;
+    u32 touched = 0, eligible = 0;
+    for (u32 idx : S.region) {
+        const net::Features f = net::buildForCell(S.cells.data(), S.accum.data(), S.info, idx);
+        if (!f.touched) continue;
+        ++touched;
+        if (!net::thinKeep(inferRate, idx, S.info.frameIndex, net::kSaltInfer)) continue;
+        expectInf[idx] = f;
+        if (!f.eligible) continue;
+        ++eligible;
+        if (net::thinKeep(trainRate, idx, S.info.frameIndex, net::kSaltTrain)) expectTrain.push_back(f);
+    }
+    const u32 nInf = static_cast<u32>(expectInf.size()), nTrain = static_cast<u32>(expectTrain.size());
+    check(touched > 500 && eligible > 200, tag + ": the synthetic cache has enough touched and eligible cells (" +
+                                                std::to_string(touched) + " / " + std::to_string(eligible) + ")");
+    check(r.inf[1] == touched && r.inf[0] == nInf, tag + ": counters: touched " + std::to_string(r.inf[1]) + " (want " +
+                                                        std::to_string(touched) + "), inference records " + std::to_string(r.inf[0]) +
+                                                        " (want " + std::to_string(nInf) + ")");
+    check(r.train[1] == eligible && r.train[0] == nTrain, tag + ": counters: eligible " + std::to_string(r.train[1]) + " (want " +
+                                                              std::to_string(eligible) + "), training records " + std::to_string(r.train[0]) +
+                                                              " (want " + std::to_string(nTrain) + ")");
+    check(r.st[0] == touched && r.st[1] == eligible && r.st[2] == nInf && r.st[3] == nTrain,
+          tag + ": Finish keeps the raw totals (touched, eligible, processed, appended) for the next frame's rates");
+
+    // Inference records: one per expected cell, features within float tolerance, label iff eligible.
+    std::map<u32, bool> seen;
+    usize badSet = 0, badTag = 0, badFeat = 0, badLabel = 0, badElig = 0;
+    f32 worst = 0.0f;
+    for (usize i = 0; i < r.recLabel.size(); ++i) {
+        const u32 cell = r.recCell[2 * i], tagWord = r.recCell[2 * i + 1];
+        const auto it = expectInf.find(cell);
+        if (it == expectInf.end() || seen[cell]) { ++badSet; continue; }
+        seen[cell] = true;
+        const net::Features& f = it->second;
+        u32 cascade;
+        i32 world[3];
+        net::cellWorld(cell, S.info, cascade, world);
+        if (tagWord != rc::tagPack(world[0], world[1], world[2])) ++badTag;
+        bool featOk = true;
+        for (u32 k = 0; k < net::kInputs; ++k) {
+            const f32 d = std::fabs(r.infRec[i * net::kInputs + k] - f.in[k]);
+            worst = std::max(worst, d);
+            if (!(d <= 3e-4f)) featOk = false;
+        }
+        if (!featOk) ++badFeat;
+        if ((r.recLabel[i] >= 0.0f) != f.eligible) ++badElig;
+        else if (f.eligible && !(std::fabs(r.recLabel[i] - f.label) <= 5e-4f)) ++badLabel;
+    }
+    check(badSet == 0 && seen.size() == expectInf.size(), tag + ": the inference records name exactly the expected cells, once each (" +
+                                                              std::to_string(badSet) + " unexpected, " + std::to_string(seen.size()) + " of " +
+                                                              std::to_string(expectInf.size()) + " found)");
+    check(badTag == 0, tag + ": each record carries its cell's expected tag");
+    check(badFeat == 0, tag + ": inference features equal buildForCell's, worst difference " + std::to_string(worst) + " (" +
+                            std::to_string(badFeat) + " records off)");
+    check(badElig == 0 && badLabel == 0, tag + ": labels are set exactly for the eligible cells and equal the CPU label");
+
+    // Training records: no cell index travels with them, so match each to an unused expected record.
+    std::vector<bool> used(expectTrain.size(), false);
+    usize unmatched = 0;
+    for (usize i = 0; i < r.trainTgt.size(); ++i) {
+        bool found = false;
+        for (usize j = 0; j < expectTrain.size() && !found; ++j) {
+            if (used[j]) continue;
+            const net::Features& f = expectTrain[j];
+            bool same = std::fabs(r.trainTgt[i] - f.label) <= 5e-4f;
+            for (u32 k = 0; k < net::kInputs && same; ++k) {
+                const f32 want = k == 3 ? f.trainIn3 : f.in[k];
+                same = std::fabs(r.trainRec[i * net::kInputs + k] - want) <= 3e-4f;
+            }
+            if (same) { used[j] = true; found = true; }
+        }
+        if (!found) ++unmatched;
+    }
+    check(unmatched == 0 && r.trainTgt.size() == expectTrain.size(),
+          tag + ": every training record matches an expected one (input 3 = log2(1 + n) / 6) with its label (" +
+              std::to_string(unmatched) + " unmatched)");
+}
+
+void runNetGpu(rhi::IDevice& dev) {
+    AVER_INFO("--- stage 2a: CSRcNetReset / Features / Finish / Apply vs NeuRaCNetReference ---");
+    rhi::setShaderSourceDir(std::string(AVER_REPO_ROOT) + "/modules/render.voxi/shaders");
+    NetEnv e;
+    e.dev = &dev;
+    const bool made = e.create();
+    check(made, "the four net kernels compile from voxi_neurac_net.hlsl and the 12-UAV binding set builds");
+    if (!made) return;
+
+    const auto owner = std::make_unique<NetScene>();   // ~80 MB of images: off the stack
+    NetScene& S = *owner;
+    buildNetScene(S);
+    const bool uploaded = e.res->writeBuffer(e.info, &S.info, sizeof(S.info), 0) && e.upload(e.accum, S.accum.data(), rc::kAccumBytes) &&
+                          e.upload(e.cells, S.cells.data(), rc::kCellsBytes);
+    check(uploaded, "the synthetic accumulator and cell images upload");
+    if (!uploaded) return;
+
+    // ---- h) thinning at 0.5 on both lists (state says last frame had twice the target) ----
+    {
+        const u32 st[4] = {2 * net::kInferTarget, 2 * net::kTrainTarget, 0, 0};
+        const bool ok = e.upload(e.state, st, sizeof(st)) && e.runFeatures();
+        check(ok, "thinning: the three kernels run with last frame's totals at twice the targets");
+        NetResult r;
+        if (ok && readNetResult(e, r)) compareNetResult(S, r, net::thinRate(st[0], net::kInferTarget), net::thinRate(st[1], net::kTrainTarget), "thinning 0.5");
+        else check(false, "thinning: results read back");
+    }
+
+    // ---- g) no thinning ----
+    NetResult r;
+    {
+        const u32 zero[4] = {};
+        const bool ok = e.upload(e.state, zero, sizeof(zero)) && e.runFeatures();
+        check(ok, "features: the three kernels run");
+        if (ok && readNetResult(e, r)) compareNetResult(S, r, 1.0f, 1.0f, "features");
+        else { check(false, "features: results read back"); return; }
+    }
+
+    // ---- i) apply ----
+    {
+        const u32 n = std::min(r.inf[0], net::kMaxInfer);
+        std::vector<f32> pred(net::kMaxInfer, 0.0f);
+        for (u32 i = 0; i < n; ++i) pred[i] = 0.05f * static_cast<f32>(i % 25);   // 0 .. 1.2
+        const f32 nan = floatOf(0x7FC00000u), inf = floatOf(0x7F800000u);
+        for (u32 i = 7; i < n; i += 25) pred[i] = nan;
+        for (u32 i = 11; i < n; i += 25) pred[i] = inf;
+
+        // The resolve may have emptied or replaced a cell between the features and the apply.
+        if (n > 12) {
+            const rc::RcCell zero{};
+            for (u32 i : {3u, 4u, 5u}) {
+                S.cells[r.recCell[2 * i]] = zero;
+            }
+            rc::RcCell stale = S.cells[r.recCell[2 * 6]];
+            stale.b[3] ^= 1u;   // tag bit
+            S.cells[r.recCell[2 * 6]] = stale;
+            for (u32 i : {3u, 4u, 5u, 6u})
+                if (!e.upload(e.cells, &S.cells[r.recCell[2 * i]], rc::kCellStride, static_cast<u64>(r.recCell[2 * i]) * rc::kCellStride))
+                    check(false, "apply: a cell could not be overwritten");
+        }
+        const bool ok = e.upload(e.infOut, pred.data(), pred.size() * sizeof(f32)) && e.runApply();
+        check(ok, "apply: the kernel runs");
+
+        std::vector<rc::RcCell> got(rc::kCells);
+        u32 stats[net::kStatCount] = {};
+        const bool read = ok && e.readBack(e.cells, 0, rc::kCellsBytes, got.data()) && e.readBack(e.stats, 0, sizeof(stats), stats);
+        check(read, "apply: cells and stats read back");
+        if (read) {
+            std::vector<rc::RcCell> want = S.cells;
+            u32 cnt = 0, applied = 0, trustSum = 0, skipped = 0;
+            u64 sLabel = 0, sPred = 0, sErr = 0;
+            for (u32 i = 0; i < n; ++i) {
+                const u32 cell = r.recCell[2 * i], tag = r.recCell[2 * i + 1];
+                if (!rc::cellValid(S.cells[cell].b[3], tag) || !net::trustUsable(pred[i])) { ++skipped; continue; }
+                const u32 t6 = net::trustBits(pred[i]);
+                want[cell].b[2] = net::withTrust(S.cells[cell].b[2], t6);
+                ++applied;
+                trustSum += t6;
+                const f32 label = r.recLabel[i];
+                if (label >= 0.0f) {
+                    const f32 p = std::min(std::max(pred[i], 0.0f), 1.0f), err = p - label;
+                    ++cnt;
+                    sLabel += static_cast<u32>(label * net::kStatScale + 0.5f);
+                    sPred += static_cast<u32>(p * net::kStatScale + 0.5f);
+                    sErr += static_cast<u32>(err * err * net::kStatScale + 0.5f);
+                }
+            }
+            usize diffCells = 0, diffOther = 0;
+            for (u32 idx : S.region) {
+                if (std::memcmp(&got[idx], &want[idx], sizeof(rc::RcCell)) != 0) ++diffCells;
+                if (got[idx].a[0] != S.cells[idx].a[0] || got[idx].a[3] != S.cells[idx].a[3] || got[idx].b[0] != S.cells[idx].b[0] ||
+                    got[idx].b[3] != S.cells[idx].b[3])
+                    ++diffOther;
+            }
+            check(diffCells == 0, "apply: every cell equals the CPU's: trust bits baked where valid and finite, nothing else changed (" +
+                                      std::to_string(diffCells) + " differ)");
+            check(diffOther == 0, "apply: the SH and meta words are untouched");
+            check(skipped > 0 && applied > 0, "apply: both paths are exercised (" + std::to_string(applied) + " applied, " +
+                                                  std::to_string(skipped) + " skipped: killed cells, NaN and inf predictions)");
+            check(stats[4] == applied && stats[5] == trustSum && stats[0] == cnt,
+                  "apply stats: applied " + std::to_string(stats[4]) + "/" + std::to_string(applied) + ", trust sum " + std::to_string(stats[5]) +
+                      "/" + std::to_string(trustSum) + ", eligible " + std::to_string(stats[0]) + "/" + std::to_string(cnt));
+            const auto near = [](u64 a, u64 b) { return (a > b ? a - b : b - a) <= 8; };
+            check(near(stats[1], sLabel) && near(stats[2], sPred) && near(stats[3], sErr),
+                  "apply stats: label, prediction and squared-error sums within rounding of the CPU's (" + std::to_string(stats[1]) + "/" +
+                      std::to_string(sLabel) + ", " + std::to_string(stats[2]) + "/" + std::to_string(sPred) + ", " + std::to_string(stats[3]) +
+                      "/" + std::to_string(sErr) + ")");
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -956,6 +1411,7 @@ int main(int argc, char** argv) {
     }
 
     runGpu(*dev);
+    runNetGpu(*dev);
     rhi::destroyDevice(dev);
 
     if (g_failures != 0) {

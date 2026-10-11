@@ -454,6 +454,11 @@ legal advice). The design follows them unless counsel says otherwise:
    TAA history clipped to a per-colour-channel mean +- sigma box. NRD's stabiliser clamps to the 3x3
    min/max (Karis 2014, Sousa 2013), and so should the shipped TAA. FidelityFX's own resolve, which NRD
    falls back to, keeps its box; that is the shipped-denoiser finding, not NRD's.
+   **Amended 2026-10-11 by owner decision.** NRD2's temporal stage now clips its history, and its current value,
+   to FidelityFX's mean +- sigma box by default (`voxi.nrd2FfxClip` 1; docs/rendering/NRD2.md "History handling
+   after FidelityFX"), so this rule no longer holds for it. Exposure: NVIDIA US 10,116,916 (in force to 2037),
+   named above. The owner accepts it. The min/max path stays selectable: `voxi.nrd2FfxClip 0`, and with
+   `voxi.nrd2FfxReject 0` as well (rule 13) the stage holds no mean/variance test. The shipped TAA is unchanged.
 2. **NeuRAA's network never upscales and never touches history.** NVIDIA US 12,033,301 and its
    continuations claim networks generating higher-resolution video from upsampled frames blended with
    prior output (one pending claim: a network-predicted per-pixel blend factor with a prior frame).
@@ -500,6 +505,14 @@ legal advice). The design follows them unless counsel says otherwise:
    or fitted distribution, and its footprint is never larger than the spatial estimate's (US 11,663,701
    claims a temporal clamp radius larger than the spatial radius; its parent US 10,991,079 a spatial
    filter on an exponentially accumulated signal, which NRD's current-frame pyramid is not).
+   **Amended 2026-10-11 by owner decision.** With `voxi.nrd2FfxClip` on (default) the temporal clip range is
+   defined from the first and second moments of this frame's samples (a validity-weighted 9x9 Gaussian mean and
+   variance of the prefiltered D' and S'), and the colour reject (rule 13) tests the history against the same
+   kind of moments. That is the area of US 12,482,168 (granted 2025-11-25) and its parent US 11,600,036
+   (ranges and rejection tests from distribution moments). The owner accepts the exposure; the order-statistic
+   path remains behind the setting. **Added by the documentation pass, not part of the decision text; counsel
+   to confirm:** the 9x9 moments window is larger than the prefilter's radius-3 footprint, which this rule held
+   the range to, so US 11,663,701 and its parent US 10,991,079 (above) are in view as well.
 8. **Fixed tap patterns.** NVIDIA US 12,423,782 (continuation of US 11,113,792, granted 2025-09-23)
    claims spatial filter taps at locations chosen by jittering a parameter. NRD's bilateral upsample uses
    fixed taps with no per-frame or per-pixel rotation; FidelityFX's prefilter already uses a fixed
@@ -557,6 +570,29 @@ legal advice). The design follows them unless counsel says otherwise:
    sample is accumulated (the existing denoise-then-TAAU order is unchanged and still open). The shipped TAAU's
    mean +- sigma clip (`sr_taa.hlsl`) still breaks rule 1; the stage does not reuse it.
 
+   **Amended 2026-10-11 by owner decision (built 2026-10-12, commit `f1439403`; NRD2.md "History handling after
+   FidelityFX").** The temporal stage takes FidelityFX's history handling whole. Where this rule says min/max,
+   mean, variance or "FidelityFX's clip is not used", read the following for the default settings:
+   - **Rules 1 and 7:** the history and the current value are clipped to FidelityFX's mean +- (sigma + |mean -
+     anchor|) box (`voxi.nrd2FfxClip` 1, weight `voxi.nrd2FfxClipWeight` 4, so +-5.6 sigma, loose).
+     Exposure: US 10,116,916 (in force to 2037); US 12,482,168 / US 11,600,036 for moment-based ranges and
+     rejection tests. The owner accepts it.
+   - **Colour reject:** FidelityFX's `dot2(history - mean) < 1.5 length(variance)` test (`voxi.nrd2FfxReject`
+     1, per signal, against the 9x9 Gaussian moments of this frame's D' or S') drops the history of a pixel. It
+     is a mean/variance history-rejection test, so it is in the same exposure as the clip, and it is its own
+     setting.
+   - **The min/max path stays selectable:** `voxi.nrd2FfxClip 0` restores the 5x5 min/max clip (rule 1 and 7
+     as written above); with `voxi.nrd2FfxReject 0` too, no mean, variance or standard deviation enters any clip
+     or rejection test. The anchor (a brightness-weighted mean, flagged above) remains in both.
+   - **Edge handling and fetch:** FidelityFX's continuous disocclusion factor (normal agreement and relative
+     depth against the depth camera motion predicts), the 3x3 search for the best texel and the 2x2 rebuild
+     replace the binary test; they sit in the same family as the flag above (near US 11,823,321 and the
+     order-statistics claims). The 12-tap Catmull-Rom fetch is a fixed tap pattern with no per-frame or
+     per-pixel rotation (rule 8). The sample count is `min(N, n_hist * factor + 1)`; it still never depends
+     on view angle or parallax and feeds the blend weight and the noise estimate only (rule 5).
+   - **Rules 5, 6 and 10 are as written:** the network runs before the resolve and never sees history, the
+     noise estimate or the guide (rule 17); nothing here sets a radius, a level or a tap position.
+
 14. **NRD2's input despeckle (2026-10-06; docs/rendering/NRD2.md "Input despeckle").**
     - What it does: caps a pixel at 2x the 5th brightest of its 5x5 neighbours before the pyramid.
     - Rules 1 and 7: it is an order statistic, with no mean, variance or sigma.
@@ -579,6 +615,23 @@ legal advice). The design follows them unless counsel says otherwise:
     - The 1/4 and 1/8 logits are capped by fixed constants.
     - Inference only, current frame only (rule 10), fixed footprint (rule 8).
     - Not a clip: no value is clamped to the median, it only sets weights. Same counsel family as rule 14.
+
+17. **NeuRaC guide: a world-space radiance cache feeding a denoiser's anchor (2026-10-11 owner decision; NRD2.md
+    "The NeuRaC guide", NEURAC.md 5.11).**
+    - What it does: for pixels with little history, D's temporal anchor `A` is reshaped by a per-pixel lookup of
+      NeuRaC's cache: `clamp(A + c k s (g - gbar), A/4, 4A)`, `g` the cached irradiance at the pixel, `c` its
+      confidence, `gbar` the tile's confidence-weighted mean of `g`, `s = min(1, lum(A)/lum(gbar))`. The tile's
+      level comes from this frame; only the spatial shape comes from the cache.
+    - Where it enters: D's anchor in the temporal pass, nowhere else. **The guide never reaches the network, the
+      pyramid, the level choice, the resolve or the prefilter, and never touches S** (rules 5, 6 and 10 are
+      unchanged). The lookup is a fixed 8-cell trilinear per cascade (rule 8); `c` is the cache's own coverage,
+      not a frame count, and sets no radius or level.
+    - **Flag to counsel:** a radiance cache accumulated in world space, used to fill a denoiser's
+      disocclusions, is new ground for this document and is in no sweep. The cache is itself an accumulated
+      estimate (from traced second-bounce samples over many frames), so the guide is history in the world, not
+      the denoiser's own history. The cache's patent notes are NEURAC.md section 9 (US 11,610,360; stage 1 has
+      no network, stage 2a is flagged there). Fallback: `voxi.nrd2NeuracGuide 0` gives the exact no-guide path
+      (bit for bit).
 
 NRD's own sweep (multi-scale learned blending, hit-distance kernels, push-pull filling) is section 9 of
 the private patents document. **Counsel should review before either feature ships.** Nothing is vendored: the

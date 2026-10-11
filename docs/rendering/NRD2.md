@@ -1,9 +1,11 @@
 # NRD v2: single-frame neural denoiser over the composed lighting
 
-**Status:** phases 1, 3 and 4 built (2026-10-06); weights not yet trained. Owner decisions: replace the whole denoiser stack (FidelityFX and the
+**Status:** phases 1, 3 and 4 built (2026-10-06), network trained and shipped (v1 and v2 below); the temporal
+stage took FidelityFX's history handling on 2026-10-12 ("History handling after FidelityFX"; built, not yet run in
+the engine). Owner decisions: replace the whole denoiser stack (FidelityFX and the
 per-signal plumbing); **single-frame** (the spatial filter and the network never see history, so no
 smear or ghosting from them; an optional temporal stabiliser on jitter-free frames was added later, see
-"Temporal stabiliser"); denoise the **composed lighting**; a **convolutional** network; **trained in-engine** like
+"Temporal stabiliser" and "History handling after FidelityFX"); denoise the **composed lighting**; a **convolutional** network; **trained in-engine** like
 NeuraFI, not in Python. Supersedes NEURAA_NRD.md section 4 (NRD v1) once phase 1 lands.
 
 ## Why
@@ -94,7 +96,7 @@ next frame without NRD2 rebinds the originals. Recomposed: final = D' Rd + S' Rs
 
 **Passes** (`modules/render.denoise`, `Nrd2`, `shaders/nrd2.hlsl`, maths in `nrd2_resolve.hlsli`),
 recorded right after Stage B's draw so the sky dome, blended replay, particles and post see the result.
-All compute is fp32, 8x8 (params 64x1), no wave intrinsics or atomics, groupshared 3 KB, constants at b3.
+All compute is fp32, 8x8 (params 64x1), no wave intrinsics or atomics, groupshared 3 KB (the two temporal passes 12 KB), constants at b3.
 
 1. `CSNrd2Pyramid`: D and S from this frame only, 2x2 reductions to 1/2, 1/4, 1/8, each keeping its
    nearest surface (others weighted exp2(-23 dz/z)); guide levels hold the averaged normal and view Z
@@ -581,7 +583,10 @@ noise leave. The floor is now `Settings::nrd2StabFramesMoving` (default 16, `vox
 `Nrd2Params::stabFramesMoving`, sent as `gNrd2Stab.y`): a speed-dependent cap, not a per-pixel count, so the
 shader, its CPU twin and NEURAA_NRD.md rule 5 are unchanged. Static geometry reprojects exactly under camera
 motion and movers fail the history's depth test, so the cost is lag on lighting changes while moving, bounded by
-the min/max box. Try 24-32 if patches remain; lower if lamp flicker or a sun step trails.
+the clip box (FidelityFX's mean +- sigma box by default, the 5x5 min/max box with `voxi.nrd2FfxClip 0`) and the
+colour reject. Since 2026-10-12 the count is FidelityFX's `n = min(N, n_hist * factor + 1)`: this cap `N` is
+unchanged and the disocclusion factor can only shorten it ("History handling after FidelityFX"). Try 24-32 if
+patches remain; lower if lamp flicker or a sun step trails.
 
 ## Combine reference and 1/4-level cap (2026-10-06)
 
@@ -613,6 +618,7 @@ Not adopted from the study:
 - running the temporal stage at rest under TAA (rule 11, counsel).
 
 The study also listed what must not be copied: `ClipAABB` and the variance-based history tests, among others.
+The owner reversed that for the temporal stage on 2026-10-11 ("History handling after FidelityFX").
 
 ## Coarse-level cap (2026-10-06)
 
@@ -663,15 +669,15 @@ S separately). Each is one 8x8 dispatch (`AVER_NRD2_PASS` 5, 6, 7; GPU spans `NR
 `NRD2.Temporal` inside `NRD2`).
 
 1. **`CSNrd2Reproject`.**
-   - History position from the G-buffer velocity (exact for rigid motion; no jitter on these frames). Four
-     bilinear taps by `Load`; a tap is kept when its stored view depth matches the depth this surface point
-     should have in last frame's camera (2% + 1 cm + the local plane slope, per axis the smaller one-sided
-     difference) **and** its stored normal agrees (cos >= 0.9; the history keeps the G-buffer's packed normal and
-     the view Z). Less than half the bilinear weight kept: FidelityFX's fallback, the best of the 3x3
-     neighbouring tap sets (each already dropping mismatched taps) by normal x depth score; none: no history for
-     this pixel. A rigid mover fails the camera-only depth test and gets none either.
-   - Sample count n (the history length): `n = min(N, n_prev + 1)`, `n_prev` the youngest of the taps that carry
-     weight (> 0.1), 1 with no history. `N` = `voxi.nrd2StabFrames` (**32**) at rest up to 0.25 px per frame, a
+   - History position from the G-buffer velocity (exact for rigid motion; no jitter on these frames). Edge
+     handling and the fetch are FidelityFX's since 2026-10-12 ("History handling after FidelityFX"): a history
+     texel is scored by FidelityFX's disocclusion factor (normal, and relative depth against the depth camera
+     motion predicts), a failed nearest texel searches its 3x3, a still failed one rebuilds from the valid
+     texels of the 2x2, and the history is fetched with a 12-tap Catmull-Rom with per-tap validity (the history
+     keeps the G-buffer's packed normal and the view Z). A rigid mover fails the camera-predicted depth test and
+     gets none; each signal's history may also be dropped by the colour reject.
+   - Sample count n (the history length): per signal `n = min(N, n_hist * factor + 1)`, `n_hist` the youngest of
+     the taps that carry weight (> 0.1), 1 with no (or rejected) history. `N` = `voxi.nrd2StabFrames` (**32**) at rest up to 0.25 px per frame, a
      log-space ramp to min(8, that) at 8 px, flat to 128 px, none beyond (a whip), and 2 for two frames after
      the sun changes. Specular: `N_S = min(N, max(8, N (1 - exp(-100 roughness))))`, so a glossy lobe still keeps
      8 frames (FidelityFX does) but a rough one the full count. The history blend weight is `1 - 1/n`: 0, 1/2,
@@ -692,21 +698,31 @@ S separately). Each is one 8x8 dispatch (`AVER_NRD2_PASS` 5, 6, 7; GPU spans `NR
    noise estimate (itself filtered the way FidelityFX does, weights squared) only weights; it never sets a radius,
    a level or a tap position.
 3. **`CSNrd2Temporal`.** `cur` = the prefiltered value after the firefly clamp (2x the brightest 8-neighbour, as
-   before); `cur = lerp(cur, anchor, 1/(n + 1))`; the box is the per-channel **min/max of this frame's 5x5**
-   prefiltered values united with the anchor; `cur` and the history are clipped to it; `out = lerp(cur, history,
-   1 - 1/n)`. The carried noise estimate is `lerp(tempVar(cur, history), prefilteredVar, 1 - 1/n)`. Writes the
-   new history (D'' + n, S'' + n, view Z + packed normal, noise estimate) and `lit = D'' Rd + S'' Rs`, clamped as
-   the resolve does. (With the box containing the centre value, the clip on `cur` is a safety net: the
+   before). D's anchor is the tile anchor, reshaped by the NeuRaC guide where there is one. By default
+   (`voxi.nrd2FfxClip`) FidelityFX's resolve follows: `cur` pulled toward the anchor by `1/(n + 1)`, `cur` and the
+   history each clipped to a mean +- sigma box of this frame's 9x9 Gaussian moments (`nrd2TemporalBlendFfx`, the
+   formula in "History handling after FidelityFX"), `out = lerp(cur, history, 1 - 1/n)`. With the setting off,
+   the previous stage's min/max path: the box is the per-channel **min/max of this frame's 5x5** prefiltered values
+   united with the anchor, `cur` and the history are clipped to it. The carried noise estimate is
+   `lerp(tempVar(cur, history), prefilteredVar, 1 - 1/n)`, its scale the unguided anchor. Writes the new history
+   (D'' + n, S'' + n, view Z + packed normal, noise estimate) and `lit = D'' Rd + S'' Rs`, clamped as the resolve
+   does. (On the min/max path the box contains the centre value, so the clip on `cur` is a safety net: the
    firefly clamp and the pull toward the anchor do the despeckling.)
 
-**Differences from FidelityFX.** (a) The clips are **min/max order statistics**, never mean +- sigma (FidelityFX
-clips history to the local mean +- (std + |mean - anchor|) x 4, and the current value to the anchor +- the same):
-NEURAA_NRD.md section 7, rules 1 and 7. (b) Luminance is **relative** to the tile (anchor weight, radiance stop,
-noise estimate), not absolute, because D' and S' are irradiance. (c) **Surface-motion reprojection only**: no
+**Differences from FidelityFX** (as of 2026-10-12).
+(a) The history and current-value clips are FidelityFX's mean +- sigma by default (`voxi.nrd2FfxClip`); the
+min/max order-statistic path stays behind the setting 0 (NEURAA_NRD.md section 7, rules 1, 7 and 13, amended). The
+moments are validity-weighted and taken on the prefiltered D' and S'; the colour reject runs per signal where
+FidelityFX rejects one. (b) Luminance is **relative** to the tile (anchor weight, radiance stop, noise
+estimate), not absolute, because D' and S' are irradiance. (c) **Surface-motion reprojection only**: no
 hit-position (virtual) reprojection for mirrors, so smooth reflections can swim against their history; the
-firefly clamp, the box and the 8-frame floor bound it. (d) Its 9x9 Gaussian mean and variance estimate is
-gone with the clip it fed; the box is the 5x5 min/max. (e) Depth is view-space relative, the normal test is
-binary (cos 0.9) with the depth tolerance's plane-slope allowance.
+firefly clamp, the clip and the 8-frame floor bound it. (d) The 9x9 Gaussian mean and variance estimate is back
+(it was dropped with the clip on 2026-10-06): twice, in `CSNrd2Reproject` for the colour reject (resolved D' and
+S') and in `CSNrd2Temporal` for the clip (prefiltered), both separable in groupshared. (e) The disocclusion
+factor is FidelityFX's, continuous, with its 3x3 search and 2x2 rebuild; the one deviation is that depth is
+measured against the depth camera motion predicts (`zExp`), not the current depth. It replaces the binary
+cos 0.9 test and the 2% + 1 cm + plane-slope depth tolerance. (f) Additions FidelityFX does not have: the
+12-tap Catmull-Rom fetch and the NeuRaC guide.
 
 **Resources.** All allocated on the first stage frame and freed with the targets or when the dial is off, 108
 bytes per pixel at render size: D' and S' (RGBA16F, rest as UAVs), this frame's reprojected D and S history
@@ -714,9 +730,10 @@ bytes per pixel at render size: D' and S' (RGBA16F, rest as UAVs), this frame's 
 surface), two anchors (RGBA16F, one texel per 8x8 tile), and two ping-pong sets of history: D'' + n, S'' + n,
 view Z + packed normal (RGBA16F) and the noise estimate (RG16F). About 181 MiB at 1766x994 (an estimate; the
 first version was 84). Cost, also an estimate and not measured: about +0.6 ms (0.4-0.9) on jitter-free frames,
-none otherwise. The constants buffer is unchanged (320 bytes).
+none otherwise. The constants buffer grew to 384 bytes on 2026-10-12 (`gNrd2Ffx`, `gNrd2Hist`), plus a tile-sized `anchG_` for the guide.
 
-**Dials.** `voxi.nrd2Stab` (bool), `voxi.nrd2StabFrames` (1-64, default 32). The speed cut-offs, depth
+**Dials.** `voxi.nrd2Stab` (bool), `voxi.nrd2StabFrames` (1-64, default 32); the FidelityFX dials are in the table under "History handling
+after FidelityFX". The speed cut-offs, depth
 tolerance, search score and every weight constant are at the top of `nrd2_resolve.hlsli`, FidelityFX's values
 where it has one, starting values to tune on the rig.
 
@@ -731,9 +748,172 @@ look from the prefilter's radius 3.
 speckles per mille and the 9 px blob error; energy against `voxi.ptMode 1` (target no worse than about 0.5%
 lost on Night); a fast pan at 8, 32 and 64 px per frame against stage-off frames for lag; mirror and wet-road
 reflections while strafing; one lamp toggle and one sun-time step; the three spans (budget 0.6 ms together).
-CPU twin: `Nrd2ResolveReference` (`nrd2StabMaxFrames`, `nrd2StabSpecMaxFrames`, `nrd2StabSamples`,
+Since 2026-10-12 also, with `voxi.denoiserMode 2`, `voxi.giRestirVisibility 4`, `voxi.rayDrivenStages 2` and TAA
+off: A/B `voxi.nrd2FfxClip 0`, `voxi.nrd2FfxReject 0`, `voxi.nrd2HistSharp 0` and `voxi.nrd2NeuracGuide 0`;
+tune `voxi.nrd2FfxClipWeight 1` and `voxi.nrd2FfxDepthWeight 8`. Look at disocclusions while strafing (with and
+without the guide), lamp-lit rooms (the lamp-dominated guide case), a fast pan for lag, mirrors and wet roads, and
+ghosting behind movers. CPU twin: `Nrd2ResolveReference` (`nrd2StabMaxFrames`, `nrd2StabSpecMaxFrames`, `nrd2StabSamples`,
 `nrd2StabBlend`, `nrd2StabRelVar`, `nrd2AnchorWeight`, `nrd2TileAnchor`, `nrd2PrefilterWeight`,
-`nrd2TemporalBlend`), checked by `Nrd2ResolveTest`. Patent mapping: NEURAA_NRD.md section 7, rule 13.
+`nrd2TemporalBlend`, and the FidelityFX set listed under "History handling after FidelityFX"), checked by
+`Nrd2ResolveTest`. Patent mapping: NEURAA_NRD.md section 7, rules 13 and 17.
+
+## History handling after FidelityFX (2026-10-12)
+
+**Owner decision, 2026-10-11.** The temporal stage takes FidelityFX's reflections-denoiser history
+handling whole, including the literal mean +- sigma clip, **on by default**, and its colour-distance
+reject, **on by default**. The owner accepts the patent exposure (NEURAA_NRD.md section 7, rules 1, 7 and
+13, amended the same day). The min/max path stays selectable (`voxi.nrd2FfxClip 0`). NeuRaC feeds the
+temporal anchor as a guide ("fill new pixels"), flagged for counsel (rule 17). Built in commit `f1439403`;
+design in `docs/plans/neurac_nrd2/DESIGN.md` (sections 2 and 3). **Not yet run in the engine**: whether
+motion looks better, and what the guide does, is the owner's to judge.
+
+**Why.** The old reprojection fetched history with a 4-tap bilinear. Every frame the history is resampled at
+a fractional offset `f`, a bilinear tap adds a variance of `f (1 - f)` texels squared, and a history
+accumulated over `n` frames has been resampled `n - 1` times: `sigma^2 = (n - 1) f (1 - f)`. At `f = 0.5`
+and `n = 32` that is `sigma` of about 2.8 px. This is a model, not a measurement: it is the plan's reason that
+indirect light blurred in motion, and why the fetch is Catmull-Rom. The old edge handling was a binary normal test (cos 0.9)
+with a 2% + 1 cm + plane-slope depth gate; FidelityFX's continuous factor, search and rebuild replace it.
+
+### Edge handling (`CSNrd2Reproject`, pass 5)
+
+Per surface pixel, with `thr = 0.9`:
+
+1. **Disocclusion factor.** A history texel is scored by FidelityFX's
+   `nrd2FfxFactor = exp(-|1 - max(0, cos)| * 1.4) * exp(-|zHist - zExp| / zExp * depthW)`: `cos` is the
+   angle between this pixel's normal and the texel's stored one, `zHist` the texel's stored view Z, and
+   `zExp` the view Z camera motion alone predicts for this surface point in last frame's camera.
+   **Measuring against `zExp`, not the current depth, is the one deviation from literal FidelityFX.**
+   A texel outside the viewport or with no sample count has factor 0.
+2. **Nearest texel first.** `f` is its factor. A pixel at or above `thr` keeps it.
+3. **3x3 search.** Below `thr`, the other eight texels around it are scored; a strictly higher factor wins,
+   so the centre wins ties.
+4. **2x2 rebuild.** Still below `thr`: the four texels around the best one are taken as valid when
+   `factor > thr / 2`, their weights (bilinear x validity) renormalised by `max(sum, 1e-3)`, their normals
+   and depths blended **unnormalised** (literal FidelityFX) and the factor taken again; below `thr` after
+   that, no history (factor 0).
+5. **Sample count.** Per signal, `n = min(N, n_hist * f + 1)`, `N` the motion-dependent cap of
+   "History in motion". 1 where the signal's history is rejected or missing.
+
+The depth weight is `voxi.nrd2FfxDepthWeight` (default 1.0): with matching normals a relative depth error
+of about 10% (`exp(-0.105) = 0.9`) still sits at the threshold, so it is **loose**; the old gate was 2% +
+1 cm + slope. Expect smearing across small depth steps; tighten it in the editor, no rebuild needed
+(try 8).
+
+### The history fetch
+
+When the best texel passes `thr` and all four texels of the 2x2 core are valid, the fetch is a **12-tap
+Catmull-Rom** (Aver's addition; FidelityFX uses bilinear): the 4x4 neighbourhood minus its four corners,
+per-tap validity (`factor > thr / 2`), the weights renormalised over the valid taps so a flat history stays
+flat, the result clamped to the min and max of the valid taps (no ringing past the data) and floored at 0,
+then mixed with the validity-weighted bilinear by `voxi.nrd2HistSharp` (default 1; 0 is bilinear). If any
+core tap is invalid, or after a rebuild, the fetch is the validity-weighted bilinear. The weights are the
+`sr_taa.hlsl` ones: at `f = 0.5` they are -1/16, 9/16, 9/16, -1/16.
+
+### Colour reject (`voxi.nrd2FfxReject`, default 1; weight `voxi.nrd2FfxRejectWeight`, default 1.5)
+
+Per signal, FidelityFX's test: the history is dropped when `dot(h - mean, h - mean) >= w * length(var)`.
+`h` is the raw 4-tap bilinear of the history at the reprojected position (no validity, as FidelityFX's
+`SampleRadianceHistory`), `mean` and `var` the validity-weighted 9x9 Gaussian moments of this frame's D' or S'
+(`exp(-3 i^2 / 25)`, `|i| <= 4`, surface pixels only, computed separably in groupshared in `CSNrd2Reproject`).
+A NaN rejects. It runs per signal, so D can lose its history while S keeps its own; FidelityFX rejects one
+signal only. It is a mean/variance test inside history rejection (NEURAA_NRD.md rule 13).
+
+### Clip and blend (`CSNrd2Temporal`, pass 7)
+
+The firefly clamp runs first, as before. With `voxi.nrd2FfxClip` on (default; `voxi.nrd2FfxClipWeight`
+default 4, which is Aver's FidelityFX weight), `nrd2TemporalBlendFfx` follows `resolve_temporal`:
+
+```
+mean, var = 9x9 Gaussian moments of the prefiltered D' (or S'), validity-weighted
+sd        = (sqrt(var) + |mean - A|) * clipW * 1.4            A = the tile anchor (guided for D)
+hist'     = ClipAABB(lerp(mean, A, 0.2) +- sd, hist)
+cur'      = ClipAABB(A +- sd, lerp(cur, A, 1 / (n + 1)))
+out       = lerp(cur', hist', 1 - 1/n)
+```
+
+`ClipAABB` pulls a point toward the box centre along the line to it, not per channel. At weight 4 the box
+is +-5.6 sigma, so it is loose; lower the weight (try 1) to clip harder. The carried noise estimate and the
+remodulation are unchanged.
+
+**The min/max path** (`voxi.nrd2FfxClip 0`) is the previous stage's: this frame's 5x5 min/max of the
+prefiltered values united with the anchor, per-channel clamps, no mean or variance in the clip
+(`nrd2TemporalBlend`, unchanged, its tests stay). The reject is its own setting: with **both**
+`voxi.nrd2FfxClip 0` and `voxi.nrd2FfxReject 0` the stage holds no mean/variance clip or rejection test
+(its anchor is still a weighted mean: rule 13). The fetch and the edge handling above apply on either path.
+
+### The NeuRaC guide (`voxi.nrd2NeuracGuide`, default 1)
+
+**What.** For a new pixel the tile anchor `A` is the only information the temporal stage has, and it is a
+flat 1/8-level mean. NeuRaC's radiance cache holds the shape of the indirect light. `NeuRaCGuide`
+(NEURAC.md, 5.11) hands NRD2 a texture: rgb the cached irradiance / PI at the pixel in D's units, a its
+confidence in [0, 1] (`Nrd2::Inputs::guide`, RGBA16F at render size, resting in `NonPixelShaderResource`).
+
+**Formula** (`nrd2GuidedAnchor`, D only, temporal pass only):
+
+```
+A_g = clamp( A + c * k * s * (g - gbar),  0.25 A,  4 A )         s = min(1, lum(A) / lum(gbar))
+```
+
+`g` and `c` are the pixel's guide and confidence, `gbar` the confidence-weighted guide mean of the tile
+(weights: D's anchor weight times `c`, written by pass 5 to `anchG_`, read bilinearly like the anchors), `k`
+= `voxi.nrd2NeuracGuideStrength`. The tile's level comes from this frame's anchor; only the spatial shape
+comes from the cache. The result replaces `A` in `nrd2TemporalBlendFfx` and in the min/max path alike, and it
+acts where `n` is small, because the pull toward the anchor is `1 / (n + 1)`.
+
+**Why this form.** The cache holds bounce light only, but D also holds the lamps' direct diffuse (the sun
+is outside D, "Sun outside the filter"). In a lamp-dominated tile (`lum(A) > lum(gbar)`) `s = 1` and the
+term is purely additive: the lamp light stays in `A` and the guide adds only the indirect deviation. In an
+indirect-dominated tile (`A <= gbar`) `A + (g - gbar) A / gbar = A g / gbar`: the ratio form, which cancels
+a scale error in the cache, including the `kD / kdAlbedo` factor the guide cannot see. The 4x clamp bounds
+hot spots.
+
+**Exact fall-back.** `c = 0`, no valid `gbar` (an empty guide tile), strength 0, `A = 0` or a NaN guide
+return `A` bit for bit. With NeuRaC off, on Vulkan, or the pass unbuilt, `Inputs::guide` is 0, flag 32
+stays clear, and the shader takes the no-guide path exactly. The guide only runs on frames the stage runs
+(jitter-free).
+
+**What it never does.** The guide enters one place: D's temporal anchor. It never reaches the network, the
+level choice, the pyramid, the resolve, the prefilter or S (NEURAA_NRD.md rules 5 and 10 are untouched).
+Note that the cache it reads is the one NeuRaC maintains; when the NeuRaC trust network is on, its trust
+scales the lookup weights inside the guide as it does anywhere else (NEURAC.md 5.12), and that network is a
+different one from NRD2's.
+
+### Settings, passes, constants
+
+| Console | Default | Range | Meaning |
+|---|---|---|---|
+| `voxi.nrd2FfxClip` | 1 | bool | mean +- sigma clip; 0 = 5x5 min/max box |
+| `voxi.nrd2FfxClipWeight` | 4 | 0.1-8 | sigma weight (`history_clip_weight`) |
+| `voxi.nrd2FfxReject` | 1 | bool | colour-distance reject, per signal |
+| `voxi.nrd2FfxRejectWeight` | 1.5 | 0.1-16 | its discard weight |
+| `voxi.nrd2FfxDepthWeight` | 1 | 0-64 | relative depth error's weight in the factor |
+| `voxi.nrd2HistSharp` | 1 | 0-1 | Catmull-Rom share of the fetch; 0 = bilinear |
+| `voxi.nrd2NeuracGuide` | 1 | bool | the guide, only while NeuRaC is live |
+| `voxi.nrd2NeuracGuideStrength` | 1 | 0-1 | scales the guide's deviation term |
+
+The threshold 0.9 and the normal weight 1.4 are constants (`kNrd2FfxThreshold`, `kNrd2FfxNormalW`) that
+travel in the constants block. Flags in `gNrd2Tiles.z`: 32 guide, 64 clip, 128 reject. Constants grew to 384
+bytes (`gNrd2Ffx`, `gNrd2Hist`). Bindings: `CSNrd2Reproject` 10 SRV / 6 UAV (t9 the guide, u5 `anchG_`, the
+guide's tile mean, RGBA16F at tile size), `CSNrd2Temporal` 12 SRV / 5 UAV (t10 the guide, t11 `anchG_`); a 1x1
+stand-in is bound when there is no guide. Both passes peak at 12 KB of groupshared (compile-time guard at
+16 KB). CPU twin: `Nrd2ResolveReference` (`nrd2FfxFactor`, `nrd2MomentWeight`, `nrd2CatmullRom`,
+`nrd2ClipAabb`, `nrd2FfxReject`, `nrd2TemporalBlendFfx`, `nrd2GuidedAnchor`, `nrd2Moments`, `nrd2FfxSearch`,
+`nrd2FfxRebuild`, `nrd2HistFetch`), checked by `Nrd2ResolveTest::testTemporalFfx`, which also compares its
+constants with the shader's literals.
+
+### Cost (estimates, not measured)
+
+Increments over the previous temporal stage (itself an estimate of about 0.6 ms), 1440p, RX 7800 XT:
+
+| Part | Estimate |
+|---|---|
+| `CSNrd2Reproject` (edge handling, 12-tap fetch, moments) | +0.15-0.3 ms |
+| `CSNrd2Temporal` (16x16 halo, moments) | +0.1-0.2 ms |
+| Guide pass (`NeuRaCGuide`) | +0.1-0.3 ms |
+| **Total with the guide** | **+0.35-0.8 ms** |
+
+Read the spans `NRD2.Reproject`, `NRD2.Temporal` and "Voxi NeuRaC guide" with `--gpu-timing`. The guide
+texture is about 29 MB at 1440p, owned by `NeuRaCGuide`.
 
 ## The network
 

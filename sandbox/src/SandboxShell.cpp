@@ -123,9 +123,9 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
                            "The cache is not running. It needs ray-driven GI (staged, D3D12) with\n"
                            "Project Settings > Rendering > ReSTIR visibility rays: Cached (NeuRaC).");
     }
-    static const char* kRcViews[] = {"Off", "Cached light", "Coverage", "Cascade", "Cell state"};
-    int rv = neuracViewMode_ < 0 ? 0 : (neuracViewMode_ > 4 ? 4 : neuracViewMode_);
-    if (ImGui::Combo("View##neurac", &rv, kRcViews, 5)) neuracViewMode_ = rv;
+    static const char* kRcViews[] = {"Off", "Cached light", "Coverage", "Cascade", "Cell state", "Trust"};
+    int rv = neuracViewMode_ < 0 ? 0 : (neuracViewMode_ > 5 ? 5 : neuracViewMode_);
+    if (ImGui::Combo("View##neurac", &rv, kRcViews, 6)) neuracViewMode_ = rv;
     uiReg_.track("neuralViz.neuracView");
     switch (rv) {
         case 1: ImGui::TextDisabled("The light the cache holds at each visible surface, on its own.\n"
@@ -135,6 +135,8 @@ void SandboxApp::buildNeuralVisualiserPanel(Engine& e) {
                                     "orange 400 cm. Dark red: outside all three."); break;
         case 4: ImGui::TextDisabled("Green: how many frames the cell has averaged. Red: how long since it\n"
                                     "was last updated. Violet: empty or stale."); break;
+        case 5: ImGui::TextDisabled("The trust the network learned for each cell, as a weight on the lookup:\n"
+                                    "green full, red none. Needs voxi.neuracNet 1; it warms in over ~900 frames."); break;
         default: break;
     }
     ImGui::BeginDisabled(rv == 0);

@@ -411,7 +411,7 @@ Five bits of consoleLightingLegacySlot(), all default OFF (fixed behaviour):
 
 - `--frame-interp-trajectory linear|quadratic|neural`: path the gather follows (NEURAFI.md §3.5).
 
-- Neural Visualiser views: --neurafi-view 0 off, 1 sources, 2 confidence, 3 path bend, 4 network share; --neurac-view 0 off, 1 cached light, 2 coverage, 3 cascade, 4 cell state.
+- Neural Visualiser views: --neurafi-view 0 off, 1 sources, 2 confidence, 3 path bend, 4 network share; --neurac-view 0 off, 1 cached light, 2 coverage, 3 cascade, 4 cell state, 5 trust (stage-2a network, red to green).
 
 - `--depth-prepass`: same-frame depth-only pass ahead of opaque walk; occluded fragment skips PSMainVoxi's shadow/cone/fog.
 

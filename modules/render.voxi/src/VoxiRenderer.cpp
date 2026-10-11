@@ -528,9 +528,12 @@ void VoxiRenderer::shutdown() {
     ptAccumValid_ = false;
     // Radiance cache: bindings_ already destroyed, so destroy buffers outright.
     rcGuide_.destroy();
+    rcNet_.invalidateBindings();
+    rcNet_.destroy();
     rc_.destroy();
     if (rcPlaceholder_) { res_->destroyBuffer(rcPlaceholder_); rcPlaceholder_ = 0; }
     neuracLive_ = false;
+    rcNetActive_ = rcNetWasActive_ = false;
     rcSlotsBound_ = false;
     rcBoundGeneration_ = 0;
     rcUnsupportedLogged_ = false;
@@ -712,7 +715,7 @@ void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
         constexpr f32 kMoveCm = 1.0f;
         bool moved = std::abs(extent - extent_) > kMoveCm;
         for (int i = 0; i < 3; ++i) moved = moved || std::abs(center[i] - center_[i]) > kMoveCm;
-        if (moved) rc_.requestReset();
+        if (moved) { rc_.requestReset(); rcNet_.resetWarmup(); }
     }
     center_[0] = center[0]; center_[1] = center[1]; center_[2] = center[2];
     extent_ = extent;
@@ -758,7 +761,7 @@ void VoxiRenderer::resetGiHistory(bool quiet) {
     giHistValid_ = false;
     giVisHistValid_ = false;
     // The every-frame debug path passes quiet; it must not wipe the cache each frame.
-    if (!quiet && rc_.valid()) rc_.requestReset();
+    if (!quiet && rc_.valid()) { rc_.requestReset(); rcNet_.resetWarmup(); }
     if (!quiet) AVER_INFO("[Voxi] GI ReSTIR reservoir history reset by console command (resetgihistory); "
               "next frame uses a fresh candidate only (expect one visibly noisier frame), both "
               "ping-pong slices clean within 2 frames.");
@@ -5846,10 +5849,22 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     // RADIANCE CACHE RESOLVE: after the lighting group closes, the resolve reads exactly what the
     // group's twins wrote. usedCacheTwin is only ever set inside a giDispatch branch.
     if (usedCacheTwin && rc_.valid()) {
+        // The net (stage 2) trains on the old cells plus the fresh accumulator before the resolve folds
+        // them together, and bakes its trust into the cells the resolve kept valid afterwards.
+        const bool net = rcNetActive_ && rcNet_.valid();
+        NeuRaCNet::Frame nf;
+        nf.info  = rc_.infoBuffer();
+        nf.accum = rc_.accumBuffer();
+        nf.cells = rc_.cellsBuffer();
         ctx.uavBarrierBuffer(rc_.accumBuffer());
+        if (net) rcNet_.recordPre(ctx, nf);
         rc_.recordResolve(ctx);
         ctx.uavBarrierBuffer(rc_.accumBuffer());   // the resolve's counts/arrivals reset, before next frame's scatter
         ctx.uavBarrierBuffer(rc_.cellsBuffer());
+        if (net) {
+            rcNet_.recordApply(ctx, nf);
+            ctx.uavBarrierBuffer(rc_.cellsBuffer());
+        }
     }
     // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex must see whichever of the four
     // dispatches above wrote them -- all four barriers sit here, unconditionally.
@@ -7197,6 +7212,7 @@ rhi::PipelineHandle VoxiRenderer::pickGbuf(rhi::PipelineHandle plain, rhi::Pipel
 // NeuRaC radiance cache frame entry (staged ray-driven passes on D3D12 only; elsewhere behaves as HalfResolution).
 void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
     neuracLive_ = false;
+    rcNetActive_ = false;
     if (!neuracWanted()) {
         if (rc_.valid() || rcSlotsBound_) teardownNeuRaC();
         rcCreateFailed_ = false;
@@ -7237,6 +7253,12 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
         rcGuide_.invalidateBindings();
         if (!rcGuide_.valid() && !rcGuide_.create(*dev_))
             AVER_WARN("[Voxi] NeuRaC guide pass did not build; NRD2 runs without the cache guide");
+        // Likewise optional: without the net the lookup keeps its stage-1 weights. The cells are fresh, so
+        // the net's warm-up starts over.
+        rcNet_.invalidateBindings();
+        if (!rcNet_.valid() && !rcNet_.create(*dev_))
+            AVER_WARN("[Voxi] NeuRaC trust network did not build; the cache runs without it");
+        rcNet_.resetWarmup();
         giHistValid_ = false;
     }
 
@@ -7248,9 +7270,14 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
     NeuRaC::Params params{};
     params.coarseCap1  = 16u;
     params.coarseCap2  = 8u;
-    params.netStrength = 0.0f;   // the stage-2 trust network is not wired yet
+    // The net trains and applies from frame 0 of its warm-up; its strength ramps in. Path Tracing's paths
+    // read the cache during traced continuations, so their samples are self-referential: no net there.
+    rcNetActive_ = settings_.neuracNet && rcNet_.valid() && !pathTracingWanted();
+    if (rcNetActive_ && !rcNetWasActive_) rcNet_.resetWarmup();   // re-enabled: the trust bits are stale
+    rcNetWasActive_ = rcNetActive_;
+    params.netStrength = rcNetActive_ ? rcNet_.warmStrength(settings_.neuracNetStrength) : 0.0f;
     const NeuRaC::Bindings b = rc_.beginFrame(ctx, eye, rtFrameIndex_, params);
-    if (!b.info || !b.accum || !b.cells) return;
+    if (!b.info || !b.accum || !b.cells) { rcNetActive_ = false; return; }
 
     res_->setSrvBuffer(bindings_, 22, b.info, b.infoStride, b.infoCount, 0);
     if (!rcSlotsBound_ || b.generation != rcBoundGeneration_) {
@@ -7380,6 +7407,9 @@ void VoxiRenderer::teardownNeuRaC() {
     }
     rcGuide_.invalidateBindings();
     rcGuide_.destroy();
+    rcNet_.invalidateBindings();
+    rcNet_.destroy();
+    rcNetActive_ = rcNetWasActive_ = false;
     rc_.destroy();
     rcSlotsBound_ = false;
     rcBoundGeneration_ = 0;

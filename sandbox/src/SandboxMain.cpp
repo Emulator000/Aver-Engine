@@ -114,7 +114,7 @@ Application* createApplication(int argc, char** argv) {
     bool frameInterpTrain = false;   // --frame-interp-train
     int neurafiVizArg = -1;          // --neurafi-view 0-4
     bool neurafiGeneratedOnly = false;  // --neurafi-generated-only
-    int neuracViewArg = -1;          // --neurac-view 0-4
+    int neuracViewArg = -1;          // --neurac-view 0-5
     bool neuracGrid = false;         // --neurac-grid
     int pieCamArg = 0;
     int inputStuckArg = 0;
@@ -750,7 +750,7 @@ Application* createApplication(int argc, char** argv) {
         }
         else if (!std::strcmp(argv[i],"--frame-interp-train")) frameInterpTrain=true;
         // Neural Visualiser: --neurafi-view 0-4, --neurafi-generated-only.
-        // --neurac-view 0-4, --neurac-grid.
+        // --neurac-view 0-5, --neurac-grid.
         else if (!std::strcmp(argv[i],"--neurafi-view") && i+1<argc) neurafiVizArg = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i],"--neurafi-generated-only")) neurafiGeneratedOnly = true;
         else if (!std::strcmp(argv[i],"--neurac-view") && i+1<argc) neuracViewArg = std::atoi(argv[++i]);

@@ -109,6 +109,19 @@ target_include_directories(NeuRaCTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render
 target_compile_definitions(NeuRaCTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(NeuRaCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# NeuRaCNetTest -- the stage-2a trust network's CPU half (aver/voxi/NeuRaCNetReference.hpp, the spec for
+# voxi_neurac_net.hlsl): the feature builder on hand-built cells, label, eligibility, hash thinning, the trust
+# mapping, the identity init (trust exactly 1), the batch against the Mlp's safeBatchLimit, and a
+# MlpReference-trained net separating leaky from clean synthetic cells. Links Aver.Core and the Mlp's CPU
+# reference; no device. AVER_REPO_ROOT because it also reads the HLSL's RCN_* #defines and entry points.
+if(TARGET Aver.Render.Neural)
+  add_executable(NeuRaCNetTest src/NeuRaCNetTest.cpp)
+  target_link_libraries(NeuRaCNetTest PRIVATE Aver.Render.Neural Aver.Core)
+  target_include_directories(NeuRaCNetTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
+  target_compile_definitions(NeuRaCNetTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+  set_target_properties(NeuRaCNetTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # SceneLightTest -- scene lights' CPU half (aver/voxi/SceneLight.hpp): candela -> engine-unit conversion,
 # packing into the 80-byte AverLightRec, and the rectangle's clipped polygonal form factor against closed
 # forms (distant point limit, infinite plane = pi, horizon clipping = pi/2). Links Aver.Core and

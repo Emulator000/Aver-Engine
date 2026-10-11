@@ -2,7 +2,7 @@
 // real device, without a window or a scene, so a shader error shows up here instead of in the editor.
 // HLSL compiles at runtime: no other test reaches voxi.hlsl's CSRd* entries or nrd2.hlsl. That includes the
 // NeuRaC twins (buildAllVariants builds them), the cache's resolve (a standalone NeuRaC) and the guide pass
-// (a standalone NeuRaCGuide).
+// (a standalone NeuRaCGuide and NeuRaCNet).
 // Arguments: `warp` uses WARP (default: the adapter; ray tracing usually needs it). Skips (77) when the
 // device lacks ray tracing tier 1.1 / shader model 6.6, which the staged path requires.
 
@@ -12,6 +12,7 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/voxi/NeuRaC.hpp"
 #include "aver/voxi/NeuRaCGuide.hpp"
+#include "aver/voxi/NeuRaCNet.hpp"
 #include "aver/voxi/VoxiRenderer.hpp"
 
 #include <cstring>
@@ -82,6 +83,11 @@ int main(int argc, char** argv) {
         voxi::NeuRaCGuide guide;
         if (!guide.create(*dev) || !guide.valid()) { AVER_ERROR("  FAIL  standalone guide pass (create)"); ++failures; }
         guide.destroy();
+    }
+    {
+        voxi::NeuRaCNet net;
+        if (!net.create(*dev) || !net.valid()) { AVER_ERROR("  FAIL  standalone trust network (create)"); ++failures; }
+        net.destroy();
     }
     {
         render::denoise::Nrd2 nrd2;

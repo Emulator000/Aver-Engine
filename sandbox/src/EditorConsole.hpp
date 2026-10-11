@@ -829,6 +829,18 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (!(v.as.f >= 0.0f && v.as.f <= 1.0f)) { err = "nrd2NeuracGuideStrength must be 0 to 1"; return false; }
             return true;
         }});
+    t.push_back({"voxi.neuracNet", VarType::Bool, false,
+        "NeuRaC stage 2: a small network learns how far to trust each cached cell and scales the cache lookup by it (only while NeuRaC is live and Path Tracing is off; warms in over ~900 frames); 0 = stage-1 lookup (A/B)",
+        []{ return vBool(Renderer::get().settings().neuracNet); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuracNet = on; }); }});
+    t.push_back({"voxi.neuracNetStrength", VarType::F32, false,
+        "NeuRaC trust network strength (0-1, default 1): how much the learned per-cell trust scales the cache lookup; 0 trains but changes nothing",
+        []{ return vF32(Renderer::get().settings().neuracNetStrength); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->neuracNetStrength = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 0.0f && v.as.f <= 1.0f)) { err = "neuracNetStrength must be 0 to 1"; return false; }
+            return true;
+        }});
     t.push_back({"voxi.rtCompactBlas", VarType::Bool, false,
         "Static ray-tracing BLASes move into their compacted copies once built (less VRAM, D3D12); 0 = new ones stay full size",
         []{ return vBool(Renderer::get().settings().rtCompactBlas); },

@@ -296,13 +296,19 @@ they could bite.
 * **Conv forward input-tile staging**: waits for a counsel note (the forward reads its input straight from
   global memory; Performance above).
 
-## How the radiance cache and frame interpolation will use it
+## How the radiance cache and frame interpolation use it
 
 * **Radiance cache (design doc stages 1 and 2):** stage 1 has no network. Stage 2 trains tiny networks
   that learn blend weights and residuals over the non-neural cache: a GPU pass writes records and a
   live count, `recordInfer` answers them (EMA weights, so the cache does not flicker), and
   `recordTrain` runs each frame on a batch the sampling pass produced, with the count again
   GPU-written. Counsel should review stage 2 before it ships (US 11,610,360).
+  **Stage 2a is a client now** (2026-10-12; docs/rendering/NEURAC.md 5.12): `NeuRaCNet` in `Aver.Render.Voxi`
+  runs one `Mlp` (10 inputs, 2 x 8 hidden, 1 sigmoid output; `Loss::L2`) that learns a per-cell trust, with
+  GPU-written counts, the EMA weights for inference and training batches kept at `safeBatchLimit()`
+  (16383 at `gradClamp` 2). The API does not grow for it: it uses `recordTrain` / `recordInfer` with a count
+  buffer (its caller-owned lists rest in `Common`, the `IoStates` default), `uploadWeights` for the identity
+  init, and calls `invalidateBindings()` before it frees a list. Stage 2b (`instances > 1`) stays under "Not there yet".
 * **Frame interpolation:** weights are trained offline and shipped, which is what the AVNN file is
   for (`loadWeights`). Its network adds convolution layers on top of this module's per-layer weight
   streaming; conv nets use the AVNN v2 file (version bump done).

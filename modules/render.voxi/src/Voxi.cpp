@@ -149,6 +149,7 @@ void Renderer::setSettings(const Settings& s) {
     n.nrd2FfxDepthWeight      = fin(n.nrd2FfxDepthWeight, 0.0f, 64.0f, 1.0f);
     n.nrd2HistSharp           = fin(n.nrd2HistSharp, 0.0f, 1.0f, 1.0f);
     n.nrd2NeuracGuideStrength = fin(n.nrd2NeuracGuideStrength, 0.0f, 1.0f, 1.0f);
+    n.neuracNetStrength       = fin(n.neuracNetStrength, 0.0f, 1.0f, 1.0f);
     // The shader clamps too (nrd2SanitiseParams); a non-finite value falls back to the default.
     for (u32 i = 0; i < 12; ++i) {
         const float v = n.nrd2Params[i];

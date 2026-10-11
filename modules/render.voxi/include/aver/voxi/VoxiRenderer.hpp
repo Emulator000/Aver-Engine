@@ -14,6 +14,7 @@
 #include "aver/render/denoise/Nrd2Capture.hpp"
 #include "aver/voxi/NeuRaC.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
 #include "aver/voxi/NeuRaCGuide.hpp"  // rcGuide_ -- the cache lookup NRD2 anchors on
+#include "aver/voxi/NeuRaCNet.hpp"    // rcNet_ -- the trust network that scales the cache lookup
 #include "aver/voxi/VoxiFroxelFog.hpp"   // froxel_ -- volumetric fog (light shafts)
 
 #include <unordered_map>
@@ -1353,6 +1354,10 @@ private:
     NeuRaC rc_;
     // The per-pixel cache lookup handed to NRD2 as its guide; created and destroyed with rc_.
     NeuRaCGuide rcGuide_;
+    // Stage 2: learns a per-cell trust baked into rc_'s cells; created and destroyed with rc_, optional.
+    NeuRaCNet rcNet_;
+    bool rcNetActive_ = false;       // this frame: the net trains and applies (set in updateNeuRaC)
+    bool rcNetWasActive_ = false;    // last frame's, so a re-enable restarts the warm-up
     bool neuracLive_ = false;
     u32 neuracView_ = 0;   // setNeuRaCView: mode in bits 0-2, grid bit 3 (packed into gAmbientParams.w << 8)
     // The NeuRaC::Bindings::generation last written into table 0's t22/u20/u21; a different

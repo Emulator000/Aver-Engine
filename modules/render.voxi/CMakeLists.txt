@@ -26,6 +26,7 @@ add_library(Aver.Render.Voxi.Renderer STATIC
   src/VoxiRenderer.cpp
   src/NeuRaC.cpp
   src/NeuRaCGuide.cpp
+  src/NeuRaCNet.cpp
   src/VoxiFroxelFog.cpp
   src/VoxiGiShaders.cpp)
 
