@@ -263,7 +263,7 @@ v2 was trained against the previous form and still applies; a recapture and retr
 
 ## Network v3: sun outside D, three Caldera regions (2026-10-12)
 
-Retrained because the sun left D (`2e538bff`): 324 poses in 8 scenes, 228 training and 68 held out. Caldera
+Retrained because the sun left D (`2e538bff`): 296 poses in 8 scenes, 228 training and 68 held out. Caldera
 in three regions (courtyard, streets, seafront; 112 poses, plus 24 with Path Tracing), CyberCity2099 Day and
 Night, NewSponza and NewSponza_Night (each also with Path Tracing). The capture now waits for the
 `--open-level` level and ~10 s of streaming; before, it captured the startup level. Best held-out ratio 0.545
