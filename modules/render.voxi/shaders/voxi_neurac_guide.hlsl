@@ -66,7 +66,9 @@ void CSNeuracGuide(uint3 t : SV_DispatchThreadID, uint gi : SV_GroupIndex)
             // A non-finite cache value is no guide at all.
             const bool ok   = all(isfinite(e)) && isfinite(rem);
             const float conf = ok ? saturate(1.0 - rem) : 0.0;
-            outG = float4(ok ? e : 0.0, conf);
+            // rgb is the estimate itself, a its confidence: e is weighted by (1 - rem), so a raw e would
+            // carry the per-cell confidence into NRD2's anchor as blotches.
+            outG = float4(ok && conf > 1.0e-3 ? e / conf : 0.0, conf);
             surf = 1u;
             cov  = conf >= 0.5 ? 1u : 0u;
         }

@@ -709,15 +709,38 @@ void VoxiRenderer::setSettings(const Settings& in) {
 
 // Places the GI volume: centre in world units, half-edge extent.
 void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
-    // A level load refits the volume: the radiance cache holds the old level's light. Called every frame,
-    // so only a move of more than 1 cm counts.
-    if (rc_.valid()) {
-        constexpr f32 kMoveCm = 1.0f;
-        bool moved = std::abs(extent - extent_) > kMoveCm;
-        for (int i = 0; i < 3; ++i) moved = moved || std::abs(center[i] - center_[i]) > kMoveCm;
-        if (moved) { rc_.requestReset(); rcNet_.resetWarmup(); }
+    // A level load refits the authored volume: the radiance cache holds the old level's light. Called every
+    // frame, so only a move of more than 1 cm counts.
+    constexpr f32 kMoveCm = 1.0f;
+    bool authoredMoved = std::abs(extent - authoredExtent_) > kMoveCm;
+    for (int i = 0; i < 3; ++i) authoredMoved = authoredMoved || std::abs(center[i] - authoredCenter_[i]) > kMoveCm;
+    if (authoredMoved && rc_.valid()) { rc_.requestReset(); rcNet_.resetWarmup(); }
+    for (int i = 0; i < 3; ++i) authoredCenter_[i] = center[i];
+    authoredExtent_ = extent;
+
+    // Follow the camera (last frame's eye) while it is outside the authored volume's inner three quarters.
+    // Recentre in quarter-volume steps once it strays half a volume from the current centre: each step
+    // re-voxelises, so the hysteresis keeps that to one rebuild per ~half volume of travel.
+    f32 c[3] = {center[0], center[1], center[2]};
+    bool follow = false;
+    if (settings_.giVolumeFollow && extent > 0.0f) {
+        for (int i = 0; i < 3; ++i) follow = follow || std::abs(curCamPos_[i] - center[i]) > 0.75f * extent;
+        if (follow) {
+            bool stray = !volumeFollowing_ || authoredMoved;
+            for (int i = 0; i < 3; ++i) stray = stray || std::abs(curCamPos_[i] - center_[i]) > 0.5f * extent;
+            const f32 step = 0.25f * extent;
+            for (int i = 0; i < 3; ++i) c[i] = stray ? std::round(curCamPos_[i] / step) * step : center_[i];
+        }
     }
-    center_[0] = center[0]; center_[1] = center[1]; center_[2] = center[2];
+    if (follow != volumeFollowing_)
+        AVER_INFO("[Voxi] GI volume {} (camera {} the authored volume)", follow ? "follows the camera" : "back on the authored volume",
+                  follow ? "outside" : "inside");
+    bool moved = false;
+    for (int i = 0; i < 3; ++i) moved = moved || c[i] != center_[i];
+    // The cache is camera-relative; a recentred volume only changes the light it trains from.
+    if (moved && !authoredMoved && rc_.valid()) rc_.requestRelax(4u, 0.25f);
+    volumeFollowing_ = follow;
+    center_[0] = c[0]; center_[1] = c[1]; center_[2] = c[2];
     extent_ = extent;
 }
 
@@ -2868,6 +2891,8 @@ void VoxiRenderer::giCacheRememberKey(const fmt::GiCacheKey& k) {
 // Nothing written yet (see countdown).
 bool VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
     if (giCacheDir_.empty() || giCacheUnsupported_) return true;
+    // A camera-following volume would leave a file at every stop along the way.
+    if (volumeFollowing_) return true;
     if (giCacheDumpCountdown_) return false;   // one in flight is enough
 
     // Cloud-only rebuild not worth file: key zeroes cloudTime, so bake with only cloud change

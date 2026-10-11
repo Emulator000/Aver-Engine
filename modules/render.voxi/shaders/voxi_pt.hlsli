@@ -72,9 +72,11 @@ float3 averSurfaceInscatter(AverSurface s, float thicknessCm, float3 viewTravelD
     if (s.attenuationDistance <= 0.0 || !any(s.scatterColor > 0.0)) return float3(0.0, 0.0, 0.0);
     const float3 sunIn = sun.radiance * sun.visibility *
                          (1.0 - fresnelSchlick(saturate(dot(s.N, sun.direction)), s.F0, s.f90));
+    // Leaving the water the glow loses what the surface reflects back at the view angle (alpha is the view
+    // Fresnel for a fully transmissive surface); without it grazing water adds sky AND full glow.
     return averVolumeInscatter(s.attenuationColor, s.attenuationDistance, s.scatterColor, s.scatterAnisotropy,
                                thicknessCm, viewTravelDir, s.N, sun.direction, sunIn,
-                               ind.ambient * ind.ambientScale * ind.occlusion);
+                               ind.ambient * ind.ambientScale * ind.occlusion) * (1.0 - saturate(s.alpha));
 }
 
 // Re-aims a surface's half vector and Fresnel at one light (they are built for whichever light came first).

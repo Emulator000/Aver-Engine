@@ -85,11 +85,15 @@ float averWaveHeight(float2 p) { return averWaveHeightT(p, gTime.x); }
 
 // Tangent-space normal of the height field, ANALYTIC not finite-difference (derivative of a sum
 // of sines is a sum of cosines -- exact, same cost as the height). z = 1 keeps it a tilt.
+// A wave shorter than about two pixels fades out with distance (fixed ~2 mrad footprint per pixel), so
+// short chop does not alias into shimmer far away.
 float3 averWaveNormalT(float2 p, float t) {
     const uint n = (uint)(gWaveParams.y + 0.5);
+    const float foot = 0.002 * length(float3(p - gCamPos.xy, gCamPos.z)) * 0.3183099;   // pixel / pi
     float2 d = float2(0.0, 0.0);
     [unroll] for (uint i = 0; i < 3; ++i)
-        if (i < n) d += gWave[i].xy * (gWave[i].z * cos(averWavePhaseT(gWave[i], p, t)));
+        if (i < n) d += gWave[i].xy * (gWave[i].z * saturate(2.0 - 2.0 * foot * gWave[i].z) *
+                                       cos(averWavePhaseT(gWave[i], p, t)));
     return normalize(float3(-d * gWaveParams.x, 1.0));
 }
 float3 averWaveNormal(float2 p) { return averWaveNormalT(p, gTime.x); }

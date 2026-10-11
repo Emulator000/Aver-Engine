@@ -985,7 +985,8 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
     }
 
     dstTerm  = (bgR * T - bg0) * (1.0 - alpha);
-    bgWeight = 1.0 - alpha;
+    // Only the backdrop seen THROUGH the volume carries its own fog: deep water (T ~ 0) is all surface.
+    bgWeight = (1.0 - alpha) * dot(T, float3(0.2126, 0.7152, 0.0722));
     return float4(specular + diffuse * alpha + dstTerm + inscatter, alpha);
 }
 

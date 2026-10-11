@@ -568,7 +568,7 @@ off, `netStrength` 0, and stage-1 behaviour exact, when:
 No weights are saved: the tiny net converges in seconds. Trust bits stay in the cells but have no effect at
 strength 0.
 
-**Settings and views.** `voxi.neuracNet` (bool, default 1), `voxi.neuracNetStrength` (0-1, default 1).
+**Settings and views.** `voxi.neuracNet` (bool, default 0 since 2026-10-12: on Caldera the label read Monte Carlo noise as error, mean trust settled near 0.5 and the per-cell trust became a 25 cm pattern in the lookup coverage; it stays off until the label is noise-calibrated), `voxi.neuracNetStrength` (0-1, default 1).
 Visualiser mode 5 shows trust (`--neurac-view 5`). Every 120 frames the log prints
 `[Voxi] NeuRaC net: step N, eligible N, mean label, mean pred, loss, mean trust` (the loss comes from the
 apply kernel, the `Mlp` has no loss readout). GPU span "Voxi NeuRaC net".

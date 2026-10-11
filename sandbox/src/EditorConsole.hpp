@@ -817,6 +817,10 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             if (!(v.as.f >= 0.0f && v.as.f <= 1.0f)) { err = "nrd2HistSharp must be 0 to 1"; return false; }
             return true;
         }});
+    t.push_back({"voxi.giVolumeFollow", VarType::Bool, false,
+        "The GI voxel volume recentres on the camera while the camera is outside the authored volume (RENDER.GIVOLUME); 0 = always the authored volume",
+        []{ return vBool(Renderer::get().settings().giVolumeFollow); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->giVolumeFollow = on; }); }});
     t.push_back({"voxi.nrd2NeuracGuide", VarType::Bool, false,
         "NRD2's temporal anchor takes its spatial shape from the NeuRaC cache where the history is new (only while NeuRaC is live, voxi.giRestirVisibility 4 on D3D12); 0 = tile anchor only (A/B)",
         []{ return vBool(Renderer::get().settings().nrd2NeuracGuide); },
@@ -830,7 +834,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             return true;
         }});
     t.push_back({"voxi.neuracNet", VarType::Bool, false,
-        "NeuRaC stage 2: a small network learns how far to trust each cached cell and scales the cache lookup by it (only while NeuRaC is live and Path Tracing is off; warms in over ~900 frames); 0 = stage-1 lookup (A/B)",
+        "NeuRaC stage 2: a small network learns how far to trust each cached cell and scales the cache lookup by it (only while NeuRaC is live and Path Tracing is off; warms in over ~900 frames). Default 0: its training label still reads sampling noise as error",
         []{ return vBool(Renderer::get().settings().neuracNet); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->neuracNet = on; }); }});
     t.push_back({"voxi.neuracNetStrength", VarType::F32, false,

@@ -2783,6 +2783,13 @@ void SandboxApp::drawViewportContextMenu() {
 #endif
 }
 
+void SandboxApp::teleportCamera(const Vec3& p) {
+    camPos_ = p;
+#if AVER_MODULE_SCENE
+    streaming_.resetVelocityTracking();   // a jump, not a one-frame flight to here
+#endif
+}
+
 // Draws the viewport's overlay bars: view options on the left, transform tools, snapping and
 // camera speed on the right.
 void SandboxApp::buildViewportOverlay() {
@@ -2995,7 +3002,41 @@ void SandboxApp::buildViewportOverlay() {
         uiReg_.track("show.staticMeshes");
         ImGui::Checkbox("Atmosphere", &showAtmosphere_);
         uiReg_.track("show.atmosphere");
+        ImGui::Checkbox("Camera Coordinates", &showCamCoords_);
+        uiReg_.track("show.camCoords");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The camera's position (cm) and heading under this toolbar.");
+        ImGui::Separator();
+        ImGui::TextDisabled("Go To");
+        if (ImGui::MenuItem("World Origin (0, 0, 0)")) teleportCamera(Vec3{0.0f, 0.0f, 0.0f});
+        uiReg_.track("show.goToOrigin");
+#if AVER_MODULE_SCENE
+        if (ImGui::MenuItem("Whole Level")) frameCameraOnLevel();
+        uiReg_.track("show.goToLevel");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stands back far enough to see every placement in the level.");
+#endif
+        ImGui::SetNextItemWidth(220.0f * dpi_);
+        const bool enter = ImGui::InputFloat3("##goTo", goToPos_, "%.0f", ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::SameLine();
+        if (ImGui::Button("Go") || enter) teleportCamera(Vec3{goToPos_[0], goToPos_[1], goToPos_[2]});
+        uiReg_.track("show.goTo");
+        ImGui::SameLine();
+        if (ImGui::Button("Here")) { goToPos_[0] = camPos_.x; goToPos_[1] = camPos_.y; goToPos_[2] = camPos_.z; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fill the fields with the camera's position.");
         ImGui::EndPopup();
+    }
+    if (showCamCoords_) {
+        constexpr f32 kDeg = 180.0f / 3.14159265358979323846f;
+        const Vec3 p = viewPos();
+        f32 yawDeg = std::fmod(yaw_ * kDeg, 360.0f);
+        if (yawDeg < 0.0f) yawDeg += 360.0f;
+        ImGui::Text("X %.0f  Y %.0f  Z %.0f cm   yaw %.0f  pitch %.0f deg", p.x, p.y, p.z, yawDeg, pitch_ * kDeg);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy")) {
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%.2f %.2f %.2f", p.x, p.y, p.z);
+            ImGui::SetClipboardText(buf);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copies \"x y z\" (cm), the form --cam and Go To take.");
     }
     ImGui::End();
 

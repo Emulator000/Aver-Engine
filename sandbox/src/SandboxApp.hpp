@@ -3303,6 +3303,8 @@ private:
     bool viewOverride_ = false;
     Vec3 viewPosOv_{0.0f, 0.0f, 0.0f}, viewFwdOv_{1.0f, 0.0f, 0.0f};
     Vec3 viewPos() const { return viewOverride_ ? viewPosOv_ : camPos_; }
+    // Moves the editor camera without turning it; streaming treats it as a jump, not a fast move.
+    void teleportCamera(const Vec3& p);
     Vec3 viewForward() const { return viewOverride_ ? viewFwdOv_ : camForward(); }
 
     // What "1" on the camera-speed dial means, in cm/s (movement integration uses cm/s).
@@ -3411,6 +3413,9 @@ private:
     rhi::LineHandle gzRot_[3]={0,0,0}, gzRotHi_[3]={0,0,0};
     rhi::LineHandle gzScale_[3]={0,0,0}, gzScaleHi_[3]={0,0,0};
     bool showGrid_=true, wireframe_=false;
+    // Show > Camera Coordinates, and the Show > Go To fields (cm).
+    bool showCamCoords_=false;
+    f32 goToPos_[3]={0.0f, 0.0f, 0.0f};
     // gizmo interaction
     bool dragging_=false; int activeAxis_=-1, hoverAxis_=-1;
     // Rotation drag accumulators for snap working on total swept angle rather than per-frame delta.

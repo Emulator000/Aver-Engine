@@ -129,7 +129,7 @@ struct Settings {
     // NeuRaC stage 2 (docs/rendering/NEURAC.md): a small network learns a per-cell trust that scales the cache
     // lookup's weights, warming in over ~900 frames. Only while Cached is live and Path Tracing is off.
     // neuracNetStrength scales the trust's effect (0 = stage-1 weights exactly, 1 = full).
-    bool neuracNet = true;
+    bool neuracNet = false;   // off until its label tells sampling noise from a wrong cell (it halves trust everywhere)
     f32 neuracNetStrength = 1.0f;
 
     // ---- ReSTIR GI spatial reuse control: pin the tap count or disable spatial reuse ----
@@ -185,6 +185,9 @@ struct Settings {
     f32 nrd2FfxDepthWeight = 1.0f;
     f32 nrd2HistSharp = 1.0f;
     bool nrd2NeuracGuide = true;
+    // The GI voxel volume recentres on the camera (in quarter-volume steps) while the camera is outside the
+    // authored volume, so a level larger than it still gets second-bounce light where you are.
+    bool giVolumeFollow = true;
     f32 nrd2NeuracGuideStrength = 1.0f;
     // NRD2 input despeckle (CSNrd2Despeckle): isolated outliers in D (1) and S (2) clamped before the pyramid,
     // so a lone bright sample (a small emitter hit by a GI ray) is not spread into a blotch.

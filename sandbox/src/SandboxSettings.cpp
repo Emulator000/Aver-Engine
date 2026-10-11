@@ -29,6 +29,7 @@ void SandboxApp::loadEditorPreferences() {
     // --auto-compile on command line wins (autoCompileFromCli_).
     if (!autoCompileFromCli_) autoCompile_ = prefBool("scripting.autoCompile", autoCompile_);
     showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
+    showCamCoords_      = prefBool ("viewport.showCamCoords",        showCamCoords_);
     // viewport.showColliders not restored on purpose: debug view, toggled from Window menu.
     showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
     showDetails_        = prefBool ("panels.details",                showDetails_);
@@ -2307,6 +2308,7 @@ void SandboxApp::saveEditorPreferences() {
     // from the Tools menu before this session started.
     if (!autoCompileFromCli_) setPrefBool("scripting.autoCompile", autoCompile_);
     setPrefBool ("viewport.showGrid",            showGrid_);
+    setPrefBool ("viewport.showCamCoords",       showCamCoords_);
     setPrefBool ("panels.worldOutliner",         showOutliner_);
     setPrefBool ("panels.details",               showDetails_);
     setPrefFloat("viewport.flySpeed",            flySpeed_);

@@ -936,8 +936,11 @@ private:
                                                std::unordered_map<rhi::MeshHandle, u32>& index,
                                                rhi::MeshHandle mesh);
 
-    f32 center_[3] = {0, 0, 0};
+    f32 center_[3] = {0, 0, 0};   // the volume in use: authored, or following the camera
     f32 extent_ = 2000.0f;
+    f32 authoredCenter_[3] = {0, 0, 0};
+    f32 authoredExtent_ = 2000.0f;
+    bool volumeFollowing_ = false;
 
     // Mirrors `cbuffer VoxiFrame : register(b4)` field for field.
     struct FrameConstants {

@@ -326,7 +326,27 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
     // multiple of 2*pi/3600 so it crosses gTime's hourly wrap without a jump).
     {
         f32 rip[3][4];
-        if (n > 0) {
+        f32 ripAmp = 0.055f;
+        f32 shortest = 1.0e30f;
+        for (u32 i = 0; i < n; ++i) shortest = std::fmin(shortest, waves[i].wavelengthCm);
+        if (n > 0 && shortest > 400.0f) {
+            // Sea-scale swell is already in the mesh: the normal gets wind chop instead (slopes ~0.03-0.13,
+            // a light breeze), turned off the swell's directions so the two sets do not form a crosshatch.
+            const fluids::GerstnerWave& g = waves[0];
+            const f32 len = std::sqrt(g.dirX * g.dirX + g.dirZ * g.dirZ);
+            const f32 bx = len > 1e-4f ? g.dirX / len : 1.0f, by = len > 1e-4f ? g.dirZ / len : 0.0f;
+            const f32 lambda[3] = {110.0f, 50.0f, 28.0f};
+            const f32 turn[3] = {0.436f, -0.698f, 1.222f};   // +25, -40, +70 degrees
+            for (u32 i = 0; i < 3; ++i) {
+                const f32 c = std::cos(turn[i]), s = std::sin(turn[i]);
+                const f32 k = 6.2831853f / lambda[i];
+                rip[i][0] = bx * c - by * s;
+                rip[i][1] = bx * s + by * c;
+                rip[i][2] = k;
+                rip[i][3] = std::round(std::sqrt(981.0f * k) / 0.001745329f) * 0.001745329f;
+            }
+            ripAmp = 0.6f;
+        } else if (n > 0) {
             for (u32 i = 0; i < 3; ++i) {
                 const fluids::GerstnerWave& g = waves[i < n ? i : n - 1];
                 const f32 len = std::sqrt(g.dirX * g.dirX + g.dirZ * g.dirZ);
@@ -347,7 +367,7 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
                 rip[i][0] = dx[i]; rip[i][1] = dy[i]; rip[i][2] = kk[i]; rip[i][3] = ss[i];
             }
         }
-        device.setWaterWaves(rip, 3, 0.055f);
+        device.setWaterWaves(rip, 3, ripAmp);
     }
 
     // The same single number for both the rendered and simulated surface: two independent heights
