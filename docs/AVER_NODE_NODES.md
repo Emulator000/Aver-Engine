@@ -673,7 +673,7 @@ covers the node's pin shape.
 
 ## Game systems
 
-Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals and crowds/hearing/cover. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. The editor palette rows are `sandbox/src/GraphNodeDefsGameSystems.hpp`, `GraphNodeDefsSynapseAi.hpp` and `GraphNodeDefsGas.hpp`. An attribute marked *(optional)* may be left out; every other one fails the compile by name when missing.
+Timers and events, the behaviour-tree blackboard, streamed audio, animation state machines, game UI, prefabs, decals, crowds/hearing/cover, gameplay abilities, input actions, data tables, montages, AI queries, level instances and landscape/water. These are **table-driven**: one row each in `scripting/csharp/Aver.Graph/GraphGameSystemNodeTable.cs` names the `...ForGraph` method it calls and which pin feeds which parameter, so the parser's default pins and the compiler's emitter come from the row (`GameSystemNodes`, `GraphCompilerGameSystems.cs`). String arguments are NODE-line attributes (`key=`, `event=`, `sound=`, ...), required at compile time unless noted. The editor palette rows are `sandbox/src/GraphNodeDefsGameSystems.hpp`, `GraphNodeDefsSynapseAi.hpp`, `GraphNodeDefsGas.hpp`, `GraphNodeDefsAiQuery.hpp`, `GraphNodeDefsLevelInstances.hpp` and `GraphNodeDefsTerrain.hpp`. An attribute marked *(optional)* may be left out; every other one fails the compile by name when missing.
 
 ### Events
 
@@ -755,6 +755,28 @@ Timers and events, the behaviour-tree blackboard, streamed audio, animation stat
 | `AN_FindPrefabNode` | `exec` (in, exec), `root` (in, int), `then` (out, exec), `entity` (out, int) | `node=` | P | The entity of node path `node=` (empty = the root) inside an instance. |
 | `AN_RevertPrefab` | `exec` (in, exec), `root` (in, int), `then` (out, exec) | — | P | Reverts every override of an instance back to its prefab. |
 
+### Level instance
+
+<!-- [wave3/level-instances begin] -->
+Place another level inside this one, load and unload it, find things inside it (`docs/LEVEL_INSTANCES.md`). A level is named by `level=`, a child by its id path in `path=`, because graphs have no string pins. Rows: `GraphLevelInstanceNodeTable.cs`, owner `GraphLevelInstances` (`Aver.LevelInstance/LevelInstances.cs`). Tests: `Aver.Graph.Tests/LevelInstanceNodeTests.cs`.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `AN_SpawnLevelInstance` | `exec` (in, exec), `parent` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `yaw` (in, float), `scale` (in, float), `packed` (in, bool), `then` (out, exec), `entity` (out, int) | `level=` | P | Spawns a runtime-only instance of the level `level=`; `entity` is the instance root, 0 on failure. |
+| `AN_DestroyLevelInstance` | `exec` (in, exec), `root` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Destroys an instance and everything under it. |
+| `AN_GetLevelInstanceRoot` | `entity` (in, int), `root` (out, int) | — | D | The innermost instance root `entity` belongs to; 0 if it is not part of one. |
+| `AN_FindLevelInstanceEntity` | `root` (in, int), `entity` (out, int) | `path=` | D | The entity of the child placement id path `path=` (hex, `b2/c9` through a nested instance; empty = the root). |
+| `AN_SetLevelInstanceLoaded` | `exec` (in, exec), `root` (in, int), `loaded` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Loads or unloads an instance by hand; a hand-loaded instance is never evicted by streaming. |
+| `AN_IsLevelInstanceLoaded` | `root` (in, int), `loaded` (out, bool) | — | D | True while the instance's contents exist. |
+| `AN_ReloadLevelInstance` | `exec` (in, exec), `root` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Rebuilds an instance from its level asset, keeping its overrides. |
+| `AN_SetLevelInstancePacked` | `exec` (in, exec), `root` (in, int), `packed` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Switches packed mode; `success` is true when the effective state matches the request. |
+| `AN_GetLevelInstanceBounds` | `root` (in, int), `minX` ... `maxZ` (out, float), `success` (out, bool) | — | D | The instance's world box in cm; `success` false when unknown. |
+| `AN_GetLevelInstanceCount` | `count` (out, int) | — | D | How many instances exist (nested included). |
+| `AN_GetLevelInstanceAt` | `index` (in, int), `root` (out, int) | — | D | The root of the instance at `index`. |
+
+Entries: `LevelInstance.Loaded` / `LevelInstance.Unloaded` through `AN_OnEvent` with the instance root as owner; `AN_EventPayload` index 0 is the entity count. C#-only: `LevelInstanceAbi.LastError`, `AbiVersion`, `AssetId`. Editor-only operations (edit, commit, create, break, bake) have no node.
+<!-- [wave3/level-instances end] -->
+
 ### Decal
 
 | Node | Pins | Attribute | Path | What it does |
@@ -782,6 +804,36 @@ Timers and events, the behaviour-tree blackboard, streamed audio, animation stat
 | `AN_SquadSetTarget` | `exec` (in, exec), `squadId` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `then` (out, exec), `success` (out, bool) | — | P | Sets the squad's target position. |
 | `AN_GetSquadSlot` | `entity` (in, int), `role` (out, int), `x` (out, float), `y` (out, float), `z` (out, float), `success` (out, bool) | — | D | The entity's role (0 none, 1 anchor, 2 flank left, 3 flank right, 4 support) and slot position. |
 
+
+### AI queries
+
+Environment queries (EQS), smart objects and the entity brain, a behaviour tree (`.ocbt`) or a state tree (`.ocst`) (`docs/AI_QUERIES_SMARTOBJECTS_STATETREE.md`). The query, asset, tag list, event and state names are attributes; tag lists are comma lists. A failure answers `false` / `0` and never throws. Rows: `GraphAiQueryNodeTable.cs`, owners `Aver.Synapse.QueryGraph` (EQS and smart objects) and `BrainGraph` (`Aver.Framework/Ai/Brain.cs`). Tests: `Aver.Graph.Tests/AiQueryNodeTests.cs`. Positions are centimetres, `yaw` degrees.
+
+Completion needs no node: a graph hears it as an event by name through `AN_OnEvent`. `EqsFinished` and `EqsFailed` fire on the querier; `SmartObjectClaimed`, `SmartObjectUsed` and `SmartObjectReleased` on the user; `SmartObjectSlot*` on the object; a slot's custom `USE event` by its own name. Custom tasks, conditions and EQS tests (`[AverAiAction]`, `[AverAiCondition]`, `[AverEqsTest]`), the EQS budget and the `Span` form of a user's claims are C#-only; the graph equivalent of a custom test is data in the asset.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `AN_EqsRun` | `exec` (in, exec), `querier` (in, int), `target` (in, int), `px` (in, float), `py` (in, float), `pz` (in, float), `hasPoint` (in, bool), `then` (out, exec), `found` (out, bool), `count` (out, int), `x` (out, float), `y` (out, float), `z` (out, float), `entity` (out, int), `score` (out, float) | `query=`, `usertags=` (optional) | P | Runs the `.oceqs` query to completion now and reports the best item. `count` is how many items passed; `found` is false when none did. `px`..`pz` is the context point when `hasPoint` is true. |
+| `AN_EqsStart` | `exec` (in, exec), `querier` (in, int), `target` (in, int), `px` (in, float), `py` (in, float), `pz` (in, float), `hasPoint` (in, bool), `priority` (in, int), `then` (out, exec), `handle` (out, int) | `query=`, `usertags=` (optional) | P | Queues a time-sliced run; `handle` is 0 when it was refused. Read it with Status and Get Item, hear the end as `EqsFinished`, and release it. |
+| `AN_EqsStatus` | `handle` (in, int), `status` (out, int), `count` (out, int) | — | D | 0 unknown, 1 queued, 2 running, 3 finished, 4 failed, 5 cancelled; `count` is the items so far. |
+| `AN_EqsGetItem` | `handle` (in, int), `index` (in, int), `success` (out, bool), `x` (out, float), `y` (out, float), `z` (out, float), `entity` (out, int), `score` (out, float), `obj` (out, int), `slot` (out, int) | — | D | The `index`-th item, best first (score in -1..1). `obj` and `slot` name a smart-object slot when the query generated slots, otherwise 0 and -1. |
+| `AN_EqsCancel` | `exec` (in, exec), `handle` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Stops a queued or running query. |
+| `AN_EqsRelease` | `exec` (in, exec), `handle` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Frees the run's items. Release every handle you start. |
+| `AN_SoAttach` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `asset=` | P | Gives the entity the smart object definition `asset=` (`.ocso`) and its slots. |
+| `AN_SoFind` | `user` (in, int), `x` (in, float), `y` (in, float), `z` (in, float), `radius` (in, float), `matchAll` (in, bool), `found` (out, bool), `obj` (out, int), `slot` (out, int), `ex` (out, float), `ey` (out, float), `ez` (out, float), `count` (out, int) | `slottags=` (optional), `usertags=` (optional) | D | The nearest free slot within `radius` (default 1500) whose tags match `slottags=` (any one, or every one with `matchAll`) and whose requirements `usertags=` meets, with its entry point; `count` is how many matched. |
+| `AN_SoClaim` | `exec` (in, exec), `user` (in, int), `obj` (in, int), `slot` (in, int), `ttl` (in, float), `then` (out, exec), `claim` (out, int), `refusal` (out, int) | `usertags=` (optional) | P | Reserves the slot for the user. `claim` is 0 when refused, and `refusal` says why: 1 no such slot, 2 disabled, 3 not free, 4 tags, 5 user limit, 6 no user. `ttl` below 0 uses the slot's own claim time, 0 never expires, otherwise the claim frees itself after that many seconds. |
+| `AN_SoUse` | `exec` (in, exec), `claim` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Starts using the claimed slot (claimed becomes occupied) and runs the slot's behaviour, if it has one. |
+| `AN_SoRelease` | `exec` (in, exec), `claim` (in, int), `reason` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Ends the claim. `reason`: 0 released, 1 completed, 2 failed. |
+| `AN_SoGetClaim` | `user` (in, int), `index` (in, int), `has` (out, bool), `claim` (out, int), `obj` (out, int), `slot` (out, int), `state` (out, int), `x` (out, float), `y` (out, float), `z` (out, float), `yaw` (out, float), `ex` (out, float), `ey` (out, float), `ez` (out, float) | — | D | The user's `index`-th claim (up to 4): its slot, state (1 claimed, 2 occupied), slot pose and entry point. |
+| `AN_SoSlotInfo` | `entity` (in, int), `slot` (in, int), `success` (out, bool), `state` (out, int), `user` (out, int), `x` (out, float), `y` (out, float), `z` (out, float), `yaw` (out, float) | — | D | One slot of a smart object: state (0 free, 1 claimed, 2 occupied, 3 cooldown, 4 disabled), who holds it, and its world pose. |
+| `AN_SoSlotCount` | `entity` (in, int), `count` (out, int) | — | D | How many slots the entity has; -1 when it is not a smart object. |
+| `AN_SoSetSlotEnabled` | `exec` (in, exec), `entity` (in, int), `slot` (in, int), `enabled` (in, bool), `then` (out, exec), `success` (out, bool) | — | P | Turns a slot on or off. A disabled slot refuses claims. |
+| `AN_BrainSet` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | `asset=` | P | Gives the entity the brain `asset=` (`.ocbt` or `.ocst`), attaching the AI component if it has none. |
+| `AN_BrainSendEvent` | `exec` (in, exec), `entity` (in, int), `payloadI` (in, int), `payloadF` (in, float), `then` (out, exec), `success` (out, bool) | `event=` | P | Sends a state tree an event its transitions on `event:Name` see at the next update. False for a behaviour tree. |
+| `AN_BrainIsInState` | `entity` (in, int), `inState` (out, bool) | `state=` | D | True while the dotted state path (`Combat.Chase`, or just `Combat`) is in the active chain. |
+| `AN_BrainStatus` | `entity` (in, int), `status` (out, int), `kind` (out, int) | — | D | `status`: 0 idle, 1 running, 2 succeeded, 3 failed. `kind`: 0 none, 1 behaviour tree, 2 state tree. |
+| `AN_BrainRestart` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Exits every state and starts again at the next update. |
+| `AN_BrainStop` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool) | — | P | Exits every state and stays stopped until Restart. |
 
 ### Enhanced Input
 
@@ -881,6 +933,20 @@ Play authored montages in slots and sections, and use or read the root motion an
 | `IsInMontageSection` | `entity` (in, int), `result` (out, bool) | `montage=` (optional), `section=` | D | True while `montage=` (empty = the newest) is inside `section=`. |
 | `SetRootMotion` | `exec` (in, exec), `entity` (in, int), `mode` (in, int), `axes` (in, int), `scale` (in, float), `then` (out, exec), `success` (out, bool) | — | P | How the entity uses the root motion its animations carry. `mode`: 0 none, 1 ignore (the pose stays in place), 2 apply (the entity moves), 3 accumulate (read it with Consume Root Motion). `axes` is a bit mask (1 X, 2 Y, 4 Z, 8 yaw; default 11 is X, Y and yaw). `scale` multiplies the travel. |
 | `ConsumeRootMotion` | `exec` (in, exec), `entity` (in, int), `then` (out, exec), `success` (out, bool), `x` (out, float), `y` (out, float), `z` (out, float), `yaw` (out, float), `seconds` (out, float) | — | P | Reads the root motion accumulated since the last read (centimetres in the entity's own frame, `yaw` in degrees, over `seconds`) and clears it. It collects in mode 3. |
+
+### Landscape and water
+
+Read the painted landscape and the water over it (`docs/LANDSCAPE_LAYERS_WATER.md`). All are reads, so they run under either compiler. A layer or surface is named by an attribute; a layer id pin of 0 or more beats `layer=`. Off the landscape, over no water or with no provider, a node answers its defaults (found false, weight 0, surface 0) and never errors. Painting, carving and spline editing are editor commands with no node. Entering water is not an event: poll `AN_EntityWater` from a timer, or use a physics sensor. Rows: `GraphTerrainNodeTable.cs`, owner `TerrainGraph` (`Aver.Framework/TerrainGraph.cs`). Tests: `Aver.Graph.Tests/TerrainNodeTests.cs`. Positions are centimetres.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `AN_LandscapeSample` | `x` (in, float), `y` (in, float), `found` (out, bool), `z` (out, float), `nx` (out, float), `ny` (out, float), `nz` (out, float), `layer` (out, int) | — | D | Ground height, surface normal and dominant paint layer at a world XY. `found` is false off the section. |
+| `AN_LandscapeLayerId` | `layerId` (out, int) | `layer=` | D | The index of the named paint layer; -1 when unknown. |
+| `AN_LandscapeLayerWeight` | `x` (in, float), `y` (in, float), `layerId` (in, int), `weight` (out, float) | `layer=` (optional) | D | How much of a layer is painted at a world XY, 0 to 1. `layerId` (default -1) wins over `layer=`; with neither the weight is 0. |
+| `AN_LandscapeSurface` | `x` (in, float), `y` (in, float), `surfaceId` (out, int), `friction` (out, float), `restitution` (out, float), `layer` (out, int) | — | D | The dominant surface id (0 none) and the blended friction and restitution at a world XY. |
+| `AN_SurfaceId` | `surfaceId` (out, int) | `surface=` | D | The id of a named surface, to compare with `AN_LandscapeSurface`; 0 for none. |
+| `AN_WaterSample` | `x` (in, float), `y` (in, float), `z` (in, float), `over` (out, bool), `submerged` (out, bool), `surfaceZ` (out, float), `depth` (out, float), `flowX` (out, float), `flowY` (out, float), `flowZ` (out, float), `kind` (out, int) | — | D | The water at a world position. `over` is true when water covers the XY; `submerged` when the point is under the surface. `kind`: 0 none, 1 ocean, 2 lake, 3 river. `flow` is the current in cm/s. |
+| `AN_EntityWater` | `entity` (in, int), `heightCm` (in, float), `over` (out, bool), `submersion` (out, float), `flowX` (out, float), `flowY` (out, float), `flowZ` (out, float), `kind` (out, int) | — | D | How much of a `heightCm` tall body (default 180) at the entity is under water, 0 to 1, and the current there. False for a dead entity or one not over water. |
 
 ## Aliases invisible to the palette
 

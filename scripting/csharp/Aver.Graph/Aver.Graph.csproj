@@ -36,6 +36,10 @@
     <ProjectReference Include="..\Aver.Framework\Aver.Framework.csproj" />
     <!-- GraphPrefabs (the AN_SpawnPrefab family seam) lives in the prefab binding. -->
     <ProjectReference Include="..\Aver.Prefab\Aver.Prefab.csproj" />
+    <!-- [wave3/level-instances] GraphLevelInstances (the AN_SpawnLevelInstance family seam) lives in the level-instance binding. -->
+    <ProjectReference Include="..\Aver.LevelInstance\Aver.LevelInstance.csproj" />
+    <!-- [wave3/ai-query] QueryGraph (the AN_Eqs* and AN_So* nodes) lives in the Synapse binding; Framework already pulls it in, named here so the row table does not rely on that. -->
+    <ProjectReference Include="..\Aver.Synapse\Aver.Synapse.csproj" />
   </ItemGroup>
 
 </Project>

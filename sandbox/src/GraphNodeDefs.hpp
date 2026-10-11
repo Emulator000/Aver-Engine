@@ -103,10 +103,13 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
 
 // The game-systems node families, each in its own file so this one stays the readable core table:
 // crowds/hearing/cover, then timers/blackboard/streamed audio/anim state machines/UI/prefabs/decals,
-// then gameplay abilities.
+// then gameplay abilities, then AI queries/smart objects/brains, level instances, landscape and water.
 #include "GraphNodeDefsSynapseAi.hpp"
 #include "GraphNodeDefsGameSystems.hpp"
 #include "GraphNodeDefsGas.hpp"
+#include "GraphNodeDefsAiQuery.hpp"
+#include "GraphNodeDefsLevelInstances.hpp"
+#include "GraphNodeDefsTerrain.hpp"
 
 // One line per node type. This is the "one entry" the build task and Slice 6 both call for.
 inline std::vector<GraphNodeDesc> buildCatalog() {
@@ -1011,6 +1014,14 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"Rotator", "Rotator", "UV", {
         pin("uv", "float2", false), pin("centre", "float2", false, "0.5,0.5"), pin("angle", "float", false, "0"),
         pin("result", "float2", true)}, {}, kDomainMaterial});
+    // -- wave 3 water: the river mesh's flow (cm/s, carried in uv0) and the wave normal advected along it.
+    //    FlowNormal's unwired `position` is the pixel's world XY and unwired `flow` is VertexFlow.velocity
+    //    (emitNode's FlowNormal branch), so neither pin needs a link for the common river material.
+    t.push_back({"VertexFlow", "Vertex Flow", "Water", {
+        pin("velocity", "float2", true), pin("speed", "float", true)}, {}, kDomainMaterial});
+    t.push_back({"FlowNormal", "Flow Normal", "Water", {
+        pin("position", "float2", false), pin("flow", "float2", false), pin("cycle", "float", false, "1.5"),
+        pin("value", "float3", true)}, {}, kDomainMaterial});
 
     // -- PROCEDURAL: the same unwired-uv-means-the-surface's-own convention as TilingOffset/Rotator
     //    above.
@@ -1086,6 +1097,9 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     appendSynapseAiNodeDefs(t);
     appendGameSystemNodeDefs(t);
     appendGasNodeDefs(t);
+    appendAiQueryNodeDefs(t);
+    appendLevelInstanceNodeDefs(t);
+    appendTerrainNodeDefs(t);
     return t;
 }
 

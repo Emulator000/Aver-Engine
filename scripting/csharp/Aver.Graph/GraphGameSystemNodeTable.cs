@@ -117,5 +117,5 @@ internal static partial class GameSystemNodes
         Reg("isinmontagesection", GenericKind.Pure, typeof(MontageGraphInterop), "IsInMontageSectionForGraph", "entity:int", "result:bool", "p:entity,@montage?,@section", "result"),
         Reg("setrootmotion", GenericKind.Exec, typeof(RootMotionGraphInterop), "SetRootMotionForGraph", "entity:int,mode:int,axes:int=11,scale:float=1", "success:bool", "p:entity,p:mode,p:axes,p:scale", "success"),
         Reg("consumerootmotion", GenericKind.Exec, typeof(RootMotionGraphInterop), "ConsumeRootMotionForGraph", "entity:int", "success:bool,x:float,y:float,z:float,yaw:float,seconds:float", "p:entity,>x,>y,>z,>yaw,>seconds", "success"),
-    }.Concat(GasTable()).ToArray();
+    }.Concat(GasTable()).Concat(AiQueryTable()).Concat(LevelInstanceTable()).Concat(TerrainTable()).ToArray();
 }
