@@ -197,7 +197,8 @@ void giStoreReservoir(GiReservoir r, uint2 pixelPosition, uint slice) {
 
 // kGiVisPhase: which 2x2 block pixel traces on each frame (cycles every 4).
 // giVisTracedPixel decides THIS frame's; giVisReconstruct reads PREVIOUS frame's (frameIdx-1).
-static const uint2 kGiVisPhase[4] = { uint2(0, 0), uint2(1, 1), uint2(1, 0), uint2(0, 1) };
+// Order keeps (x ^ y) & 1 == frame & 1, so a traced pixel always lies in the checkerboard-traced class.
+static const uint2 kGiVisPhase[4] = { uint2(0, 0), uint2(1, 0), uint2(1, 1), uint2(0, 1) };
 
 // Is pixel `p` this block's traced pixel on frame `frame`? (& 3u for power-of-two cycle).
 bool giVisTracedPixel(uint2 p, uint frame) {

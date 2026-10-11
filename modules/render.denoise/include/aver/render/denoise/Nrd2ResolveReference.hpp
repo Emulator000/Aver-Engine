@@ -85,6 +85,91 @@ struct Nrd2TemporalOut {
 Nrd2TemporalOut nrd2TemporalBlend(const f32 cur[3], const f32 anchor[3], const f32 lo[3], const f32 hi[3],
                                   const f32 hist[3], f32 n);
 
+// ---- FidelityFX history handling (nrd2_resolve.hlsli: kNrd2Ffx* ... nrd2GuidedAnchor) ----
+// DESIGN.md (docs/plans/neurac_nrd2) section 2. The pass-5 pieces with no HLSL helper (moments, search, rebuild,
+// the history fetch) mirror the inline code of CSNrd2Reproject / CSNrd2Temporal. The constants below are checked
+// against the shader's literals by Nrd2ResolveTest.
+
+inline constexpr f32 kNrd2FfxThreshold = 0.9f;   // a history texel is kept at or above this factor
+inline constexpr f32 kNrd2FfxNormalW   = 1.4f;
+inline constexpr f32 kNrd2FfxDepthW    = 1.0f;
+inline constexpr f32 kNrd2FfxRejectW   = 1.5f;
+inline constexpr f32 kNrd2FfxClipK     = 1.4f;
+inline constexpr f32 kNrd2FfxMeanMix   = 0.2f;
+inline constexpr f32 kNrd2FfxGaussK    = 3.0f;
+inline constexpr i32 kNrd2FfxMomentRadius = 4;   // the moments' window is 9x9
+
+// FFX GetDisocclusionFactor: exp(-|1 - max(0, cosN)| normalW) * exp(-|zHist - zExp| / max(zExp, 1e-4) depthW).
+f32 nrd2FfxFactor(f32 cosN, f32 zHist, f32 zExp, f32 normalW, f32 depthW);
+// exp(-3 i^2 / 25), the moment window's 1D Gaussian weight at offset i (|i| <= 4).
+f32 nrd2MomentWeight(i32 i);
+// Catmull-Rom weights of the taps at -1, 0, 1, 2 for fraction f in [0, 1].
+void nrd2CatmullRom(f32 f, f32 w[4]);
+// FFX ClipAABB: v pulled toward the box centre along the line to it (not per channel) when outside the box.
+std::array<f32, 3> nrd2ClipAabb(const f32 lo[3], const f32 hi[3], const f32 v[3]);
+// True = discard the history: !(|hist - mean|^2 < w |var|). A NaN rejects.
+bool nrd2FfxReject(const f32 hist[3], const f32 mean[3], const f32 var[3], f32 w);
+
+// nrd2TemporalBlendFfx: the mean +- sigma clip. avg = the tile anchor (guided or not), mean/var = this frame's
+// 9x9 moments.
+Nrd2TemporalOut nrd2TemporalBlendFfx(const f32 cur[3], const f32 avg[3], const f32 mean[3], const f32 var[3],
+                                     const f32 hist[3], f32 n, f32 clipW);
+
+// The guided anchor (DESIGN.md section 3.1): clamp(A + c k s (g - gbar), A / 4, 4 A) with
+// s = min(1, lum(A) / lum(gbar)). Returns A bit-for-bit when c <= 0, gbarValid <= 0, strength <= 0, A has no
+// luminance or g/gbar is NaN.
+std::array<f32, 3> nrd2GuidedAnchor(const f32 A[3], const f32 g[3], f32 c, const f32 gbar[3], f32 gbarValid,
+                                    f32 strength);
+
+// Weighted mean and variance over a 9x9 patch (row-major, 81 entries), the window being the separable
+// Gaussian w(i) w(j). valid[k] weights each pixel (0 = no surface, 1 = usable). Same order as the shader:
+// rows first (sum w(i) v x, sum w(i) v, sum w(i) v x^2), then the column pass. var = |E[x^2] - mean^2|.
+// weight is the total window weight, 0 (and mean = var = 0) when nothing is valid.
+struct Nrd2Moments {
+    f32 mean[3] = {};
+    f32 var[3] = {};
+    f32 weight = 0.0f;
+};
+Nrd2Moments nrd2Moments(const std::vector<std::array<f32, 3>>& values, const std::vector<f32>& valid);
+
+// The 3x3 closest-history search (row-major, index 4 = the nearest texel). Invalid texels carry factor 0.
+// Returns the index of the highest factor; a strictly greater factor must beat the running best, so the
+// centre wins ties and the first of equal neighbours wins among them.
+u32 nrd2FfxSearch(const f32 factors[9]);
+
+// One of the 2x2 core history texels around the fetch position, in the order of nrd2LoadTaps (index
+// i: x = i & 1, y = i >> 1).
+struct Nrd2HistTap {
+    bool ok = false;         // inside the viewport with a history surface
+    f32 factor = 0.0f;       // nrd2FfxFactor at this texel
+    f32 nrm[3] = {};         // its decoded normal
+    f32 z = 0.0f;            // its view depth (m)
+    f32 colour[3] = {};      // the signal being fetched
+};
+struct Nrd2Rebuild {
+    f32 factor = 0.0f;       // the factor of the blended texel, 0 when it fails the threshold
+    f32 w[4] = {};           // the normalised weights (hard validity x bilinear), 0 when no tap is valid
+    f32 colour[3] = {};      // sum w_i colour_i
+};
+// The 2x2 validity-weighted rebuild (a disoccluded pixel's chance to find history at its edge): tap i counts when
+// ok && factor > thr / 2, with weight b_i from the bilinear fraction (fx, fy); weights renormalise by
+// max(sum, 1e-3). The normal and depth blend unnormalised (literal FFX), the factor is recomputed from them
+// against n / zExp, and below thr it becomes 0.
+Nrd2Rebuild nrd2FfxRebuild(const Nrd2HistTap taps[4], f32 fx, f32 fy, const f32 n[3], f32 zExp, f32 normalW,
+                           f32 depthW, f32 thr);
+
+struct Nrd2HistFetch {
+    bool ok = false;         // false: no valid core tap, so no history
+    bool catmull = false;    // the Catmull-Rom path ran (all four core taps valid and sharp > 0)
+    f32 colour[3] = {};
+};
+// The history colour at texel fraction (fx, fy) from a 4x4 patch (taps[j * 4 + i], i/j = 0..3, the core 2x2 at
+// i, j = 1..2) when the nearest texel passed the threshold. validMask bit (j * 4 + i) = that tap's factor
+// exceeds thr / 2. Core taps all valid and sharp > 0: the 12-tap Catmull-Rom (the four corners dropped, the
+// weights renormalised over the valid taps, clamped to their min/max, floored at 0) mixed with the
+// validity-weighted bilinear by sharp. Otherwise the validity-weighted bilinear alone.
+Nrd2HistFetch nrd2HistFetch(const f32 taps[16][3], u32 validMask, f32 fx, f32 fy, f32 sharp);
+
 // ---- oracle fit (one 8x8 tile, one signal) ----
 
 enum class Nrd2OracleMode : u32 { Grad = 0, Grid = 1 };

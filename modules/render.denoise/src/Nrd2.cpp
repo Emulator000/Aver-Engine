@@ -28,28 +28,36 @@ struct Constants {
     f32 stab[4];                   // history frames at rest, cap at speed, despeckle cap, blur radius
     f32 extra[4];                  // x: 1/8 level logit cap, y: combine reference, z: 1/4 level logit cap
     u32 vis[4];                    // object stop: x visibility row pitch, y on
+    f32 ffx[4];                    // stabiliser: disocclusion threshold, normal weight, depth weight, reject weight
+    f32 hist[4];                   // stabiliser: Catmull-Rom share, clip weight, guide strength
 };
-static_assert(sizeof(Constants) == 352, "Nrd2CB: three uint4s, nineteen float4s");
+static_assert(sizeof(Constants) == 384, "Nrd2CB: three uint4s, twenty-one float4s");
 
-constexpr u32 kFlagBypass = 1u, kFlagStabilise = 2u, kFlagHistory = 4u, kFlagStandardise = 8u, kFlagBlur = 16u;
+constexpr u32 kFlagBypass = 1u, kFlagStabilise = 2u, kFlagHistory = 4u, kFlagStandardise = 8u, kFlagBlur = 16u,
+              kFlagGuide = 32u, kFlagFfxClip = 64u, kFlagFfxReject = 128u;
 
 // Per pass: SRV / UAV counts matching nrd2.hlsl's register lists.
 constexpr u32 kPyramidSrv = 4, kPyramidUav = 14;
 constexpr u32 kPyramidVisUav = 13;   // the primary-visibility buffer (structured)
 constexpr u32 kResolveSrv = 20, kResolveUav = 3;
 constexpr u32 kResolveParamsSrv = 15;
-constexpr u32 kReprojectSrv = 9, kReprojectUav = 5;
+constexpr u32 kReprojectSrv = 10, kReprojectUav = 6;   // t9 the guide, u5 its tile mean
 constexpr u32 kPrefilterSrv = 8, kPrefilterUav = 2;
-constexpr u32 kTemporalSrv = 10, kTemporalUav = 5;
+constexpr u32 kTemporalSrv = 12, kTemporalUav = 5;   // t10 the guide, t11 its tile mean
 constexpr u32 kDespeckleSrv = 3, kDespeckleUav = 2;
 constexpr u32 kBlurSrv = 6, kBlurUav = 3;
 constexpr u32 kConvergeSrv = 4, kConvergeUav = 1;
 constexpr f32 kStabNSunMoved = 2.0f, kStabNMax = 64.0f;
+// FidelityFX's disocclusion threshold and normal weight (nrd2_resolve.hlsli kNrd2FfxThreshold / kNrd2FfxNormalW).
+constexpr f32 kFfxThreshold = 0.9f, kFfxNormalW = 1.4f;
 
 constexpr rhi::ResourceState kRead  = rhi::ResourceState::NonPixelShaderResource;
 constexpr rhi::ResourceState kWrite = rhi::ResourceState::UnorderedAccess;
 
 u32 tilesOf(u32 d) { return (d + 7u) / 8u; }
+
+// A setting clamped to [lo, hi]; NaN falls back to `def`.
+f32 clampSetting(f32 v, f32 lo, f32 hi, f32 def) { return v == v ? std::min(std::max(v, lo), hi) : def; }
 
 rhi::TextureHandle makeTexture(rhi::IResourceFactory* res, rhi::Format f, u32 w, u32 h, rhi::ResourceState state,
                                const char* name) {
@@ -178,6 +186,8 @@ bool Nrd2::create(rhi::IDevice& dev) {
         vd.debugName = "NRD2 no-visibility stand-in";
         visDummy_ = res_->createBuffer(vd);
     }
+    // Never read (the guide flag stays clear without a guide); only keeps the guide slots bound.
+    guideDummy_ = makeTexture(res_, rhi::Format::RGBA16F, 1, 1, kRead, "NRD2 no-guide stand-in");
     bd = {};
     bd.uavCount = 1; bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
     setParams_ = res_->createBindingSet(bd);
@@ -269,13 +279,14 @@ void Nrd2::destroyCompose() {
 }
 
 bool Nrd2::stabReady() const {
-    return psoReproject_ && psoPrefilter_ && psoTemporal_ && setReproject_ && setPrefilter_ && setTemporal_;
+    return psoReproject_ && psoPrefilter_ && psoTemporal_ && setReproject_ && setPrefilter_ && setTemporal_ &&
+           guideDummy_;
 }
 
 void Nrd2::releaseStab() {
     histValid_ = false;
     if (!res_) return;
-    for (rhi::TextureHandle* t : {&rpD_, &rpS_, &rpV_, &anchD_, &anchS_, &prefD_, &prefS_,
+    for (rhi::TextureHandle* t : {&rpD_, &rpS_, &rpV_, &anchD_, &anchS_, &anchG_, &prefD_, &prefS_,
                                   &histD_[0], &histD_[1], &histS_[0], &histS_[1], &histG_[0], &histG_[1],
                                   &histV_[0], &histV_[1]}) {
         if (*t) res_->destroyTexture(*t);
@@ -298,6 +309,7 @@ bool Nrd2::allocStab() {
     rpV_ = make(f2, width_, height_, kRead, "NRD2 reprojected noise");
     anchD_ = make(f, tilesOf(width_), tilesOf(height_), kRead, "NRD2 anchor D");
     anchS_ = make(f, tilesOf(width_), tilesOf(height_), kRead, "NRD2 anchor S");
+    anchG_ = make(f, tilesOf(width_), tilesOf(height_), kRead, "NRD2 anchor guide");
     prefD_ = make(f, width_, height_, kRead, "NRD2 prefiltered D");
     prefS_ = make(f, width_, height_, kRead, "NRD2 prefiltered S");
     for (u32 i = 0; i < 2; ++i) {
@@ -368,6 +380,8 @@ void Nrd2::destroy() {
     network_.destroy();
     if (res_ && visDummy_) res_->destroyBuffer(visDummy_);
     visDummy_ = 0;
+    if (res_ && guideDummy_) res_->destroyTexture(guideDummy_);
+    guideDummy_ = 0;
     if (res_) {
         for (rhi::PipelineHandle* p : {&psoPyramid_, &psoParams_, &psoResolve_, &psoFeatures_, &psoReproject_,
                                        &psoPrefilter_, &psoTemporal_, &psoDespeckle_, &psoBlur_, &psoConverge_}) {
@@ -482,6 +496,9 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     bool blur = params_.speckle == 1u && !params_.bypass && psoBlur_ && setBlur_ && !(capture_ && capture_->active());
     if ((stab || blur) && !allocDemod(blur && stab)) stab = blur = false;
     const bool demod = stab || blur;
+    // The guide fills D's anchor only with a strength to apply; otherwise flag 32 stays clear and the shader
+    // takes the no-guide path exactly.
+    const bool guideOn = stab && in.guide && params_.guideStrength > 0.0f;
     // Captures keep Stage B's raw values (the training data).
     despeckled_ = params_.despeckle != 0u && !params_.bypass && psoDespeckle_ && setDespeckle_ &&
                   !(capture_ && capture_->active()) && allocDespeckle();
@@ -554,11 +571,13 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         res_->setSrv(setReproject_, 6, histS_[rd]);
         res_->setSrv(setReproject_, 7, histG_[rd]);
         res_->setSrv(setReproject_, 8, histV_[rd]);
+        res_->setSrv(setReproject_, 9, in.guide ? in.guide : guideDummy_);
         res_->setUav(setReproject_, 0, rpD_, 0);
         res_->setUav(setReproject_, 1, rpS_, 0);
         res_->setUav(setReproject_, 2, rpV_, 0);
         res_->setUav(setReproject_, 3, anchD_, 0);
         res_->setUav(setReproject_, 4, anchS_, 0);
+        res_->setUav(setReproject_, 5, anchG_, 0);
         res_->setSrv(setPrefilter_, 0, stageD);
         res_->setSrv(setPrefilter_, 1, stageS);
         res_->setSrv(setPrefilter_, 2, in.viewZ);
@@ -579,6 +598,8 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         res_->setSrv(setTemporal_, 7, rpS_);
         res_->setSrv(setTemporal_, 8, anchD_);
         res_->setSrv(setTemporal_, 9, anchS_);
+        res_->setSrv(setTemporal_, 10, in.guide ? in.guide : guideDummy_);
+        res_->setSrv(setTemporal_, 11, anchG_);
         res_->setUav(setTemporal_, 0, lit_, 0);
         res_->setUav(setTemporal_, 1, histD_[wr], 0);
         res_->setUav(setTemporal_, 2, histS_[wr], 0);
@@ -590,6 +611,10 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
     cb.tiles[0] = tx; cb.tiles[1] = ty;
     cb.tiles[2] = (params_.bypass ? kFlagBypass : 0u) | (stab ? kFlagStabilise : 0u) | (stab && hadHist ? kFlagHistory : 0u);
     cb.tiles[2] |= blur ? kFlagBlur : 0u;
+    if (stab) {
+        cb.tiles[2] |= (params_.ffxClip ? kFlagFfxClip : 0u) | (params_.ffxReject ? kFlagFfxReject : 0u) |
+                       (guideOn ? kFlagGuide : 0u);
+    }
     cb.tiles[3] = despeckled_ ? (params_.despeckle & 3u) : 0u;
     cb.stab[2] = std::max(params_.despeckleCap, 1.0f);
     cb.stab[3] = std::min(std::max(params_.blurRadius, 1.0f), 32.0f);
@@ -607,6 +632,13 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
         if (sunHold_ > 0u) nStill = std::min(nStill, kStabNSunMoved);
         cb.stab[0] = nStill;
         cb.stab[1] = std::min(std::min(std::max(params_.stabFramesMoving, 1.0f), kStabNMax), nStill);
+        cb.ffx[0] = kFfxThreshold;
+        cb.ffx[1] = kFfxNormalW;
+        cb.ffx[2] = clampSetting(params_.ffxDepthWeight, 0.0f, 64.0f, 1.0f);
+        cb.ffx[3] = clampSetting(params_.ffxRejectWeight, 0.1f, 16.0f, 1.5f);
+        cb.hist[0] = clampSetting(params_.histSharp, 0.0f, 1.0f, 1.0f);
+        cb.hist[1] = clampSetting(params_.ffxClipWeight, 0.1f, 8.0f, 4.0f);
+        cb.hist[2] = clampSetting(params_.guideStrength, 0.0f, 1.0f, 1.0f);
     }
 
     const rhi::TextureHandle stageB[4] = {targets_.diffuse, targets_.specular, targets_.remodA, targets_.remodB};
@@ -700,7 +732,7 @@ bool Nrd2::record(rhi::IRenderContext& ctx, const Inputs& in) {
             ctx.dispatch(gx, gy, 1);
             for (rhi::TextureHandle t : out) ctx.textureBarrier(t, kWrite, kRead);
         };
-        pass("NRD2.Reproject", psoReproject_, setReproject_, {rpD_, rpS_, rpV_, anchD_, anchS_});
+        pass("NRD2.Reproject", psoReproject_, setReproject_, {rpD_, rpS_, rpV_, anchD_, anchS_, anchG_});
         pass("NRD2.Prefilter", psoPrefilter_, setPrefilter_, {prefD_, prefS_});
         pass("NRD2.Temporal", psoTemporal_, setTemporal_, {histD_[wr], histS_[wr], histG_[wr], histV_[wr]});
         histLast_ = wr;

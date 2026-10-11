@@ -527,6 +527,7 @@ void VoxiRenderer::shutdown() {
     ptAccumElemCapacity_ = 0;
     ptAccumValid_ = false;
     // Radiance cache: bindings_ already destroyed, so destroy buffers outright.
+    rcGuide_.destroy();
     rc_.destroy();
     if (rcPlaceholder_) { res_->destroyBuffer(rcPlaceholder_); rcPlaceholder_ = 0; }
     neuracLive_ = false;
@@ -705,6 +706,14 @@ void VoxiRenderer::setSettings(const Settings& in) {
 
 // Places the GI volume: centre in world units, half-edge extent.
 void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
+    // A level load refits the volume: the radiance cache holds the old level's light. Called every frame,
+    // so only a move of more than 1 cm counts.
+    if (rc_.valid()) {
+        constexpr f32 kMoveCm = 1.0f;
+        bool moved = std::abs(extent - extent_) > kMoveCm;
+        for (int i = 0; i < 3; ++i) moved = moved || std::abs(center[i] - center_[i]) > kMoveCm;
+        if (moved) rc_.requestReset();
+    }
     center_[0] = center[0]; center_[1] = center[1]; center_[2] = center[2];
     extent_ = extent;
 }
@@ -748,6 +757,8 @@ void VoxiRenderer::setLightingLegacyBits(u32 bits) {
 void VoxiRenderer::resetGiHistory(bool quiet) {
     giHistValid_ = false;
     giVisHistValid_ = false;
+    // The every-frame debug path passes quiet; it must not wipe the cache each frame.
+    if (!quiet && rc_.valid()) rc_.requestReset();
     if (!quiet) AVER_INFO("[Voxi] GI ReSTIR reservoir history reset by console command (resetgihistory); "
               "next frame uses a fresh candidate only (expect one visibly noisier frame), both "
               "ping-pong slices clean within 2 frames.");
@@ -1320,6 +1331,8 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                     if (converging) --giConvergeTicks_;
                     else            giConvergeTicks_ = kGiConvergeTicks;
                     takeGiSnapshot();
+                    // Any sky or sun byte change lands here: decay the cache's history, do not clear it.
+                    if (rc_.valid()) rc_.requestRelax(4u, 0.25f);
                     // A rebuild bigger than one frame's slice is STAGED over several frames (giBuildStep):
                     // in one submission NeonDistrict's GI shadow map + voxelisation is ~1.4 s of GPU work,
                     // which with the frame around it crosses Windows' 2 s timeout (device lost on load).
@@ -5607,7 +5620,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         const bool giCb = giDispatch && settings_.rayDrivenStages == 2u && rdGiCbCsPso_ != 0 &&
                           (denoiseGiRanThisFrame_ || nrd2GiFill);
         giCbWrittenThisFrame_ = giCb;
-        giCbParityWritten_    = denoiseFrame_ & 1u;
+        giCbParityWritten_    = rtFrameIndex_ & 1u;   // the shader's gRtHistParams.z: one counter for both
         if (giCb && !rdGiCbRunLogged_) {
             rdGiCbRunLogged_ = true;
             AVER_INFO("[Voxi] half-rate ReSTIR GI running: CSRdGi traces one checkerboard half each "
@@ -5835,6 +5848,7 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
     if (usedCacheTwin && rc_.valid()) {
         ctx.uavBarrierBuffer(rc_.accumBuffer());
         rc_.recordResolve(ctx);
+        ctx.uavBarrierBuffer(rc_.accumBuffer());   // the resolve's counts/arrivals reset, before next frame's scatter
         ctx.uavBarrierBuffer(rc_.cellsBuffer());
     }
     // Stage B's reads of gRdSunVisTex/gRdGiTex/gRdAoTex/gRdReflTex must see whichever of the four
@@ -5941,6 +5955,13 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         np.midCap       = settings_.nrd2MidCap;
         np.converge     = pathTracingWanted() && cb_.ptBounceParams[1] > 1.5f ? static_cast<f32>(settings_.nrd2Converge) : 0.0f;
         np.objectStop   = settings_.nrd2ObjectStop;
+        np.ffxClip         = settings_.nrd2FfxClip;
+        np.ffxClipWeight   = settings_.nrd2FfxClipWeight;
+        np.ffxReject       = settings_.nrd2FfxReject;
+        np.ffxRejectWeight = settings_.nrd2FfxRejectWeight;
+        np.ffxDepthWeight  = settings_.nrd2FfxDepthWeight;
+        np.histSharp       = settings_.nrd2HistSharp;
+        np.guideStrength   = settings_.nrd2NeuracGuideStrength;
         nrd2_.setParams(np);
         render::denoise::Nrd2::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
@@ -5964,6 +5985,20 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         if (nrd2CapturePending_ && nrd2_.valid()) {
             nrd2CapturePending_ = false;
             nrd2_.startCapture(nrd2CaptureCfg_);
+        }
+        // NeuRaC's cached light per pixel, read after Stage B wrote the G-buffer; 0 = the no-guide path.
+        if (settings_.nrd2NeuracGuide && neuracLive_ && rc_.valid() && rcGuide_.valid()) {
+            NeuRaCGuide::Frame gf;
+            gf.info             = rc_.infoBuffer();
+            gf.cells            = rc_.cellsBuffer();
+            gf.eyeCm            = rc_.eyeCm();
+            gf.viewZ            = in.viewZ;
+            gf.normalRoughness  = in.normalRoughness;
+            gf.gbufferState     = in.gbufferState;
+            for (u32 a = 0; a < 4; ++a) gf.viewport[a] = in.viewport[a];
+            gf.width            = rdStagedW_;
+            gf.height           = rdStagedH_;
+            in.guide = rcGuide_.record(ctx, gf) ? rcGuide_.guide() : 0;
         }
         if (nrd2_.record(ctx, in)) {
             nrd2_.recordCompose(ctx);
@@ -6512,6 +6547,7 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
             rdVisBufElemCapacity_ = 0;
             rdGiCandBufElemCapacity_ = rdShadowTileElemCapacity_ = 0;
             rdStagedW_ = rdStagedH_ = rdStagedRowPitch_ = 0;
+            rcGuide_.invalidateBindings();
             AVER_INFO("[Voxi] staged ray-driven resources released");
         }
         return ensurePtAccum();
@@ -6685,6 +6721,7 @@ bool VoxiRenderer::ensureRdStagedResources(u32 width, u32 height) {
     rdStagedW_ = width;
     rdStagedH_ = height;
     rdStagedRowPitch_ = pitch;
+    rcGuide_.invalidateBindings();   // the G-buffer it reads was resized with the staged targets
     return ensurePtAccum();
 }
 
@@ -7196,12 +7233,22 @@ void VoxiRenderer::updateNeuRaC(rhi::IRenderContext& ctx) {
             rcCreateFailed_ = true;
             return;
         }
+        // The guide is optional: without it NRD2 runs the unguided path.
+        rcGuide_.invalidateBindings();
+        if (!rcGuide_.valid() && !rcGuide_.create(*dev_))
+            AVER_WARN("[Voxi] NeuRaC guide pass did not build; NRD2 runs without the cache guide");
         giHistValid_ = false;
     }
 
     f32 vp[16], eye[3] = {};
     if (!dev_->camera(vp, nullptr, eye)) return;
-    const NeuRaC::Params params{};
+    // The sun jumped against the one the last frame ended on: the cache's light is the old sun's, so let
+    // the new samples dominate for a few frames. Unrecorded (first frame) is not a jump.
+    if (rtHistSunIntensity_ >= 0.0f && rtHistSunJumped()) rc_.requestRelax(8u, 0.5f);
+    NeuRaC::Params params{};
+    params.coarseCap1  = 16u;
+    params.coarseCap2  = 8u;
+    params.netStrength = 0.0f;   // the stage-2 trust network is not wired yet
     const NeuRaC::Bindings b = rc_.beginFrame(ctx, eye, rtFrameIndex_, params);
     if (!b.info || !b.accum || !b.cells) return;
 
@@ -7331,6 +7378,8 @@ void VoxiRenderer::teardownNeuRaC() {
             res_->setUavBuffer(bindings_, 21, rcPlaceholder_, 32, 2, 0);
         }
     }
+    rcGuide_.invalidateBindings();
+    rcGuide_.destroy();
     rc_.destroy();
     rcSlotsBound_ = false;
     rcBoundGeneration_ = 0;
@@ -7984,6 +8033,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // NRD2's Stage B variant and compose draw bake these formats; rebuilt on next use.
     nrd2_.destroyCompose();
     nrd2Tried_ = false;
+    rcGuide_.invalidateBindings();
     sceneColorFmt_ = color;
     sceneDepthFmt_ = depth;
     sceneSampleCount_ = sampleCount;

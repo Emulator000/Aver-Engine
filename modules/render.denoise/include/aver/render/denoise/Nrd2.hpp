@@ -2,8 +2,9 @@
 // lighting Stage B writes. Fixed maths with per-8x8-tile parameters: the defaults, or the phase 4
 // network's (Nrd2Network) when its weights pass the live gate. The spatial filter and the network never
 // see history; on jitter-free frames an optional temporal stage (CSNrd2Reproject, CSNrd2Prefilter,
-// CSNrd2Temporal; "Temporal stabiliser" in the doc, after FidelityFX's reflections denoiser) then blends
-// its output with last frame's.
+// CSNrd2Temporal; "Temporal stabiliser" in the doc, after FidelityFX's reflections denoiser: its history
+// handling, plus a Catmull-Rom fetch and an optional NeuRaC guide in D's anchor) then blends its output
+// with last frame's.
 //
 // Flow per frame, inside the scene pass right after Stage B's draw (D3D12 staged ray-driven only):
 //   Stage B writes D, S, remodulation (targets owned here, bound by the caller as UAVs)
@@ -53,6 +54,14 @@ struct Nrd2Params {
     f32 midCap = 16.0f;       // inference cap on the 1/4 level's logit (16 = none)
     f32 converge = 0.0f;      // Path Tracing at rest: frames until a pixel is its accumulated input (0 = off)
     bool objectStop = false;  // no lighting mixed across objects (Inputs::visibility; not while a capture runs)
+    // The temporal stage's history handling (nrd2_resolve.hlsli, FidelityFX's reflections denoiser).
+    bool ffxClip = true;          // history clipped to mean +- sigma of the 9x9 (false: this frame's 5x5 min/max box)
+    f32  ffxClipWeight = 4.0f;    // its sigma weight (FidelityFX history_clip_weight)
+    bool ffxReject = true;        // per signal: history dropped when its colour is far from this frame's 9x9 mean
+    f32  ffxRejectWeight = 1.5f;  // its discard weight
+    f32  ffxDepthWeight = 1.0f;   // relative depth error's weight in the disocclusion factor
+    f32  histSharp = 1.0f;        // Catmull-Rom share of the history fetch (0 = bilinear)
+    f32  guideStrength = 1.0f;    // scales the NeuRaC guide's deviation from its tile mean (Inputs::guide)
 };
 
 class Nrd2 {
@@ -85,6 +94,9 @@ public:
         bool historyValid = false;                // !IDevice::gBufferHistoryInvalid()
         bool sunMoved = false;                    // the sun changed since last frame (history shortens for 2 frames)
         f32 jitter[2] = {1.0f, 1.0f};             // this frame's TAA jitter (IDevice::taaJitter); only exactly 0, 0 stabilises
+        // NeuRaC's guide (0 = none): RGBA16F at render-target size, resting in NonPixelShaderResource; rgb the cached
+        // irradiance / pi in D's units, a its confidence in [0, 1]. Fills D's anchor where history is new.
+        rhi::TextureHandle guide = 0;
 
         // The object stop: this frame's primary visibility (IRenderFeature::primaryVisibility), NeuRAA's too.
         rhi::PrimaryVisibility visibility;
@@ -162,9 +174,10 @@ private:
     rhi::TextureHandle inS() const { return despeckled_ ? despS_ : targets_.specular; }
     bool allocDespeckle();
     // Temporal stage (allocated on the first stabilised frame): this frame's scratch (reprojected history rgb
-    // + sample count, noise estimate, 1/8 anchors, prefiltered D' and S' with their noise estimate); and
+    // + sample count, noise estimate, 1/8 anchors of D, S, guide, prefiltered D' and S' with their noise estimate); and
     // ping-pong history: D'' rgb + count, S'' rgb + count, view Z (m) + packed normal xy, noise estimate of D and S.
-    rhi::TextureHandle rpD_ = 0, rpS_ = 0, rpV_ = 0, anchD_ = 0, anchS_ = 0, prefD_ = 0, prefS_ = 0;
+    rhi::TextureHandle rpD_ = 0, rpS_ = 0, rpV_ = 0, anchD_ = 0, anchS_ = 0, anchG_ = 0, prefD_ = 0, prefS_ = 0;
+    rhi::TextureHandle guideDummy_ = 0;   // 1x1, bound in the guide slots when Inputs::guide is 0
     rhi::TextureHandle histD_[2] = {}, histS_[2] = {}, histG_[2] = {}, histV_[2] = {};
     u32 histLast_ = 0;               // which of the pair the last stabilised frame wrote
     bool histValid_ = false;

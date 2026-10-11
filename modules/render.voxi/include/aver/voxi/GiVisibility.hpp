@@ -19,11 +19,11 @@ inline constexpr f32 kPlaneTolCm  = 1.0f;    // Plane-test tolerance, flat floor
 // (d + 1) / 2 -- half-resolution edge length for a full-resolution edge `d`.
 constexpr u32 halfDim(u32 d) { return (d + 1u) / 2u; }
 
-// Does pixel (x, y) trace for real on frame `frame`? Cycles {(0,0), (1,1), (1,0), (0,1)}.
+// Does pixel (x, y) trace for real on frame `frame`? Cycles {(0,0), (1,0), (1,1), (0,1)}: (x ^ y) & 1 == frame & 1.
 constexpr bool tracedPixel(u32 x, u32 y, u32 frame) {
     const u32 idx = frame & 3u;
     const u32 phaseX = (idx == 0u) ? 0u : (idx == 1u) ? 1u : (idx == 2u) ? 1u : 0u;
-    const u32 phaseY = (idx == 0u) ? 0u : (idx == 1u) ? 1u : (idx == 2u) ? 0u : 1u;
+    const u32 phaseY = (idx == 2u || idx == 3u) ? 1u : 0u;
     return (x & 1u) == phaseX && (y & 1u) == phaseY;
 }
 

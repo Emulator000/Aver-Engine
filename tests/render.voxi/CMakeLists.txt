@@ -96,10 +96,11 @@ target_compile_definitions(GiVisibilityTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOUR
 set_target_properties(GiVisibilityTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # NeuRaCTest -- the radiance cache's CPU-checkable half (aver/voxi/NeuRaCLayout.hpp): the
-# fixed-point headroom, tag/cell addressing (negative cells included), origin snapping, the fp16 SH and
-# normal packing, the SH cosine convolution against a Monte Carlo estimate with the scatter's own
-# weighting, and the AVER_RC_* #define literals in voxi_neurac.hlsli against the header's
-# constants. Same shape as GiVisibilityTest above: the header depends on nothing but
+# fixed-point headroom, the accumulator and RcInfo layout, tag/cell addressing (negative cells included),
+# origin snapping, the fp16 SH and the normal word (direction, length, trust), the SH cosine convolution
+# against a Monte Carlo estimate with the scatter's own weighting, the scatter binning (the wall case),
+# the accept-rate and cap tables, the lookup corner weight, and the AVER_RC_* #define literals in
+# voxi_neurac.hlsli against the header's constants. Same shape as GiVisibilityTest above: the header depends on nothing but
 # aver/core/Types.hpp, so this links Aver.Core alone; AVER_REPO_ROOT because the last section reads the
 # HLSL files themselves.
 add_executable(NeuRaCTest src/NeuRaCTest.cpp)
@@ -148,6 +149,25 @@ if(TARGET Aver.Render.Voxi.Renderer AND AVER_RHI_D3D12)
     target_link_libraries(VoxiShaderCompileTest PRIVATE Aver.RHI.Vulkan)
   endif()
   set_target_properties(VoxiShaderCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# NeuRaCGpuTest -- the radiance cache's real scatter, lookup and resolve shaders against NeuRaCLayout.hpp's
+# CPU mirrors, on a real device (WARP by default, `hw` for the adapter). Drives the real NeuRaC class and a
+# small harness shader that includes voxi_neurac_io.hlsli; reads the shaders from the source tree through
+# AVER_REPO_ROOT (setShaderSourceDir), so a stale bin/shaders deploy cannot hide an edit. Skips (77) without a
+# D3D12 device, DXC / shader model 6.2, or IDevice::runStandaloneCompute. Links like VoxiShaderCompileTest.
+if(TARGET Aver.Render.Voxi.Renderer AND AVER_RHI_D3D12)
+  add_executable(NeuRaCGpuTest src/NeuRaCGpuTest.cpp)
+  target_link_libraries(NeuRaCGpuTest PRIVATE Aver.Render.Voxi.Renderer Aver.Render.Voxi Aver.Render.Denoise Aver.Render.PBR Aver.RHI
+                        Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  if(AVER_RHI_D3D11)
+    target_link_libraries(NeuRaCGpuTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(NeuRaCGpuTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  target_compile_definitions(NeuRaCGpuTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+  set_target_properties(NeuRaCGpuTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
 # VoxiSpirvCompileTest -- the Vulkan twin of VoxiShaderCompileTest, with no device: compiles Voxi's

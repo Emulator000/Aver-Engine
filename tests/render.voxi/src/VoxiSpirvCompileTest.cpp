@@ -1,12 +1,14 @@
 // VoxiSpirvCompileTest -- the Vulkan half of VoxiShaderCompileTest: compiles the RayQuery-heavy
 // shaders (Voxi's scene/ray-driven variants, the water displacement kernel, the reference path
-// tracer) to SPIR-V with DXC, the way rhi.vulkan's VulkanShaderCompiler does, with no device.
+// tracer, NRD2's temporal passes, the NeuRaC guide and resolve) to SPIR-V with DXC, the way rhi.vulkan's
+// VulkanShaderCompiler does, with no device.
 // Without it a RayQuery construct DXC cannot lower to SPIR-V only surfaces on a Vulkan run.
 // Skips (77) when the SPIR-V-capable dxcompiler.dll (third_party/dxc-spirv) is absent.
 //
 // Scope: the layout-agnostic compile createShader does first (no -fvk-bind-register map, no
 // push-constant patching) -- it proves DXC accepts the source, not that descriptors land right.
-// The defines below mirror VoxiRenderer::createScenePipelines, PathTracer.cpp and WaterSurface.cpp.
+// The defines below mirror VoxiRenderer::createScenePipelines, PathTracer.cpp, WaterSurface.cpp, Nrd2.cpp
+// (AVER_NRD2_PASS, no prelude) and NeuRaC.cpp / NeuRaCGuide.cpp (SM 6.2, no defines).
 
 #define NOMINMAX
 #include <windows.h>
@@ -127,7 +129,7 @@ std::string stageShaders() {
     std::error_code ec;
     fs::remove_all(dst, ec);
     fs::create_directories(dst, ec);
-    for (const char* mod : {"rhi", "render.pbr", "render.voxi", "render.pt", "fluids"}) {
+    for (const char* mod : {"rhi", "render.pbr", "render.voxi", "render.pt", "fluids", "render.denoise"}) {
         for (const auto& e : fs::directory_iterator(root / mod / "shaders", ec)) {
             const std::string ext = e.path().extension().string();
             if (e.is_regular_file() && (ext == ".hlsl" || ext == ".hlsli"))
@@ -163,6 +165,10 @@ int main() {
                                 rhi::shaderFile("voxi.hlsl");
     const std::string ptSrc = std::string(rhi::sharedShaderPrelude()) + rhi::shaderFile("pt_pathtrace.hlsl");
     const std::string waterSrc = rhi::shaderFile("water_displace.hlsl");
+    // NRD2, the guide and the resolve are compiled with no prelude (Nrd2.cpp, NeuRaCGuide.cpp, NeuRaC.cpp).
+    const std::string nrd2Src = rhi::shaderFile("nrd2.hlsl");
+    const std::string guideSrc = rhi::shaderFile("voxi_neurac_guide.hlsl");
+    const std::string resolveSrc = rhi::shaderFile("voxi_neurac_resolve.hlsl");
 
     const std::string mat = pbr::materialShaderDefines(kVoxiSrvCount, kMaterialSamplerSlot, /*layeredBsdf=*/false);
     const std::string matLayered = pbr::materialShaderDefines(kVoxiSrvCount, kMaterialSamplerSlot, /*layeredBsdf=*/true);
@@ -187,6 +193,12 @@ int main() {
         {"PT CSPathTrace",                      ptSrc, "CSPathTrace", 'c', 65, "AVER_PT_ENERGY_DIM=" + std::to_string(kPtEnergyDim), true},
         {"PT CSPathTrace bindless",             ptSrc, "CSPathTrace", 'c', 65,
          "AVER_PT_BINDLESS=1;AVER_PT_TEX_CAPACITY=" + std::to_string(kPtTexCapacity) + ";AVER_PT_ENERGY_DIM=" + std::to_string(kPtEnergyDim), true},
+        // NRD2's temporal stage (Vulkan has no in-frame NRD2, but these must still lower to SPIR-V).
+        {"NRD2 CSNrd2Reproject",                nrd2Src, "CSNrd2Reproject", 'c', 60, "AVER_NRD2_PASS=5"},
+        {"NRD2 CSNrd2Prefilter",                nrd2Src, "CSNrd2Prefilter", 'c', 60, "AVER_NRD2_PASS=6"},
+        {"NRD2 CSNrd2Temporal",                 nrd2Src, "CSNrd2Temporal",  'c', 60, "AVER_NRD2_PASS=7"},
+        {"NeuRaC CSNeuracGuide",                guideSrc, "CSNeuracGuide",  'c', 62, ""},
+        {"NeuRaC CSRcResolve",                  resolveSrc, "CSRcResolve",  'c', 62, ""},
     };
 
     int failures = 0;

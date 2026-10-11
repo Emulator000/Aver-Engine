@@ -1,6 +1,8 @@
 // VoxiShaderCompileTest -- compiles every staged ray-driven Voxi pipeline and every NRD2 pass on a
 // real device, without a window or a scene, so a shader error shows up here instead of in the editor.
-// HLSL compiles at runtime: no other test reaches voxi.hlsl's CSRd* entries or nrd2.hlsl.
+// HLSL compiles at runtime: no other test reaches voxi.hlsl's CSRd* entries or nrd2.hlsl. That includes the
+// NeuRaC twins (buildAllVariants builds them), the cache's resolve (a standalone NeuRaC) and the guide pass
+// (a standalone NeuRaCGuide).
 // Arguments: `warp` uses WARP (default: the adapter; ray tracing usually needs it). Skips (77) when the
 // device lacks ray tracing tier 1.1 / shader model 6.6, which the staged path requires.
 
@@ -8,6 +10,8 @@
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
+#include "aver/voxi/NeuRaC.hpp"
+#include "aver/voxi/NeuRaCGuide.hpp"
 #include "aver/voxi/VoxiRenderer.hpp"
 
 #include <cstring>
@@ -26,7 +30,8 @@ void sink(void* ctx, LogLevel level, std::string_view msg) {
     if (level < LogLevel::Warn) return;
     const bool shader = msg.find("compile") != std::string_view::npos || msg.find("not built") != std::string_view::npos ||
                         msg.find("would not build") != std::string_view::npos || msg.find("error X") != std::string_view::npos ||
-                        msg.find(": error") != std::string_view::npos;
+                        msg.find(": error") != std::string_view::npos || msg.find("did not build") != std::string_view::npos ||
+                        msg.find("NeuRaC") != std::string_view::npos;
     if (shader) static_cast<Errors*>(ctx)->lines.emplace_back(msg);
 }
 }  // namespace
@@ -66,6 +71,17 @@ int main(int argc, char** argv) {
             voxi.buildAllVariants();
         }
         voxi.shutdown();
+    }
+    {
+        // The cache's own pipelines, outside the renderer: the resolve shader and its buffers.
+        voxi::NeuRaC cache;
+        if (!cache.create(*dev->resources()) || !cache.valid()) { AVER_ERROR("  FAIL  standalone radiance cache (create)"); ++failures; }
+        cache.destroy();
+    }
+    {
+        voxi::NeuRaCGuide guide;
+        if (!guide.create(*dev) || !guide.valid()) { AVER_ERROR("  FAIL  standalone guide pass (create)"); ++failures; }
+        guide.destroy();
     }
     {
         render::denoise::Nrd2 nrd2;

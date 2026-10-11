@@ -774,9 +774,61 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vBool(Renderer::get().settings().nrd2Stab); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2Stab = on; }); }});
     t.push_back({"voxi.nrd2SunClean", VarType::Bool, false,
-        "The sun's lighting skips NRD2 and is added clean, its shadow penumbra averaged over a depth-weighted 5x5 (crisper sunlit normal maps and contact detail); 0 = the sun is denoised with the rest (A/B)",
+        "The sun's lighting skips NRD2 and is added clean, its shadow penumbra filtered by a depth-weighted Gaussian of voxi.rtShadowDenoise's radius (crisper sunlit normal maps and contact detail); 0 = the sun is denoised with the rest (A/B)",
         []{ return vBool(Renderer::get().settings().nrd2SunClean); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2SunClean = on; }); }});
+    t.push_back({"voxi.nrd2FfxClip", VarType::Bool, false,
+        "NRD2 temporal history clip like FidelityFX's: the reprojected history is clipped to this frame's mean +- sigma (default); 0 = the 5x5 min/max box (A/B)",
+        []{ return vBool(Renderer::get().settings().nrd2FfxClip); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2FfxClip = on; }); }});
+    t.push_back({"voxi.nrd2FfxClipWeight", VarType::F32, false,
+        "NRD2 history clip width in sigmas (0.1-8, default 4; the box is 1.4x this): lower clips harder, less ghosting and lag, more flicker",
+        []{ return vF32(Renderer::get().settings().nrd2FfxClipWeight); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2FfxClipWeight = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 0.1f && v.as.f <= 8.0f)) { err = "nrd2FfxClipWeight must be 0.1 to 8"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2FfxReject", VarType::Bool, false,
+        "NRD2 drops a reprojected history whose colour is far from this frame's neighbourhood mean (FidelityFX's colour-distance reject), per signal; 0 = keep it (A/B)",
+        []{ return vBool(Renderer::get().settings().nrd2FfxReject); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2FfxReject = on; }); }});
+    t.push_back({"voxi.nrd2FfxRejectWeight", VarType::F32, false,
+        "NRD2 colour reject distance, in standard deviations of this frame's neighbourhood (0.1-16, default 1.5): lower rejects more history",
+        []{ return vF32(Renderer::get().settings().nrd2FfxRejectWeight); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2FfxRejectWeight = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 0.1f && v.as.f <= 16.0f)) { err = "nrd2FfxRejectWeight must be 0.1 to 16"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2FfxDepthWeight", VarType::F32, false,
+        "NRD2 history depth weight in the disocclusion factor (0-64, default 1): higher rejects history across smaller depth steps, less smearing and more noise at edges; 0 ignores depth",
+        []{ return vF32(Renderer::get().settings().nrd2FfxDepthWeight); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2FfxDepthWeight = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 0.0f && v.as.f <= 64.0f)) { err = "nrd2FfxDepthWeight must be 0 to 64"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2HistSharp", VarType::F32, false,
+        "NRD2 history fetch: share of the Catmull-Rom filter against bilinear (0-1, default 1); 0 = bilinear, which blurs the history more in motion",
+        []{ return vF32(Renderer::get().settings().nrd2HistSharp); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2HistSharp = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 0.0f && v.as.f <= 1.0f)) { err = "nrd2HistSharp must be 0 to 1"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.nrd2NeuracGuide", VarType::Bool, false,
+        "NRD2's temporal anchor takes its spatial shape from the NeuRaC cache where the history is new (only while NeuRaC is live, voxi.giRestirVisibility 4 on D3D12); 0 = tile anchor only (A/B)",
+        []{ return vBool(Renderer::get().settings().nrd2NeuracGuide); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->nrd2NeuracGuide = on; }); }});
+    t.push_back({"voxi.nrd2NeuracGuideStrength", VarType::F32, false,
+        "NRD2 NeuRaC guide strength (0-1, default 1): scales how far the anchor follows the cache's deviation from its tile mean",
+        []{ return vF32(Renderer::get().settings().nrd2NeuracGuideStrength); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2NeuracGuideStrength = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (!(v.as.f >= 0.0f && v.as.f <= 1.0f)) { err = "nrd2NeuracGuideStrength must be 0 to 1"; return false; }
+            return true;
+        }});
     t.push_back({"voxi.rtCompactBlas", VarType::Bool, false,
         "Static ray-tracing BLASes move into their compacted copies once built (less VRAM, D3D12); 0 = new ones stay full size",
         []{ return vBool(Renderer::get().settings().rtCompactBlas); },
@@ -802,7 +854,7 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             return true;
         }});
     t.push_back({"voxi.nrd2Despeckle", VarType::U32, false,
-        "NRD2 input despeckle before the pyramid: a pixel over 2x the 5th brightest of its 5x5 neighbours is clamped to that, so a lone bright sample does not spread into a blotch. 0 off, 1 diffuse, 2 specular, 3 both (default)",
+        "NRD2 input despeckle before the pyramid: a pixel over voxi.nrd2DespeckleCap (default 1) times the 5th brightest of its 5x5 neighbours is clamped to that, so a lone bright sample does not spread into a blotch. 0 off, 1 diffuse, 2 specular, 3 both (default)",
         []{ return vU32(Renderer::get().settings().nrd2Despeckle); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->nrd2Despeckle = n; }); },
         [](const VarValue& v, std::string& err) -> bool {

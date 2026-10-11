@@ -25,6 +25,7 @@ set_target_properties(Aver.Render.Voxi PROPERTIES
 add_library(Aver.Render.Voxi.Renderer STATIC
   src/VoxiRenderer.cpp
   src/NeuRaC.cpp
+  src/NeuRaCGuide.cpp
   src/VoxiFroxelFog.cpp
   src/VoxiGiShaders.cpp)
 
@@ -44,9 +45,10 @@ target_compile_features(Aver.Render.Voxi.Renderer PUBLIC cxx_std_20)
 # Aver.Render.Denoise is the denoiser (AMD FidelityFX Denoiser plus this engine's host). Always
 # linkable; whether it runs this frame is a RUNTIME question answered by Denoiser::create() and the
 # renderer's own gating.
+# Aver.Render.Neural is the in-frame MLP (NeuRaC's stage 2 trains and runs a tiny one on the cache).
 target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.Render.Voxi
                                                        Aver.Render.PBR.Materials Aver.Formats
-                                                       Aver.Render.Denoise)
+                                                       Aver.Render.Denoise Aver.Render.Neural)
 
 set_target_properties(Aver.Render.Voxi.Renderer PROPERTIES FOLDER "modules")
 

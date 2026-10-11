@@ -447,6 +447,193 @@ Nrd2TemporalOut nrd2TemporalBlend(const f32 cur[3], const f32 anchor[3], const f
     return o;
 }
 
+// ---- FidelityFX history handling (nrd2_resolve.hlsli) ----
+
+f32 nrd2FfxFactor(f32 cosN, f32 zHist, f32 zExp, f32 normalW, f32 depthW) {
+    return std::exp(-std::fabs(1.0f - std::max(0.0f, cosN)) * normalW) *
+           std::exp(-std::fabs(zHist - zExp) / std::max(zExp, 1.0e-4f) * depthW);
+}
+
+f32 nrd2MomentWeight(i32 i) { return std::exp(-kNrd2FfxGaussK * static_cast<f32>(i * i) / 25.0f); }
+
+void nrd2CatmullRom(f32 f, f32 w[4]) {
+    w[0] = f * (-0.5f + f * (1.0f - 0.5f * f));
+    w[1] = 1.0f + f * f * (-2.5f + 1.5f * f);
+    w[2] = f * (0.5f + f * (2.0f - 1.5f * f));
+    w[3] = f * f * (-0.5f + 0.5f * f);
+}
+
+std::array<f32, 3> nrd2ClipAabb(const f32 lo[3], const f32 hi[3], const f32 v[3]) {
+    f32 c[3], e[3], d[3];
+    for (u32 k = 0; k < 3; ++k) {
+        c[k] = 0.5f * (hi[k] + lo[k]);
+        e[k] = 0.5f * (hi[k] - lo[k]) + 0.001f;
+        d[k] = v[k] - c[k];
+    }
+    const f32 m = std::max(std::fabs(d[0] / e[0]), std::max(std::fabs(d[1] / e[1]), std::fabs(d[2] / e[2])));
+    if (!(m > 1.0f)) return {v[0], v[1], v[2]};
+    return {c[0] + d[0] / m, c[1] + d[1] / m, c[2] + d[2] / m};
+}
+
+bool nrd2FfxReject(const f32 hist[3], const f32 mean[3], const f32 var[3], f32 w) {
+    const f32 dx = hist[0] - mean[0], dy = hist[1] - mean[1], dz = hist[2] - mean[2];
+    const f32 dd = dx * dx + dy * dy + dz * dz;
+    const f32 len = std::sqrt(var[0] * var[0] + var[1] * var[1] + var[2] * var[2]);
+    return !(dd < w * len);
+}
+
+Nrd2TemporalOut nrd2TemporalBlendFfx(const f32 cur[3], const f32 avg[3], const f32 mean[3], const f32 var[3],
+                                     const f32 hist[3], f32 n, f32 clipW) {
+    Nrd2TemporalOut o;
+    const f32 dx = mean[0] - avg[0], dy = mean[1] - avg[1], dz = mean[2] - avg[2];
+    const f32 dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    f32 sd[3], m2[3], loH[3], hiH[3], loC[3], hiC[3], cb[3];
+    const f32 a = 1.0f / std::max(n + 1.0f, 1.0f), w = nrd2StabBlend(n);
+    for (u32 k = 0; k < 3; ++k) {
+        sd[k] = (std::sqrt(var[k]) + dist) * clipW * kNrd2FfxClipK;
+        m2[k] = mean[k] + (avg[k] - mean[k]) * kNrd2FfxMeanMix;
+        loH[k] = m2[k] - sd[k]; hiH[k] = m2[k] + sd[k];
+        loC[k] = avg[k] - sd[k]; hiC[k] = avg[k] + sd[k];
+        cb[k] = cur[k] + (avg[k] - cur[k]) * a;
+    }
+    const std::array<f32, 3> h = nrd2ClipAabb(loH, hiH, hist), c = nrd2ClipAabb(loC, hiC, cb);
+    for (u32 k = 0; k < 3; ++k) {
+        o.hist[k] = h[k];
+        o.cur[k] = c[k];
+        o.out[k] = c[k] + (h[k] - c[k]) * w;
+    }
+    return o;
+}
+
+std::array<f32, 3> nrd2GuidedAnchor(const f32 A[3], const f32 g[3], f32 c, const f32 gbar[3], f32 gbarValid,
+                                    f32 strength) {
+    const std::array<f32, 3> keep = {A[0], A[1], A[2]};
+    const f32 lA = A[0] * 0.2126f + A[1] * 0.7152f + A[2] * 0.0722f;
+    const f32 lG = gbar[0] * 0.2126f + gbar[1] * 0.7152f + gbar[2] * 0.0722f;
+    bool nan = false;
+    for (u32 k = 0; k < 3; ++k) nan = nan || g[k] != g[k] || gbar[k] != gbar[k];
+    if (!(c > 0.0f) || !(gbarValid > 0.0f) || !(strength > 0.0f) || !(lA > 0.0f) || nan) return keep;
+    const f32 s = lG > 1.0e-12f ? std::min(1.0f, lA / lG) : 1.0f;
+    const f32 k = c * strength * s;
+    std::array<f32, 3> out;
+    for (u32 j = 0; j < 3; ++j) out[j] = std::clamp(A[j] + k * (g[j] - gbar[j]), 0.25f * A[j], 4.0f * A[j]);
+    return out;
+}
+
+Nrd2Moments nrd2Moments(const std::vector<std::array<f32, 3>>& values, const std::vector<f32>& valid) {
+    constexpr i32 R = kNrd2FfxMomentRadius, N = 2 * R + 1;
+    Nrd2Moments m;
+    if (values.size() < static_cast<usize>(N * N) || valid.size() < static_cast<usize>(N * N)) return m;
+    f32 hw[N] = {}, hx[N][3] = {}, h2[N][3] = {};
+    for (i32 j = 0; j < N; ++j)
+        for (i32 i = 0; i < N; ++i) {
+            const f32 v = valid[static_cast<usize>(j * N + i)];
+            if (!(v > 0.0f)) continue;
+            const f32 wv = nrd2MomentWeight(i - R) * v;
+            hw[j] += wv;
+            for (u32 k = 0; k < 3; ++k) {
+                const f32 x = values[static_cast<usize>(j * N + i)][k];
+                hx[j][k] += wv * x;
+                h2[j][k] += wv * x * x;
+            }
+        }
+    f32 W = 0.0f, sx[3] = {}, s2[3] = {};
+    for (i32 j = 0; j < N; ++j) {
+        const f32 wj = nrd2MomentWeight(j - R);
+        W += wj * hw[j];
+        for (u32 k = 0; k < 3; ++k) { sx[k] += wj * hx[j][k]; s2[k] += wj * h2[j][k]; }
+    }
+    if (!(W > 0.0f)) return m;
+    m.weight = W;
+    for (u32 k = 0; k < 3; ++k) {
+        m.mean[k] = sx[k] / W;
+        m.var[k] = std::fabs(s2[k] / W - m.mean[k] * m.mean[k]);
+    }
+    return m;
+}
+
+u32 nrd2FfxSearch(const f32 factors[9]) {
+    u32 best = 4;
+    f32 f = factors[4];
+    for (u32 k = 0; k < 9; ++k) {
+        if (k == 4) continue;
+        if (factors[k] > f) { f = factors[k]; best = k; }
+    }
+    return best;
+}
+
+namespace {
+f32 bilinearWeight(u32 i, f32 fx, f32 fy) { return ((i & 1u) ? fx : 1.0f - fx) * ((i >> 1) ? fy : 1.0f - fy); }
+}  // namespace
+
+Nrd2Rebuild nrd2FfxRebuild(const Nrd2HistTap taps[4], f32 fx, f32 fy, const f32 n[3], f32 zExp, f32 normalW,
+                           f32 depthW, f32 thr) {
+    Nrd2Rebuild r;
+    f32 sum = 0.0f;
+    for (u32 i = 0; i < 4; ++i) {
+        r.w[i] = (taps[i].ok && taps[i].factor > 0.5f * thr) ? bilinearWeight(i, fx, fy) : 0.0f;
+        sum += r.w[i];
+    }
+    const f32 inv = std::max(sum, 1.0e-3f);
+    f32 nrm[3] = {}, zH = 0.0f;
+    for (u32 i = 0; i < 4; ++i) {
+        r.w[i] /= inv;
+        zH += r.w[i] * taps[i].z;
+        for (u32 k = 0; k < 3; ++k) {
+            nrm[k] += r.w[i] * taps[i].nrm[k];
+            r.colour[k] += r.w[i] * taps[i].colour[k];
+        }
+    }
+    r.factor = nrd2FfxFactor(n[0] * nrm[0] + n[1] * nrm[1] + n[2] * nrm[2], zH, zExp, normalW, depthW);
+    if (r.factor < thr) r.factor = 0.0f;
+    return r;
+}
+
+Nrd2HistFetch nrd2HistFetch(const f32 taps[16][3], u32 validMask, f32 fx, f32 fy, f32 sharp) {
+    static const u32 kCore[4] = {5, 6, 9, 10};
+    Nrd2HistFetch r;
+    f32 bw[4], sum = 0.0f;
+    bool allCore = true;
+    for (u32 i = 0; i < 4; ++i) {
+        const bool v = (validMask >> kCore[i]) & 1u;
+        allCore = allCore && v;
+        bw[i] = v ? bilinearWeight(i, fx, fy) : 0.0f;
+        sum += bw[i];
+    }
+    if (!(sum > 1.0e-6f)) return r;
+    r.ok = true;
+    f32 bil[3] = {};
+    for (u32 i = 0; i < 4; ++i)
+        for (u32 k = 0; k < 3; ++k) bil[k] += bw[i] * taps[kCore[i]][k];
+    for (u32 k = 0; k < 3; ++k) { bil[k] /= sum; r.colour[k] = bil[k]; }
+    if (!allCore || !(sharp > 0.0f)) return r;
+
+    f32 wx[4], wy[4];
+    nrd2CatmullRom(fx, wx);
+    nrd2CatmullRom(fy, wy);
+    f32 num[3] = {}, den = 0.0f, lo[3] = {3.0e38f, 3.0e38f, 3.0e38f}, hi[3] = {-3.0e38f, -3.0e38f, -3.0e38f};
+    for (u32 j = 0; j < 4; ++j)
+        for (u32 i = 0; i < 4; ++i) {
+            if ((i == 0 || i == 3) && (j == 0 || j == 3)) continue;   // corners dropped
+            if (!((validMask >> (j * 4 + i)) & 1u)) continue;
+            const f32 w = wx[i] * wy[j];
+            den += w;
+            for (u32 k = 0; k < 3; ++k) {
+                const f32 c = taps[j * 4 + i][k];
+                num[k] += w * c;
+                lo[k] = std::min(lo[k], c);
+                hi[k] = std::max(hi[k], c);
+            }
+        }
+    if (!(den > 1.0e-6f)) return r;
+    r.catmull = true;
+    for (u32 k = 0; k < 3; ++k) {
+        const f32 cr = std::max(std::clamp(num[k] / den, lo[k], hi[k]), 0.0f);
+        r.colour[k] = bil[k] + (cr - bil[k]) * sharp;
+    }
+    return r;
+}
+
 void nrd2ClampTheta(f32 t[6]) {
     for (u32 k = 0; k < 3; ++k) t[k] = std::clamp(t[k], -16.0f, 16.0f);
     for (u32 k = 3; k < 6; ++k) t[k] = std::clamp(t[k], -8.0f, 8.0f);

@@ -1,5 +1,5 @@
 // Resolve: SH sums to running mean, zero accumulator for next frame.
-// ACCUMULATOR: counts [0, cells), then 15 ints per cell.
+// ACCUMULATOR: counts [0, K) = accepted | prevArrivals << 16, arrivals [K, 2K), then 15 ints per cell.
 #include "voxi_neurac.hlsli"
 
 StructuredBuffer<RcInfo>      gRcInfo  : register(t0);
@@ -10,7 +10,8 @@ RWStructuredBuffer<RcCell>    gRcCells : register(u1);
 #define RCR_RES      64u
 #define RCR_PER_CASC 262144u     // 64^3
 #define RCR_CELLS    786432u     // 3 * 64^3
-#define RCR_PAYLOAD  15u         // ints per cell after the counts region
+#define RCR_PAYLOAD  15u         // ints per cell after the counts and arrivals regions
+#define RCR_PAYLOAD_BASE 1572864u // 2 * RCR_CELLS
 
 #define RCR_FLAG_CLEAR_ALL 1u
 
@@ -24,7 +25,7 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
     if (cell >= RCR_CELLS) return;
 
     const RcInfo info = gRcInfo[0];
-    const uint payloadBase = RCR_CELLS + cell * RCR_PAYLOAD;
+    const uint payloadBase = RCR_PAYLOAD_BASE + cell * RCR_PAYLOAD;
 
     // CLEAR_ALL flag: zero cell and return.
     if ((info.hdr0.x & RCR_FLAG_CLEAR_ALL) != 0u)
@@ -34,13 +35,22 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
         zero.b = uint4(0, 0, 0, 0);
         gRcCells[cell] = zero;
         gRcAccum[cell] = 0;
+        gRcAccum[RCR_CELLS + cell] = 0;
         [unroll] for (uint k = 0; k < RCR_PAYLOAD; ++k) gRcAccum[payloadBase + k] = 0;
         return;
     }
 
-    // Limit samples by cap.
-    const uint cap = min(info.hdr0.w, (uint)AVER_RC_MAX_CAP);
-    const uint n   = min((uint)gRcAccum[cell], cap);
+    // Limit samples by this cascade's cap.
+    const uint cascade = cell / RCR_PER_CASC;
+    const uint cap = rcCapFor(info, cascade);
+    const uint countsWord = (uint)gRcAccum[cell];
+    const uint arrivals   = (uint)gRcAccum[RCR_CELLS + cell];
+    const uint n          = min(countsWord & 0xFFFFu, cap);
+
+    // Arrivals become next frame's load hint and reset, before any early-out so a stale hint never lingers.
+    const uint nextCounts = min(arrivals, 65535u) << 16;
+    if (countsWord != nextCounts) gRcAccum[cell] = (int)nextCounts;
+    if (arrivals != 0u) gRcAccum[RCR_CELLS + cell] = 0;
 
     // Aging: fixed cadence per frame.
     const uint ageStep   = info.hdr0.z;
@@ -49,7 +59,6 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
     if (n == 0u && !agingFrame) return;
 
     // World cell: window origin + (texel - origin) & 63.
-    const uint cascade = cell / RCR_PER_CASC;
     const uint local   = cell - cascade * RCR_PER_CASC;
     const int3 texel   = int3(local & 63u, (local >> 6) & 63u, local >> 12);
     const int4 cas     = info.cas[cascade];
@@ -98,14 +107,17 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
     float3 sh[4];
     [unroll] for (uint c = 0; c < 4; ++c) sh[c] = mean[c];
     uint newNEff = 1u;
+    uint trust6  = (uint)AVER_RC_TRUST_MAX;   // a new or replaced cell starts fully trusted
     if (valid)
     {
-        // Blend rate: 1/(n_eff+1) with minimum for lighting changes (per frame).
-        const float alpha = max(1.0 / ((float)nEff + 1.0), info.hdr1.x);
+        // Blend rate: 1/(n_eff+1) with minimum for lighting changes (per frame); relaxAlpha raises the
+        // floor for a few frames after an event that makes the old light wrong (sun jump, GI rebuild).
+        const float alpha = max(1.0 / ((float)nEff + 1.0), max(info.hdr1.x, info.hdr1.y));
         float3 old[4];
         rcUnpackSh(stored.a, stored.b.xy, old);
         float oldLen;
         const float3 oldDir = rcUnpackNormal(stored.b.z, oldLen);
+        trust6 = rcNormalTrust6(stored.b.z);
         [unroll] for (uint j = 0; j < 4; ++j) sh[j] = lerp(old[j], mean[j], alpha);
         nMean = lerp(oldDir * oldLen, nMean, alpha);
         newNEff = min(nEff + 1u, (uint)AVER_RC_NEFF_MAX);
@@ -116,10 +128,9 @@ void CSRcResolve(uint3 dtid : SV_DispatchThreadID)
     rcPackSh(sh, w6);
     RcCell outCell;
     outCell.a = uint4(w6[0], w6[1], w6[2], w6[3]);
-    outCell.b = uint4(w6[4], w6[5], rcPackNormal(nMean), rcrMeta(expectedTag, newNEff, 0u));
+    outCell.b = uint4(w6[4], w6[5], rcPackNormal(nMean, trust6), rcrMeta(expectedTag, newNEff, 0u));
     gRcCells[cell] = outCell;
 
-    // Reset accumulator for next frame's scatter.
-    gRcAccum[cell] = 0;
+    // Reset the payload for next frame's scatter (counts and arrivals were handled above).
     [unroll] for (uint k = 0; k < RCR_PAYLOAD; ++k) gRcAccum[payloadBase + k] = 0;
 }

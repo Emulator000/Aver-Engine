@@ -21,13 +21,18 @@ constexpr f64 kMiB = 1024.0 * 1024.0;
 // RcInfo for one frame. cas[c].cellSizeCm travels as float bits in the HLSL int4's .w, which the shader
 // reads back with asfloat(); the struct already stores it as a float, so the bytes are what the shader
 // expects with no conversion here.
-rc::RcInfo makeInfo(const f32 camPosCm[3], u32 frameIndex, u32 flags, const NeuRaC::Params& p) {
+rc::RcInfo makeInfo(const f32 camPosCm[3], u32 frameIndex, u32 flags, const NeuRaC::Params& p, f32 relaxAlpha) {
     rc::RcInfo info{};
     info.flags         = flags;
     info.frameIndex    = frameIndex;
     info.ageStepFrames = p.ageStepFrames;
     info.sampleCap     = p.sampleCap > rc::kMaxCap ? rc::kMaxCap : p.sampleCap;
     info.alphaMin      = p.alphaMin;
+    info.relaxAlpha    = relaxAlpha;
+    const u32 cap1 = p.coarseCap1 > rc::kMaxCap ? rc::kMaxCap : p.coarseCap1;
+    const u32 cap2 = p.coarseCap2 > rc::kMaxCap ? rc::kMaxCap : p.coarseCap2;
+    info.coarseCaps    = cap1 | (cap2 << 8);
+    info.netStrength   = p.netStrength < 0.0f ? 0.0f : (p.netStrength > 1.0f ? 1.0f : p.netStrength);
     for (u32 c = 0; c < rc::kCascades; ++c) {
         const f32 size = rc::kCellSizeCm[c];
         for (u32 a = 0; a < 3; ++a) info.cas[c].originCell[a] = rc::snapOrigin(camPosCm[a], size);
@@ -169,7 +174,10 @@ NeuRaC::Bindings NeuRaC::beginFrame(rhi::IRenderContext& ctx, const f32 camPosCm
 
     // Rotate BEFORE writing, so this frame never touches the buffer an in-flight frame still reads.
     slot_ = (slot_ + 1) % kRing;
-    const rc::RcInfo info = makeInfo(camPosCm, frameIndex, 0u, p);
+    std::memcpy(eyeCm_, camPosCm, sizeof(eyeCm_));
+    const f32 relax = relaxFrames_ > 0 ? relaxAlpha_ : 0.0f;
+    if (relaxFrames_ > 0) --relaxFrames_;
+    const rc::RcInfo info = makeInfo(camPosCm, frameIndex, 0u, p, relax);
     res_->writeBuffer(info_[slot_], &info, sizeof(info), 0);
 
     if (clearPending_) {
@@ -237,7 +245,7 @@ void NeuRaC::logWarmupStats() {
             ++valid;
             nEffSum += rc::metaNEff(meta);
             ageSum  += rc::metaAge(meta);
-            lenSum  += static_cast<f64>(cell.b[2] >> 22) / 1023.0;
+            lenSum  += static_cast<f64>((cell.b[2] >> 20) & 63u) / static_cast<f64>(rc::kLenMax);
             // c0 (the ambient term) is the first three fp16 values: a[0] low, a[0] high, a[1] low.
             const f32 r = rc::halfToFloat(cell.a[0] & 0xFFFFu), g = rc::halfToFloat(cell.a[0] >> 16),
                       b = rc::halfToFloat(cell.a[1] & 0xFFFFu);

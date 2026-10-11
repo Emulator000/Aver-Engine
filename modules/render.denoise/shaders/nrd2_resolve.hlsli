@@ -323,6 +323,65 @@ float3 nrd2TemporalBlend(float3 cur, float3 anchor, float3 lo, float3 hi, float3
     return lerp(outCur, outHist, nrd2StabBlend(n));
 }
 
+// ---- FidelityFX history handling (docs/plans/neurac_nrd2/DESIGN.md section 2): shared with the CPU twin ----
+// The reflections denoiser's disocclusion factor, mean +- sigma clip and colour-distance reject (MIT), and a
+// 12-tap Catmull-Rom history fetch. Owner decision 2026-10-11: on by default (NEURAA_NRD.md section 7).
+static const float kNrd2FfxThreshold = 0.9, kNrd2FfxNormalW = 1.4, kNrd2FfxDepthW = 1.0,
+                   kNrd2FfxRejectW = 1.5, kNrd2FfxClipK = 1.4, kNrd2FfxMeanMix = 0.2,
+                   kNrd2FfxGaussK = 3.0;          // moment weight(i) = exp(-K i^2 / 25), |i| <= 4
+
+// FFX GetDisocclusionFactor; depth is vs the camera-motion-predicted zExp, not the current depth.
+float nrd2FfxFactor(float cosN, float zHist, float zExp, float normalW, float depthW) {
+    return exp(-abs(1.0 - max(0.0, cosN)) * normalW)
+         * exp(-abs(zHist - zExp) / max(zExp, 1.0e-4) * depthW);
+}
+float nrd2MomentWeight(int i) { return exp(-kNrd2FfxGaussK * float(i * i) / 25.0); }
+
+// Same polynomials as sr_taa.hlsl; f = 0.5 gives -1/16, 9/16, 9/16, -1/16.
+void nrd2CatmullRom(float f, out float w[4]) {
+    w[0] = f * (-0.5 + f * (1.0 - 0.5 * f));
+    w[1] = 1.0 + f * f * (-2.5 + 1.5 * f);
+    w[2] = f * (0.5 + f * (2.0 - 1.5 * f));
+    w[3] = f * f * (-0.5 + 0.5 * f);
+}
+
+// FFX ClipAABB: toward the box centre along the line to v, not per channel.
+float3 nrd2ClipAabb(float3 lo, float3 hi, float3 v) {
+    const float3 c = 0.5 * (hi + lo), e = 0.5 * (hi - lo) + 0.001, d = v - c;
+    const float m = max(abs(d.x / e.x), max(abs(d.y / e.y), abs(d.z / e.z)));
+    return m > 1.0 ? c + d / m : v;
+}
+
+// True = discard the history. A NaN distance rejects.
+bool nrd2FfxReject(float3 hist, float3 mean, float3 var, float w) {
+    const float3 d = hist - mean;
+    return !(dot(d, d) < w * length(var));
+}
+
+// FFX resolve_temporal: the current value and the history each clipped to a box of mean +- sigma (widened by the
+// distance between the 9x9 mean and the tile anchor), then blended by the sample count. outCur/outHist feed
+// the carried noise estimate.
+float3 nrd2TemporalBlendFfx(float3 cur, float3 avg, float3 mean, float3 var, float3 hist,
+                            float n, float clipW, out float3 outCur, out float3 outHist) {
+    const float3 sd = (sqrt(var) + length(mean - avg)) * clipW * kNrd2FfxClipK;
+    const float3 m2 = lerp(mean, avg, kNrd2FfxMeanMix);
+    outHist = nrd2ClipAabb(m2 - sd, m2 + sd, hist);
+    outCur  = nrd2ClipAabb(avg - sd, avg + sd, lerp(cur, avg, 1.0 / max(n + 1.0, 1.0)));
+    return lerp(outCur, outHist, nrd2StabBlend(n));
+}
+
+// NeuRaC guide into the tile anchor (DESIGN.md section 3.1): the pixel's deviation from the guide's own tile
+// mean moves the anchor, ratio-like where indirect light dominates and additive where a lamp does. A is the
+// tile anchor, g/c the pixel's guide and confidence, gbar the confidence-weighted guide tile mean (gbarValid
+// > 0 when it has any weight). Returns A bit-for-bit when there is nothing to add.
+float3 nrd2GuidedAnchor(float3 A, float3 g, float c, float3 gbar, float gbarValid, float strength) {
+    const float lA = nrd2Lum(A), lG = nrd2Lum(gbar);
+    if (!(c > 0.0) || !(gbarValid > 0.0) || !(strength > 0.0) || !(lA > 0.0) || any(g != g) || any(gbar != gbar))
+        return A;
+    const float s = lG > 1.0e-12 ? min(1.0, lA / lG) : 1.0;
+    return clamp(A + (c * strength * s) * (g - gbar), 0.25 * A, 4.0 * A);
+}
+
 // ---- backward (phase 3 oracle): d(output)/d(theta) for one pixel and one signal --------------------
 // theta = the six tile parameters in field order (logits l1..l3, log2 depth / normal / luminance
 // sensitivity); the own logit stays pinned at 0. Levels, guides and the pixel's own value are fixed

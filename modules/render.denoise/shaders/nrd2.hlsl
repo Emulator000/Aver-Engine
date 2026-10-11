@@ -7,9 +7,11 @@
 //   3 VSNrd2Compose / PSNrd2Compose -- adds that into the scene colour (additive blend)
 //   4 CSNrd2Features -- the network's 12 input channels at half resolution (phase 3 capture, phase 4)
 //   5 CSNrd2Reproject, 6 CSNrd2Prefilter, 7 CSNrd2Temporal -- jitter-free frames only: the temporal stage, after
-//                      the resolve (docs/rendering/NRD2.md "Temporal stabiliser"): history reprojection with a sample
-//                      count, noise estimate and per-tile anchor; a fixed 15-tap prefilter; the min/max-clipped blend
-//                      with history, remodulated into lit
+//                      the resolve (docs/rendering/NRD2.md "Temporal stabiliser"): FidelityFX-style history reprojection
+//                      (disocclusion factor, closest-texel search, 2x2 rebuild, Catmull-Rom fetch, colour reject) with a
+//                      sample count, noise estimate, per-tile anchor and the NeuRaC guide's tile mean; a fixed 15-tap
+//                      prefilter; the blend with history (mean +- sigma clip, or the 5x5 min/max box; D's anchor
+//                      optionally guided by the NeuRaC cache), remodulated into lit
 //   8 CSNrd2Despeckle -- before the pyramid when on: D and S with isolated outliers clamped (nrd2Despeckle), which
 //                      the pyramid, resolve and features then read instead of Stage B's targets
 //   9 CSNrd2Blur      -- speckle blur after the resolve when on (nrd2BlurWeight): into the temporal stage's input,
@@ -28,7 +30,8 @@
 cbuffer Nrd2CB : register(b3) {
     uint4  gNrd2Rect;     // scene viewport x, y, w, h (render-target pixels)
     uint4  gNrd2Tiles;    // x tiles, y tiles, flags (1 own pixel only, 2 stabilise, 4 history valid, 8 standardise,
-                          // 16 blur: the resolve writes D'/S'), despeckle mask (1 D, 2 S)
+                          // 16 blur: the resolve writes D'/S', 32 NeuRaC guide, 64 FidelityFX clip, 128 FidelityFX
+                          // colour reject), despeckle mask (1 D, 2 S)
     float4 gNrd2Def[3];   // default tile parameters, planes 0..11 (D then S)
     float4 gNrd2View[3];  // world -> view rows: right, up, forward (xyz); w of right and up: tan of the half FOV
     float4 gNrd2InScale[3];   // features: the network's input standardisation x * scale + bias (flag 8)
@@ -39,6 +42,8 @@ cbuffer Nrd2CB : register(b3) {
     float4 gNrd2Extra;        // x: cap on the 1/8 level's logit, y: combine reference (0 coarsest, 1 median),
                               // z: cap on the 1/4 level's logit -- all at inference only; w: converge frames
     uint4  gNrd2Vis;          // object stop: x primary-visibility row pitch, y 1 = on (inference only)
+    float4 gNrd2Ffx;          // stabiliser: disocclusion threshold, normal weight, depth weight, colour-reject weight
+    float4 gNrd2Hist;         // stabiliser: Catmull-Rom share, clip weight, guide strength
 };
 
 // The object stop (docs/rendering/NRD2.md "Object stop"): no lighting mixed across objects (NeuRAA's
@@ -46,6 +51,9 @@ cbuffer Nrd2CB : register(b3) {
 bool nrd2ObjectStop() { return gNrd2Vis.y != 0u; }
 
 uint2 nrd2LevelSize(uint shift) { return ((gNrd2Rect.zw + 7u) / 8u) * (8u >> shift); }
+
+// A guide texel's confidence: [0, 1], 0 for a NaN.
+float nrd2PassGuideConf(float a) { return a == a ? saturate(a) : 0.0; }
 
 #if AVER_NRD2_PASS == 0   // ---- pyramid ----
 
@@ -406,10 +414,13 @@ void CSNrd2Features(uint3 dtid : SV_DispatchThreadID) {
 #elif AVER_NRD2_PASS == 5   // ---- temporal 1/3: reproject ----
 
 // FidelityFX's reflections-denoiser temporal design (MIT), rewritten (docs/rendering/NRD2.md "Temporal
-// stabiliser"). Per pixel: D' and S' against last frame's stabilised ones at the velocity-reprojected position,
-// by reprojected view depth and normal; a failed bilinear set falls back to the best-matching 3x3 neighbour.
-// Out: the reprojected history with its sample count n, the noise estimate, and per 8x8 tile a
-// brightness-weighted anchor (bright outliers down-weighted relative to the tile).
+// stabiliser"). Per pixel: D' and S' against last frame's stabilised ones at the velocity-reprojected position.
+// A history texel is scored by FidelityFX's disocclusion factor (normal and relative depth against the depth
+// camera motion predicts, nrd2FfxFactor); a failed nearest texel searches its 3x3, a still failed one rebuilds
+// from the valid texels of the 2x2. The fetch is a 12-tap Catmull-Rom with per-tap validity (or the
+// validity-weighted bilinear), and each signal's history may be rejected by its colour distance from this frame's
+// 9x9 moments. Out: the reprojected history with its sample count n, the noise estimate, and per 8x8 tile a
+// brightness-weighted anchor (bright outliers down-weighted relative to the tile), plus the NeuRaC guide's tile mean.
 Texture2D<float4> gNrd2DRes   : register(t0);   // D', a = 1 on surfaces
 Texture2D<float4> gNrd2SRes   : register(t1);
 Texture2D<float>  gNrd2ViewZ  : register(t2);
@@ -419,54 +430,69 @@ Texture2D<float4> gNrd2HistD  : register(t5);   // last frame's D'' rgb, a = sam
 Texture2D<float4> gNrd2HistS  : register(t6);
 Texture2D<float4> gNrd2HistG  : register(t7);   // x view Z (m), yz the G-buffer's packed normal xy
 Texture2D<float2> gNrd2HistV  : register(t8);   // noise estimate of D'', S''
+Texture2D<float4> gNrd2Guide  : register(t9);   // NeuRaC guide: rgb cached irradiance / pi, a confidence (flag 32)
 RWTexture2D<float4> gNrd2RpD   : register(u0);  // reprojected D history rgb, a = sample count n (1 = none)
 RWTexture2D<float4> gNrd2RpS   : register(u1);
 RWTexture2D<float2> gNrd2RpV   : register(u2);  // noise estimate after this frame's reprojection
 RWTexture2D<float4> gNrd2AnchD : register(u3);  // per-tile anchor rgb, a = 1 when valid
 RWTexture2D<float4> gNrd2AnchS : register(u4);
+RWTexture2D<float4> gNrd2AnchG : register(u5);  // per-tile guide mean rgb, a = 1 when valid (flag 32)
 
-groupshared float4 gsA[64];   // tile sums: luminance and count of D and S
-groupshared float4 gsB[64];   // anchor sums: w * D, w
-groupshared float4 gsC[64];   // w * S, w
+#define NRD2_RP_R 4                   // moment radius: 9x9
+#define NRD2_RP_W (8 + 2 * NRD2_RP_R)
+#if NRD2_RP_W * NRD2_RP_W * 32 + 4096 > 16384
+#error nrd2 reproject groupshared exceeds 16 KB
+#endif
+groupshared float4 gsRpD[NRD2_RP_W * NRD2_RP_W];   // halo: D' rgb, a = 1 on surfaces (8 KB with gsRpS)
+groupshared float4 gsRpS[NRD2_RP_W * NRD2_RP_W];
+// 4 KB shared by two lifetimes: the separable moments' row sums (H at [0, 128), H2 at [128, 256)), dead before
+// the tile reductions (D+S luminance, D, S, guide: 64 each) are written.
+groupshared float4 gsPool[256];
+#define NRD2_RP_A 0
+#define NRD2_RP_B 64
+#define NRD2_RP_C 128
+#define NRD2_RP_G 192
 
-struct Nrd2HistSet {
-    float  wsum, score;   // bilinear weight kept, its sum of search scores
-    float3 d, s;          // weighted sums
-    float2 v;
-    float2 n;             // youngest count among the taps that carry weight: D, S
+float4 nrd2RpHalo(uint signal, uint i) { return signal == 0u ? gsRpD[i] : gsRpS[i]; }
+
+// One history texel: valid inside the viewport with a sample count; its disocclusion factor against this pixel.
+struct Nrd2Tap {
+    bool   ok;
+    float  factor;
+    float3 nrm;
+    float  z;      // view Z, m
+    float4 d;      // D'' rgb, sample count
+    float4 s;      // S'' rgb, sample count
 };
 
-// The four history texels from `base`, bilinear weights f, each kept by normal and reprojected-depth agreement.
-Nrd2HistSet nrd2GatherHistory(int2 base, float2 f, float3 n, float zExp, float zTol) {
-    Nrd2HistSet h;
-    h.wsum = 0.0; h.score = 0.0; h.d = 0.0; h.s = 0.0; h.v = 0.0; h.n = 1.0e9;
+Nrd2Tap nrd2LoadTap(int2 tc, float3 n, float zExp) {
+    Nrd2Tap t;
+    t.ok = false; t.factor = 0.0; t.nrm = 0.0; t.z = 0.0; t.d = 0.0; t.s = 0.0;
     const int2 lo = int2(gNrd2Rect.xy), hi = int2(gNrd2Rect.xy + gNrd2Rect.zw);
-    [unroll] for (uint t = 0u; t < 4u; ++t) {
-        const int2 o = int2(t & 1u, t >> 1);
-        const int3 tc = int3(base + o, 0);
-        if (any(tc.xy < lo) || any(tc.xy >= hi)) continue;
-        const float4 hd = gNrd2HistD.Load(tc);
-        if (!(hd.a > 0.0)) continue;
-        const float4 hg = gNrd2HistG.Load(tc);
-        const float cosN = dot(n, nrd2DecodeNormal(float4(hg.yz, 0.0, 0.0)));
-        const float dz = abs(hg.x - zExp);
-        if (cosN < kNrd2StabNormalCos || dz > zTol) continue;
-        const float4 hs = gNrd2HistS.Load(tc);
-        const float b = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
-        h.wsum += b;
-        h.score += b * nrd2StabScore(cosN, dz, zExp);
-        h.d += b * hd.rgb; h.s += b * hs.rgb;
-        h.v += b * gNrd2HistV.Load(tc);
-        if (b > kNrd2StabAgeWeight) h.n = min(h.n, float2(hd.a, hs.a));
-    }
-    return h;
+    if (any(tc < lo) || any(tc >= hi)) return t;
+    t.d = gNrd2HistD.Load(int3(tc, 0));
+    if (!(t.d.a > 0.0)) return t;
+    const float4 hg = gNrd2HistG.Load(int3(tc, 0));
+    t.nrm = nrd2DecodeNormal(float4(hg.yz, 0.0, 0.0));
+    t.z = hg.x;
+    t.s = gNrd2HistS.Load(int3(tc, 0));
+    t.factor = nrd2FfxFactor(dot(n, t.nrm), t.z, zExp, gNrd2Ffx.y, gNrd2Ffx.z);
+    t.ok = true;
+    return t;
 }
 
-// View Z (cm) at a viewport-local texel, or `fallback` outside the viewport or off a surface.
-float nrd2StabZ(int2 q, float fallback) {
-    if (any(q < 0) || any(q >= int2(gNrd2Rect.zw))) return fallback;
-    const float z = gNrd2ViewZ.Load(int3(int2(gNrd2Rect.xy) + q, 0));
-    return (z > 0.0 && z < 1.0e6) ? z : fallback;
+// The history's raw 4-tap bilinear at the reprojected position, no validity (FidelityFX's SampleRadianceHistory):
+// what the colour reject compares. Texels clamp to the viewport.
+void nrd2RawHistory(int2 hb, float2 hf, out float3 d, out float3 s) {
+    const int2 lo = int2(gNrd2Rect.xy), hi = lo + int2(gNrd2Rect.zw) - 1;
+    d = 0.0; s = 0.0;
+    [unroll] for (uint i = 0u; i < 4u; ++i) {
+        const int2 o = int2(i & 1u, i >> 1);
+        const int3 tc = int3(clamp(hb + o, lo, hi), 0);
+        const float b = (o.x ? hf.x : 1.0 - hf.x) * (o.y ? hf.y : 1.0 - hf.y);
+        d += b * gNrd2HistD.Load(tc).rgb;
+        s += b * gNrd2HistS.Load(tc).rgb;
+    }
 }
 
 [numthreads(8, 8, 1)]
@@ -477,11 +503,63 @@ void CSNrd2Reproject(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
     const int2 p = int2(gNrd2Rect.xy + min(q, max(gNrd2Rect.zw, 1u) - 1u));
     const float z = gNrd2ViewZ.Load(int3(p, 0));
     const bool surf = inside && z > 0.0 && z < 1.0e6;
+    const bool rejectOn = (gNrd2Tiles.z & 128u) != 0u;   // uniform: the barriers below sit in uniform flow
+    const bool guideOn  = (gNrd2Tiles.z & 32u) != 0u;
+
+    // This frame's 9x9 Gaussian moments of D' and S' (surface pixels only), for the colour reject: a row pass
+    // over the halo, then a column pass over the row sums, one signal at a time through the same 4 KB.
+    float3 meanD = 0.0, varD = 0.0, meanS = 0.0, varS = 0.0;
+    if (rejectOn) {
+        const int2 org = int2(gid.xy) * 8 - NRD2_RP_R;
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            const uint i = gi + k * 64u;
+            const int2 qq = org + int2(i % uint(NRD2_RP_W), i / uint(NRD2_RP_W));
+            float4 d = 0.0, s = 0.0;
+            if (all(qq >= 0) && all(qq < int2(gNrd2Rect.zw))) {
+                const int3 pp = int3(int2(gNrd2Rect.xy) + qq, 0);
+                const float zz = gNrd2ViewZ.Load(pp);
+                if (zz > 0.0 && zz < 1.0e6) {
+                    d = float4(nrd2StabSane(gNrd2DRes.Load(pp).rgb), 1.0);
+                    s = float4(nrd2StabSane(gNrd2SRes.Load(pp).rgb), 1.0);
+                }
+            }
+            gsRpD[i] = d; gsRpS[i] = s;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        [unroll] for (uint sg = 0u; sg < 2u; ++sg) {
+            [unroll] for (uint h = 0u; h < 2u; ++h) {   // 16 rows x 8 columns = 128 items, 9 taps each
+                const uint item = gi + h * 64u;
+                const uint row = item >> 3, col = item & 7u;
+                float4 acc = 0.0, acc2 = 0.0;
+                [unroll] for (uint t = 0u; t < 9u; ++t) {
+                    const float4 v = nrd2RpHalo(sg, row * uint(NRD2_RP_W) + col + t);
+                    const float w = nrd2MomentWeight(int(t) - NRD2_RP_R) * v.a;
+                    acc  += float4(w * v.rgb, w);
+                    acc2 += float4(w * v.rgb * v.rgb, 0.0);
+                }
+                gsPool[item] = acc;
+                gsPool[128u + item] = acc2;
+            }
+            GroupMemoryBarrierWithGroupSync();
+            float4 sum = 0.0;
+            float3 sum2 = 0.0;
+            [unroll] for (uint r = 0u; r < 9u; ++r) {
+                const float wr = nrd2MomentWeight(int(r) - NRD2_RP_R);
+                const uint item = (gtid.y + r) * 8u + gtid.x;
+                sum  += wr * gsPool[item];
+                sum2 += wr * gsPool[128u + item].rgb;
+            }
+            const float3 mean = sum.w > 1.0e-6 ? sum.xyz / sum.w : 0.0;
+            const float3 vr = sum.w > 1.0e-6 ? abs(sum2 / sum.w - mean * mean) : 0.0;
+            if (sg == 0u) { meanD = mean; varD = vr; } else { meanS = mean; varS = vr; }
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
 
     float3 curD = 0.0, curS = 0.0, hD = 0.0, hS = 0.0;
     float2 vPrev = 1.0;
     float  nD = 1.0, nS = 1.0;
-    bool   ok = false;
+    bool   okD = false, okS = false;
     if (surf) {
         curD = nrd2StabSane(gNrd2DRes.Load(int3(p, 0)).rgb);
         curS = nrd2StabSane(gNrd2SRes.Load(int3(p, 0)).rgb);
@@ -491,89 +569,188 @@ void CSNrd2Reproject(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
             const float2 mv = gNrd2Vel.Load(int3(p, 0));
             const float nMaxD = nrd2StabMaxFrames(length(mv), gNrd2Stab.x, gNrd2Stab.y);
             const float nMaxS = nrd2StabSpecMaxFrames(nMaxD, nr.z);
-            // Where this surface point was last frame: the velocity (exact for rigid motion; no jitter on these
-            // frames), and the view depth it should have there (camera motion only, so a mover fails the depth test).
-            const float zm = z * 0.01;
+            // The view depth (m) this surface point should have last frame: camera motion only, so a mover fails.
             const float2 ndc = float2((float(q.x) + 0.5) / float(gNrd2Rect.z) * 2.0 - 1.0,
                                       1.0 - (float(q.y) + 0.5) / float(gNrd2Rect.w) * 2.0);
             const float3 off = z * (gNrd2View[2].xyz + ndc.x * gNrd2View[0].w * gNrd2View[0].xyz +
                                     ndc.y * gNrd2View[1].w * gNrd2View[1].xyz) + gNrd2CamDelta.xyz;
             const float zExp = (off.x * gNrd2PrevVP[0] + off.y * gNrd2PrevVP[1] + off.z * gNrd2PrevVP[2] + gNrd2PrevVP[3]).w * 0.01;
-            // Depth slope, per axis the smaller one-sided difference so a silhouette does not widen the test.
-            const int2 qi = int2(q);
-            float slope = 0.0;
-            [unroll] for (uint a = 0u; a < 2u; ++a) {
-                const int2 st = a == 0u ? int2(1, 0) : int2(0, 1);
-                const float zl = nrd2StabZ(qi - st, -1.0), zr = nrd2StabZ(qi + st, -1.0);
-                const float dm = min(zl > 0.0 ? abs(zl - z) : 1.0e30, zr > 0.0 ? abs(zr - z) : 1.0e30);
-                slope = max(slope, dm < 1.0e30 ? dm * 0.01 : 0.0);
-            }
-            const float zTol = zExp > 0.0 ? kNrd2StabDepthRel * zExp + kNrd2StabDepthAbs + slope : -1.0;
 
-            if (nMaxD > 0.0) {
+            if (nMaxD > 0.0 && zExp > 0.0) {
+                const float thr = gNrd2Ffx.x;
                 const float2 hp = float2(p) - mv;   // p + 0.5 - mv, as a texel corner
                 const int2 hb = int2(floor(hp));
                 const float2 hf = hp - float2(hb);
-                Nrd2HistSet h = nrd2GatherHistory(hb, hf, n, zExp, zTol);
-                if (h.wsum < kNrd2StabMinWeight) {
-                    // Disocclusion fallback: the best-matching of the 3x3 neighbouring sets, each already
-                    // dropping the taps that do not match.
-                    float best = 0.0;
+                const int2 tn = hb + int2(hf >= 0.5);   // nearest texel
+
+                // (1) the nearest texel's factor, (2) the colour reject, (3) the 3x3 search when it falls short.
+                const Nrd2Tap t0 = nrd2LoadTap(tn, n, zExp);
+                float f = t0.ok ? t0.factor : 0.0;
+                int2 best = tn;
+                bool rejD = false, rejS = false;
+                if (rejectOn) {
+                    float3 rawD, rawS;
+                    nrd2RawHistory(hb, hf, rawD, rawS);
+                    rejD = nrd2FfxReject(rawD, meanD, varD, gNrd2Ffx.w);
+                    rejS = nrd2FfxReject(rawS, meanS, varS, gNrd2Ffx.w);
+                }
+                if (f < thr) {
                     [loop] for (uint k = 0u; k < 9u; ++k) {
                         if (k == 4u) continue;
-                        const Nrd2HistSet c = nrd2GatherHistory(hb + int2(int(k % 3u) - 1, int(k / 3u) - 1), hf, n, zExp, zTol);
-                        if (c.wsum >= kNrd2StabMinWeight && c.score > best) { best = c.score; h = c; }
+                        const int2 tc = tn + int2(int(k % 3u) - 1, int(k / 3u) - 1);
+                        const Nrd2Tap t = nrd2LoadTap(tc, n, zExp);
+                        if (t.ok && t.factor > f) { f = t.factor; best = tc; }
                     }
                 }
-                ok = h.wsum >= kNrd2StabMinWeight;
-                if (ok) {
-                    hD = h.d / h.wsum; hS = h.s / h.wsum; vPrev = h.v / h.wsum;
-                    nD = nrd2StabSamples(h.n.x, nMaxD);
-                    nS = nrd2StabSamples(h.n.y, nMaxS);
+
+                // (4) the fetch around the best texel: the 2x2 core, bilinear weights, validity.
+                const int2 base = hb + (best - tn);
+                Nrd2Tap core[4];
+                float bw[4], wv[4];
+                bool  vld[4];
+                float wsum = 0.0;
+                [unroll] for (uint i = 0u; i < 4u; ++i) {
+                    const int2 o = int2(i & 1u, i >> 1);
+                    core[i] = nrd2LoadTap(base + o, n, zExp);
+                    vld[i] = core[i].ok && core[i].factor > 0.5 * thr;
+                    bw[i] = (o.x ? hf.x : 1.0 - hf.x) * (o.y ? hf.y : 1.0 - hf.y);
+                    wv[i] = vld[i] ? bw[i] : 0.0;
+                    wsum += wv[i];
+                }
+                float3 bilD = 0.0, bilS = 0.0;   // validity-weighted bilinear
+                float2 nHist = 1.0e9, nAny = 1.0e9;
+                float2 vAcc = 0.0;
+                [unroll] for (uint i2 = 0u; i2 < 4u; ++i2) {
+                    if (!vld[i2]) continue;
+                    bilD += wv[i2] * core[i2].d.rgb;
+                    bilS += wv[i2] * core[i2].s.rgb;
+                    vAcc += wv[i2] * gNrd2HistV.Load(int3(base + int2(i2 & 1u, i2 >> 1), 0));
+                    const float2 cnt = float2(core[i2].d.a, core[i2].s.a);
+                    nAny = min(nAny, cnt);
+                    if (bw[i2] > kNrd2StabAgeWeight) nHist = min(nHist, cnt);
+                }
+                if (nHist.x > 1.0e8) nHist = nAny;
+                const float invW = 1.0 / max(wsum, 1.0e-3);
+                float3 histD = 0.0, histS = 0.0;
+
+                if (f < thr) {
+                    // 2x2 rebuild: the valid texels renormalised, their normals and depths blended unnormalised
+                    // (as FidelityFX), and the factor taken again.
+                    float3 nrm = 0.0;
+                    float  zH = 0.0;
+                    [unroll] for (uint i3 = 0u; i3 < 4u; ++i3) {
+                        nrm += wv[i3] * invW * core[i3].nrm;
+                        zH  += wv[i3] * invW * core[i3].z;
+                    }
+                    f = wsum > 0.0 ? nrd2FfxFactor(dot(n, nrm), zH, zExp, gNrd2Ffx.y, gNrd2Ffx.z) : 0.0;
+                    if (f < thr) f = 0.0;
+                    histD = bilD * invW;
+                    histS = bilS * invW;
+                } else if (vld[0] && vld[1] && vld[2] && vld[3] && gNrd2Hist.x > 0.0) {
+                    // 12-tap Catmull-Rom: the 4x4 minus its corners. Weights renormalised over the valid taps
+                    // (flat history stays flat), then bounded by the taps' min/max (no ringing past them) and
+                    // by zero; the sharpness setting mixes it with the bilinear.
+                    float wxs[4], wys[4];
+                    nrd2CatmullRom(hf.x, wxs);
+                    nrd2CatmullRom(hf.y, wys);
+                    float3 crD = 0.0, crS = 0.0;
+                    float3 loD = 1.0e30, hiD = -1.0e30, loS = 1.0e30, hiS = -1.0e30;
+                    float  crW = 0.0;
+                    [unroll] for (uint j = 0u; j < 4u; ++j) {
+                        [unroll] for (uint i4 = 0u; i4 < 4u; ++i4) {
+                            if ((i4 == 0u || i4 == 3u) && (j == 0u || j == 3u)) continue;
+                            Nrd2Tap t;
+                            bool v;
+                            if ((i4 == 1u || i4 == 2u) && (j == 1u || j == 2u)) {
+                                t = core[(i4 - 1u) + 2u * (j - 1u)];
+                                v = vld[(i4 - 1u) + 2u * (j - 1u)];
+                            } else {
+                                t = nrd2LoadTap(base + int2(int(i4) - 1, int(j) - 1), n, zExp);
+                                v = t.ok && t.factor > 0.5 * thr;
+                            }
+                            if (!v) continue;
+                            const float w = wxs[i4] * wys[j];
+                            crD += w * t.d.rgb; crS += w * t.s.rgb; crW += w;
+                            loD = min(loD, t.d.rgb); hiD = max(hiD, t.d.rgb);
+                            loS = min(loS, t.s.rgb); hiS = max(hiS, t.s.rgb);
+                        }
+                    }
+                    histD = bilD * invW;
+                    histS = bilS * invW;
+                    if (crW > 1.0e-3) {
+                        crD = max(clamp(crD / crW, loD, hiD), 0.0);
+                        crS = max(clamp(crS / crW, loS, hiS), 0.0);
+                        histD = lerp(histD, crD, gNrd2Hist.x);
+                        histS = lerp(histS, crS, gNrd2Hist.x);
+                    }
+                } else {
+                    histD = bilD * invW;
+                    histS = bilS * invW;
+                }
+
+                if (f >= thr) {
+                    okD = !rejD; okS = !rejS;
+                    hD = histD; hS = histS;
+                    vPrev = vAcc * invW;
+                    // FidelityFX: n = n_hist * factor + 1, per signal.
+                    nD = okD ? nrd2StabSamples(nHist.x * f, nMaxD) : 1.0;
+                    nS = okS ? nrd2StabSamples(nHist.y * f, nMaxS) : 1.0;
                 }
             }
         }
     }
 
     // Tile scale: the plain mean luminance of the tile's surface pixels (fixed-order tree sum).
-    const float3 rD = ok ? lerp(curD, hD, kNrd2AnchorMix) : curD;
-    const float3 rS = ok ? lerp(curS, hS, kNrd2AnchorMix) : curS;
+    const float3 rD = okD ? lerp(curD, hD, kNrd2AnchorMix) : curD;
+    const float3 rS = okS ? lerp(curS, hS, kNrd2AnchorMix) : curS;
     const float lD = surf ? max(nrd2Lum(rD), 0.0) : 0.0, lS = surf ? max(nrd2Lum(rS), 0.0) : 0.0;
-    gsA[gi] = surf ? float4(lD, 1.0, lS, 1.0) : 0.0;
+    gsPool[NRD2_RP_A + gi] = surf ? float4(lD, 1.0, lS, 1.0) : 0.0;
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint s1 = 32u; s1 > 0u; s1 >>= 1u) {
-        if (gi < s1) gsA[gi] += gsA[gi + s1];
+        if (gi < s1) gsPool[NRD2_RP_A + gi] += gsPool[NRD2_RP_A + gi + s1];
         GroupMemoryBarrierWithGroupSync();
     }
-    const float scaleD = gsA[0].x / max(gsA[0].y, 1.0) + 1.0e-6;
-    const float scaleS = gsA[0].z / max(gsA[0].w, 1.0) + 1.0e-6;
+    const float scaleD = gsPool[NRD2_RP_A].x / max(gsPool[NRD2_RP_A].y, 1.0) + 1.0e-6;
+    const float scaleS = gsPool[NRD2_RP_A].z / max(gsPool[NRD2_RP_A].w, 1.0) + 1.0e-6;
     const float wD = surf ? nrd2AnchorWeight(lD, scaleD) : 0.0, wS = surf ? nrd2AnchorWeight(lS, scaleS) : 0.0;
-    gsB[gi] = float4(wD * rD, wD);
-    gsC[gi] = float4(wS * rS, wS);
+    gsPool[NRD2_RP_B + gi] = float4(wD * rD, wD);
+    gsPool[NRD2_RP_C + gi] = float4(wS * rS, wS);
+    if (guideOn) {   // the guide's confidence-weighted tile mean, on the D anchor's weights
+        float4 gv = 0.0;
+        if (surf) gv = gNrd2Guide.Load(int3(p, 0));
+        const float wG = wD * nrd2PassGuideConf(gv.a);
+        gsPool[NRD2_RP_G + gi] = float4(wG * nrd2StabSane(gv.rgb), wG);
+    }
     GroupMemoryBarrierWithGroupSync();
     [unroll] for (uint s2 = 32u; s2 > 0u; s2 >>= 1u) {
-        if (gi < s2) { gsB[gi] += gsB[gi + s2]; gsC[gi] += gsC[gi + s2]; }
+        if (gi < s2) {
+            gsPool[NRD2_RP_B + gi] += gsPool[NRD2_RP_B + gi + s2];
+            gsPool[NRD2_RP_C + gi] += gsPool[NRD2_RP_C + gi + s2];
+            if (guideOn) gsPool[NRD2_RP_G + gi] += gsPool[NRD2_RP_G + gi + s2];
+        }
         GroupMemoryBarrierWithGroupSync();
     }
-    const float4 aD = gsB[0], aS = gsC[0];
+    const float4 aD = gsPool[NRD2_RP_B], aS = gsPool[NRD2_RP_C];
     if (gi == 0u) {
         gNrd2AnchD[gid.xy] = aD.w > 0.0 ? float4(aD.rgb / aD.w, 1.0) : 0.0;
         gNrd2AnchS[gid.xy] = aS.w > 0.0 ? float4(aS.rgb / aS.w, 1.0) : 0.0;
+        if (guideOn) {
+            const float4 aG = gsPool[NRD2_RP_G];
+            gNrd2AnchG[gid.xy] = aG.w > 1.0e-6 ? float4(aG.rgb / aG.w, 1.0) : 0.0;
+        }
     }
     if (!inside) return;   // after the last barrier
     if (!surf) { gNrd2RpD[p] = 0.0; gNrd2RpS[p] = 0.0; gNrd2RpV[p] = 0.0; return; }
 
     // Noise estimate: this frame's luminance against the reprojected history's, 1/n of the old estimate mixed in.
-    float2 var = 1.0;
-    if (ok) {
-        const float sD = max(aD.w > 0.0 ? nrd2Lum(aD.rgb / aD.w) : 0.0, 0.0) + 1.0e-6;
-        const float sS = max(aS.w > 0.0 ? nrd2Lum(aS.rgb / aS.w) : 0.0, 0.0) + 1.0e-6;
-        var = float2(lerp(nrd2StabRelVar(nrd2Lum(curD), nrd2Lum(hD), sD), vPrev.x, 1.0 / nD),
-                     lerp(nrd2StabRelVar(nrd2Lum(curS), nrd2Lum(hS), sS), vPrev.y, 1.0 / nS));
-    }
-    gNrd2RpD[p] = float4(ok ? hD : 0.0, nD);
-    gNrd2RpS[p] = float4(ok ? hS : 0.0, nS);
-    gNrd2RpV[p] = var;
+    float2 nv = 1.0;
+    const float sD = max(aD.w > 0.0 ? nrd2Lum(aD.rgb / aD.w) : 0.0, 0.0) + 1.0e-6;
+    const float sS = max(aS.w > 0.0 ? nrd2Lum(aS.rgb / aS.w) : 0.0, 0.0) + 1.0e-6;
+    if (okD) nv.x = lerp(nrd2StabRelVar(nrd2Lum(curD), nrd2Lum(hD), sD), vPrev.x, 1.0 / nD);
+    if (okS) nv.y = lerp(nrd2StabRelVar(nrd2Lum(curS), nrd2Lum(hS), sS), vPrev.y, 1.0 / nS);
+    gNrd2RpD[p] = float4(okD ? hD : 0.0, nD);
+    gNrd2RpS[p] = float4(okS ? hS : 0.0, nS);
+    gNrd2RpV[p] = nv;
 }
 
 #elif AVER_NRD2_PASS == 6   // ---- temporal 2/3: prefilter ----
@@ -683,10 +860,12 @@ void CSNrd2Prefilter(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThre
 
 #elif AVER_NRD2_PASS == 7   // ---- temporal 3/3: resolve ----
 
-// Per pixel: the prefiltered value pulled toward the tile anchor by 1/(n + 1), clipped to this frame's 5x5
-// min/max united with the anchor; the reprojected history clipped to the same box and blended in with weight
-// 1 - 1/n (nrd2TemporalBlend). Never a mean or variance in a clip (NEURAA_NRD.md section 7, rules 1 and 7);
-// the firefly clamp runs on the current value first. Writes the new history and the remodulated lit target.
+// Per pixel: the prefiltered value pulled toward the tile anchor by 1/(n + 1), the reprojected history clipped
+// and blended in with weight 1 - 1/n. Flag 64 (voxi.nrd2FfxClip): FidelityFX's clip around the 9x9 Gaussian
+// mean +- sigma (nrd2TemporalBlendFfx, moments weighted by validity); else this frame's 5x5 min/max box united
+// with the anchor, never a mean or variance (nrd2TemporalBlend; NEURAA_NRD.md section 7, rules 1 and 7). D's anchor
+// may be guided by the NeuRaC cache (flag 32, nrd2GuidedAnchor). The firefly clamp runs on the current value
+// first. Writes the new history and the remodulated lit target.
 Texture2D<float4> gNrd2PrefD  : register(t0);   // a = noise estimate, -1 = no surface
 Texture2D<float4> gNrd2PrefS  : register(t1);
 Texture2D<float>  gNrd2ViewZ  : register(t2);
@@ -697,38 +876,77 @@ Texture2D<float4> gNrd2RpD    : register(t6);   // reprojected history rgb, a = 
 Texture2D<float4> gNrd2RpS    : register(t7);
 Texture2D<float4> gNrd2AnchD  : register(t8);
 Texture2D<float4> gNrd2AnchS  : register(t9);
+Texture2D<float4> gNrd2Guide  : register(t10);  // NeuRaC guide: rgb cached irradiance / pi, a confidence (flag 32)
+Texture2D<float4> gNrd2AnchG  : register(t11);  // the guide's per-tile mean (pass 5)
 RWTexture2D<float4> gNrd2Lit   : register(u0);
 RWTexture2D<float4> gNrd2OutD  : register(u1);  // new history: D'' rgb, a = n
 RWTexture2D<float4> gNrd2OutS  : register(u2);
 RWTexture2D<float4> gNrd2OutG  : register(u3);  // x view Z (m), yz the G-buffer's packed normal xy
 RWTexture2D<float2> gNrd2OutV  : register(u4);  // noise estimate
 
-#define NRD2_TP_R 2   // box radius: 5x5, inside the prefilter's footprint
+#define NRD2_TP_R 4   // halo radius: the 9x9 moments; the min/max box (radius 2) and firefly clamp sit inside
 #define NRD2_TP_W (8 + 2 * NRD2_TP_R)
-#if NRD2_TP_W * NRD2_TP_W * 32 > 16384
+#if NRD2_TP_W * NRD2_TP_W * 32 + 4096 > 16384
 #error nrd2 temporal groupshared exceeds 16 KB
 #endif
 groupshared float4 gsTpD[NRD2_TP_W * NRD2_TP_W];   // prefiltered D' rgb, a = noise estimate (< 0 = no surface)
 groupshared float4 gsTpS[NRD2_TP_W * NRD2_TP_W];
+// The separable moments' row sums for one signal: H at [0, 128), H2 at [128, 256) (4 KB, reused for S).
+groupshared float4 gsTpH[256];
+
+float4 nrd2TpHalo(uint signal, uint i) { return signal == 0u ? gsTpD[i] : gsTpS[i]; }
 
 [numthreads(8, 8, 1)]
 void CSNrd2Temporal(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID) {
     const int2 org = int2(gid.xy) * 8 - NRD2_TP_R;   // halo origin, viewport-local
     const uint gi = gtid.y * 8u + gtid.x;
-    [unroll] for (uint k = 0u; k < 3u; ++k) {
+    [unroll] for (uint k = 0u; k < 4u; ++k) {
         const uint i = gi + k * 64u;
-        if (i < uint(NRD2_TP_W * NRD2_TP_W)) {
-            const int2 qq = org + int2(i % uint(NRD2_TP_W), i / uint(NRD2_TP_W));
-            const bool ok = all(qq >= 0) && all(qq < int2(gNrd2Rect.zw));
-            const int3 pp = int3(int2(gNrd2Rect.xy) + qq, 0);
-            gsTpD[i] = ok ? gNrd2PrefD.Load(pp) : float4(0.0, 0.0, 0.0, -1.0);
-            gsTpS[i] = ok ? gNrd2PrefS.Load(pp) : float4(0.0, 0.0, 0.0, -1.0);
-        }
+        const int2 qq = org + int2(i % uint(NRD2_TP_W), i / uint(NRD2_TP_W));
+        const bool ok = all(qq >= 0) && all(qq < int2(gNrd2Rect.zw));
+        const int3 pp = int3(int2(gNrd2Rect.xy) + qq, 0);
+        gsTpD[i] = ok ? gNrd2PrefD.Load(pp) : float4(0.0, 0.0, 0.0, -1.0);
+        gsTpS[i] = ok ? gNrd2PrefS.Load(pp) : float4(0.0, 0.0, 0.0, -1.0);
     }
     GroupMemoryBarrierWithGroupSync();
 
+    // The 9x9 Gaussian moments of the prefiltered D' and S' over surface pixels (validity-weighted): a row pass
+    // over the halo, then a column pass over the row sums.
+    const bool ffx = (gNrd2Tiles.z & 64u) != 0u;   // uniform: the barriers sit in uniform flow
+    float3 meanD = 0.0, varD = 0.0, meanS = 0.0, varS = 0.0;
+    if (ffx) {
+        [unroll] for (uint sg = 0u; sg < 2u; ++sg) {
+            [unroll] for (uint h = 0u; h < 2u; ++h) {   // 16 rows x 8 columns = 128 items, 9 taps each
+                const uint item = gi + h * 64u;
+                const uint row = item >> 3, col = item & 7u;
+                float4 acc = 0.0, acc2 = 0.0;
+                [unroll] for (uint t = 0u; t < 9u; ++t) {
+                    const float4 v = nrd2TpHalo(sg, row * uint(NRD2_TP_W) + col + t);
+                    const float w = v.a >= 0.0 ? nrd2MomentWeight(int(t) - NRD2_TP_R) : 0.0;
+                    acc  += float4(w * v.rgb, w);
+                    acc2 += float4(w * v.rgb * v.rgb, 0.0);
+                }
+                gsTpH[item] = acc;
+                gsTpH[128u + item] = acc2;
+            }
+            GroupMemoryBarrierWithGroupSync();
+            float4 sum = 0.0;
+            float3 sum2 = 0.0;
+            [unroll] for (uint r = 0u; r < 9u; ++r) {
+                const float wr = nrd2MomentWeight(int(r) - NRD2_TP_R);
+                const uint item = (gtid.y + r) * 8u + gtid.x;
+                sum  += wr * gsTpH[item];
+                sum2 += wr * gsTpH[128u + item].rgb;
+            }
+            const float3 mean = sum.w > 1.0e-6 ? sum.xyz / sum.w : 0.0;
+            const float3 vr = sum.w > 1.0e-6 ? abs(sum2 / sum.w - mean * mean) : 0.0;
+            if (sg == 0u) { meanD = mean; varD = vr; } else { meanS = mean; varS = vr; }
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+
     const uint2 q = dtid.xy;
-    if (any(q >= gNrd2Rect.zw)) return;   // after the barrier
+    if (any(q >= gNrd2Rect.zw)) return;   // after the last barrier
     const int2 p = int2(gNrd2Rect.xy + q);
     const float z = gNrd2ViewZ.Load(int3(p, 0));
     if (!(z > 0.0 && z < 1.0e6)) {
@@ -736,8 +954,7 @@ void CSNrd2Temporal(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThrea
         return;
     }
 
-    // This frame's 5x5 (a sliding window, so it never steps at tile borders): the firefly clamp's neighbour
-    // maximum, then the per-channel min/max with the clamped centre.
+    // The firefly clamp's neighbour maximum over the 8 neighbours.
     const int li = int((gtid.y + uint(NRD2_TP_R)) * uint(NRD2_TP_W) + gtid.x + uint(NRD2_TP_R));
     float nmD = 0.0, nmS = 0.0, nvD = 0.0, nvS = 0.0;
     [unroll] for (uint f = 0u; f < 9u; ++f) {
@@ -748,28 +965,48 @@ void CSNrd2Temporal(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThrea
     }
     const float3 curD = nvD > 0.0 ? nrd2StabFirefly(gsTpD[li].rgb, nmD) : gsTpD[li].rgb;
     const float3 curS = nvS > 0.0 ? nrd2StabFirefly(gsTpS[li].rgb, nmS) : gsTpS[li].rgb;
+
+    // The min/max path's box: this frame's 5x5 (a sliding window, so it never steps at tile borders) with the
+    // clamped centre.
     float3 loD = curD, hiD = curD, loS = curS, hiS = curS;
-    const uint nb = 2u * NRD2_TP_R + 1u;
-    [unroll] for (uint n = 0u; n < nb * nb; ++n) {
-        if (n == (nb * nb) / 2u) continue;   // the centre is curD/curS, already clamped
-        const int ni = li + (int(n / nb) - NRD2_TP_R) * NRD2_TP_W + int(n % nb) - NRD2_TP_R;
-        if (gsTpD[ni].a >= 0.0) { loD = min(loD, gsTpD[ni].rgb); hiD = max(hiD, gsTpD[ni].rgb); }
-        if (gsTpS[ni].a >= 0.0) { loS = min(loS, gsTpS[ni].rgb); hiS = max(hiS, gsTpS[ni].rgb); }
+    if (!ffx) {
+        const uint nb = 5u;
+        [unroll] for (uint n = 0u; n < nb * nb; ++n) {
+            if (n == (nb * nb) / 2u) continue;   // the centre is curD/curS, already clamped
+            const int ni = li + (int(n / nb) - 2) * NRD2_TP_W + int(n % nb) - 2;
+            if (gsTpD[ni].a >= 0.0) { loD = min(loD, gsTpD[ni].rgb); hiD = max(hiD, gsTpD[ni].rgb); }
+            if (gsTpS[ni].a >= 0.0) { loS = min(loS, gsTpS[ni].rgb); hiS = max(hiS, gsTpS[ni].rgb); }
+        }
     }
 
     const uint2 ls = nrd2LevelSize(3u);
     const float4 aD4 = nrd2SampleAnchor(gNrd2AnchD, q, ls), aS4 = nrd2SampleAnchor(gNrd2AnchS, q, ls);
-    const float3 aD = aD4.a > 0.0 ? aD4.rgb : curD, aS = aS4.a > 0.0 ? aS4.rgb : curS;
+    const float3 aD0 = aD4.a > 0.0 ? aD4.rgb : curD, aS = aS4.a > 0.0 ? aS4.rgb : curS;
+    float3 aD = aD0;
+    if ((gNrd2Tiles.z & 32u) != 0u) {   // fill new pixels from the cache: the guide's shape on the tile's level
+        const float4 gv = gNrd2Guide.Load(int3(p, 0));
+        const float4 gb = nrd2SampleAnchor(gNrd2AnchG, q, ls);
+        aD = nrd2GuidedAnchor(aD0, nrd2StabSane(gv.rgb), nrd2PassGuideConf(gv.a), gb.rgb, gb.a, gNrd2Hist.z);
+    }
     const float4 rpD = gNrd2RpD.Load(int3(p, 0)), rpS = gNrd2RpS.Load(int3(p, 0));
     const float nD = max(rpD.a, 1.0), nS = max(rpS.a, 1.0);
 
     float3 curD2, histD2, curS2, histS2;
-    const float3 outD = nrd2StabSane(nrd2TemporalBlend(curD, aD, loD, hiD, rpD.rgb, nD, curD2, histD2));
-    const float3 outS = nrd2StabSane(nrd2TemporalBlend(curS, aS, loS, hiS, rpS.rgb, nS, curS2, histS2));
+    float3 blendD, blendS;
+    if (ffx) {
+        blendD = nrd2TemporalBlendFfx(curD, aD, meanD, varD, rpD.rgb, nD, gNrd2Hist.y, curD2, histD2);
+        blendS = nrd2TemporalBlendFfx(curS, aS, meanS, varS, rpS.rgb, nS, gNrd2Hist.y, curS2, histS2);
+    } else {
+        blendD = nrd2TemporalBlend(curD, aD, loD, hiD, rpD.rgb, nD, curD2, histD2);
+        blendS = nrd2TemporalBlend(curS, aS, loS, hiS, rpS.rgb, nS, curS2, histS2);
+    }
+    const float3 outD = nrd2StabSane(blendD);
+    const float3 outS = nrd2StabSane(blendS);
 
     // The noise estimate to carry: the prefiltered one, mixed with this frame's change against the history.
+    // Its scale is the tile's own level, never the guided one.
     float2 var = 1.0;
-    if (nD > 1.0) var.x = lerp(nrd2StabRelVar(nrd2Lum(curD2), nrd2Lum(histD2), max(nrd2Lum(aD), 0.0) + 1.0e-6),
+    if (nD > 1.0) var.x = lerp(nrd2StabRelVar(nrd2Lum(curD2), nrd2Lum(histD2), max(nrd2Lum(aD0), 0.0) + 1.0e-6),
                                max(gsTpD[li].a, 0.0), nrd2StabBlend(nD));
     if (nS > 1.0) var.y = lerp(nrd2StabRelVar(nrd2Lum(curS2), nrd2Lum(histS2), max(nrd2Lum(aS), 0.0) + 1.0e-6),
                                max(gsTpS[li].a, 0.0), nrd2StabBlend(nS));

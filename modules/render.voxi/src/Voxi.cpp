@@ -142,6 +142,13 @@ void Renderer::setSettings(const Settings& s) {
     n.denoiserHistoryClipWeight = std::clamp(n.denoiserHistoryClipWeight, 0.01f, 4.0f);
     n.denoiserSunMovingSamples  = std::clamp(n.denoiserSunMovingSamples, 1u, 255u);
     n.denoiserKind = n.denoiserKind == 2u ? 2u : 1u;
+    // A non-finite value falls back to the default; std::clamp would pass a NaN through.
+    auto fin = [](f32 v, f32 lo, f32 hi, f32 def) { return std::isfinite(v) ? std::clamp(v, lo, hi) : def; };
+    n.nrd2FfxClipWeight       = fin(n.nrd2FfxClipWeight, 0.1f, 8.0f, 4.0f);
+    n.nrd2FfxRejectWeight     = fin(n.nrd2FfxRejectWeight, 0.1f, 16.0f, 1.5f);
+    n.nrd2FfxDepthWeight      = fin(n.nrd2FfxDepthWeight, 0.0f, 64.0f, 1.0f);
+    n.nrd2HistSharp           = fin(n.nrd2HistSharp, 0.0f, 1.0f, 1.0f);
+    n.nrd2NeuracGuideStrength = fin(n.nrd2NeuracGuideStrength, 0.0f, 1.0f, 1.0f);
     // The shader clamps too (nrd2SanitiseParams); a non-finite value falls back to the default.
     for (u32 i = 0; i < 12; ++i) {
         const float v = n.nrd2Params[i];

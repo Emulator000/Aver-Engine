@@ -171,6 +171,16 @@ int main() {
         // kGiVisPhase[3] == uint2(0, 1) (voxi_restir.hlsli), so pixel (0,1) is the traced pixel at frame 3.
         check(tracedPixel(0, 1, prevFrame), "tracedPixel(0, 1, (0u - 1u) & 3u) is true, matching "
                                              "voxi_restir.hlsli's kGiVisPhase[3] == uint2(0, 1)");
+        // The table order keeps (x ^ y) & 1 == frame & 1, so a traced pixel always lies in the class the
+        // checkerboard GI trace covers on that frame (the F2 trainer relies on it).
+        int parityFailures = 0;
+        for (u32 f = 0; f < 8; ++f)
+            for (const auto& p : block)
+                if (tracedPixel(p.x, p.y, f) && (((p.x ^ p.y) & 1u) != (f & 1u))) ++parityFailures;
+        check(parityFailures == 0, "every traced pixel satisfies (x ^ y) & 1 == frame & 1 "
+                                    "(" + std::to_string(parityFailures) + " failure(s))");
+        check(tracedPixel(0, 0, 0) && tracedPixel(1, 0, 1) && tracedPixel(1, 1, 2) && tracedPixel(0, 1, 3),
+              "the schedule cycles (0,0), (1,0), (1,1), (0,1)");
         int wrongWriterAtPrevFrame = 0;
         for (const auto& p : block)
             if (!(p.x == 0 && p.y == 1) && tracedPixel(p.x, p.y, prevFrame)) ++wrongWriterAtPrevFrame;
@@ -393,7 +403,7 @@ int main() {
         check(has(t, "register(u10)"), "gGiVisHistOut is bound at u10");
         check(has(t, "gGiRestirParams.w <= 0.5 && ((uint)gAmbientParams.w & 64u)"),
               "the path-view block is gated behind the poison view AND voxi.giVisPathView (bit 64)");
-        check(has(t, "static const uint2 kGiVisPhase[4] = { uint2(0, 0), uint2(1, 1), uint2(1, 0), "
+        check(has(t, "static const uint2 kGiVisPhase[4] = { uint2(0, 0), uint2(1, 0), uint2(1, 1), "
                      "uint2(0, 1) };"),
               "kGiVisPhase's literal matches givis::tracedPixel's own mirrored table exactly");
 

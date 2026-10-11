@@ -1,5 +1,5 @@
 // NeuRaCLayout: constants, layouts, and packing rules for the Voxi radiance cache (docs/rendering/NEURAC.md).
-// Must stay synchronized: NeuRaCLayout.cpp, voxi_neurac*.hlsli, NeuRaCTest.
+// Must stay synchronized: NeuRaC.cpp, voxi_neurac*.hlsli, NeuRaCTest.
 #pragma once
 
 #include "aver/core/Types.hpp"
@@ -31,13 +31,21 @@ inline constexpr f64 kMinCos     = 0.1;         // pdf floor  -> AVER_RC_MIN_COS
 inline constexpr u32 kNEffMax    = 15;          // 4-bit field -> AVER_RC_NEFF_MAX
 inline constexpr u32 kAgeMax     = 15;          // 4-bit field -> AVER_RC_AGE_MAX
 inline constexpr f64 kNormalK    = 2.0;         // corner weight -> AVER_RC_NORMAL_K
+inline constexpr f64 kMinAcceptRate = 1.0 / 32.0;  // floor on the load-adaptive accept rate -> AVER_RC_MIN_ACCEPT_RATE
+inline constexpr u32 kTrustMax   = 63;          // 6-bit trust, 63 = 1.0 -> AVER_RC_TRUST_MAX
+inline constexpr u32 kLenMax     = 63;          // 6-bit planarity       -> AVER_RC_LEN_MAX
+inline constexpr u32 kDefaultCoarseCap1 = 16;   // per-cell cap, cascade 1 (cascade 0 uses sampleCap)
+inline constexpr u32 kDefaultCoarseCap2 = 8;    // per-cell cap, cascade 2
 
 // ---------------------------------------------------------------- accumulator layout (int32 elements)
-// Counts [0, kCells), payload from kCells: 12 SH values + 3 normal sums per cell.
+// Counts [0, kCells) = accepted | prevArrivals << 16; arrivals [kCells, 2 kCells);
+// payload from kPayloadBase: 12 SH values + 3 normal sums per cell.
 inline constexpr u32 kShFloats       = 12;
 inline constexpr u32 kPayloadInts    = 15;
-inline constexpr u32 kAccumInts      = kCells + kCells * kPayloadInts;       // 12,582,912
-inline constexpr u64 kAccumBytes     = static_cast<u64>(kAccumInts) * 4ull;  // 50,331,648
+inline constexpr u32 kArrivalsBase   = kCells;                               // -> AVER_RC_CELLS
+inline constexpr u32 kPayloadBase    = 2 * kCells;                           // -> AVER_RC_PAYLOAD_BASE
+inline constexpr u32 kAccumInts      = kPayloadBase + kCells * kPayloadInts; // 17 * kCells = 13,369,344
+inline constexpr u64 kAccumBytes     = static_cast<u64>(kAccumInts) * 4ull;  // 53,477,376
 inline constexpr u32 kCellStride     = 32;
 inline constexpr u64 kCellsBytes     = static_cast<u64>(kCells) * kCellStride;   // 25,165,824
 inline constexpr u32 kInfoStride     = 80;
@@ -55,7 +63,9 @@ struct RcInfo {
     u32 ageStepFrames;    // hdr0.z   one age step per this many frames of no samples
     u32 sampleCap;        // hdr0.w   clamped to kMaxCap by the shader
     f32 alphaMin;         // hdr1.x   floor on the temporal blend factor
-    f32 reserved[3];      // hdr1.yzw, zero
+    f32 relaxAlpha;       // hdr1.y   temporary higher floor after a lighting event (0: none)
+    u32 coarseCaps;       // hdr1.z   cap1 | cap2 << 8 (HLSL reads asuint of the float); cascade 0 uses sampleCap
+    f32 netStrength;      // hdr1.w   stage-2 trust strength, 0 = stage-1 weights exactly
     struct Cascade {
         i32 originCell[3];   // window min-corner world cell
         f32 cellSizeCm;      // .w of the HLSL int4, read there with asfloat() / written as asint(cellSizeCm)
@@ -81,6 +91,8 @@ static_assert(kWorstShSum * 2.0 < 2147483647.0, "SH sum needs a 2x margin under 
 static_assert(kWorstNormalSum * 2.0 < 2147483647.0, "normal sum needs a 2x margin under int32 max");
 static_assert(kCells % kResolveGroupSize == 0, "one resolve thread per cell, no remainder group");
 static_assert(kNEffMax < 16 && kAgeMax < 16, "n_eff and age are 4-bit fields");
+static_assert(kAccumInts == 17 * kCells, "counts + arrivals + 15 payload ints per cell");
+static_assert(kMaxCap < 256, "coarse caps travel in 8-bit fields");
 
 // ---------------------------------------------------------------- addressing (mirrors rcTagPack / rcCellIndex)
 // Arithmetic shift on negative int is defined since C++20, same as HLSL, so negative world cells tag/index consistently.
@@ -176,13 +188,15 @@ inline void unpackSh(const u32 w[6], f32 sh[kShFloats]) {
 }
 
 // ---------------------------------------------------------------- normal word
-// octU (11 bits) | octV (11) << 11 | len (10) << 22: octahedral direction and mean-normal length (1 = flat, ~0 = noise).
-inline u32 packNormal(const f32 v[3]) {
+// octU (10 bits) | octV (10) << 10 | len (6) << 20 | trust (6) << 26: octahedral direction, mean-normal
+// length (1 = flat, ~0 = noise; resolution 1/63) and stage-2 trust (63 = 1.0).
+inline u32 packNormal(const f32 v[3], u32 trust6 = kTrustMax) {
     const f32 len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-    f32 n[3] = {0.0f, 1.0f, 0.0f};
+    f32 n[3] = {0.0f, 0.0f, 1.0f};
     if (len > 1e-6f) { n[0] = v[0] / len; n[1] = v[1] / len; n[2] = v[2] / len; }
     const f32 l1 = std::fabs(n[0]) + std::fabs(n[1]) + std::fabs(n[2]);
-    f32 ox = n[0] / l1, oy = n[1] / l1;
+    const f32 l1c = l1 > 1e-6f ? l1 : 1e-6f;
+    f32 ox = n[0] / l1c, oy = n[1] / l1c;
     if (n[2] < 0.0f) {
         const f32 px = (1.0f - std::fabs(oy)) * (ox >= 0.0f ? 1.0f : -1.0f);
         const f32 py = (1.0f - std::fabs(ox)) * (oy >= 0.0f ? 1.0f : -1.0f);
@@ -195,12 +209,16 @@ inline u32 packNormal(const f32 v[3]) {
         return static_cast<u32>(t);
     };
     const f32 lc = len > 1.0f ? 1.0f : len;
-    return q(ox, 2047.0f) | (q(oy, 2047.0f) << 11) | (static_cast<u32>(lc * 1023.0f + 0.5f) << 22);
+    const u32 t6 = trust6 > kTrustMax ? kTrustMax : trust6;
+    return q(ox, 1023.0f) | (q(oy, 1023.0f) << 10) |
+           (static_cast<u32>(lc * static_cast<f32>(kLenMax) + 0.5f) << 20) | (t6 << 26);
 }
-inline void unpackNormal(u32 w, f32 dir[3], f32& len) {
-    const f32 ox = static_cast<f32>(w & 2047u) / 2047.0f * 2.0f - 1.0f;
-    const f32 oy = static_cast<f32>((w >> 11) & 2047u) / 2047.0f * 2.0f - 1.0f;
-    len = static_cast<f32>(w >> 22) / 1023.0f;
+inline u32 normalTrust6(u32 w) { return w >> 26; }
+inline void unpackNormal(u32 w, f32 dir[3], f32& len, f32& trust) {
+    const f32 ox = static_cast<f32>(w & 1023u) * (1.0f / 1023.0f) * 2.0f - 1.0f;
+    const f32 oy = static_cast<f32>((w >> 10) & 1023u) * (1.0f / 1023.0f) * 2.0f - 1.0f;
+    len   = static_cast<f32>((w >> 20) & 63u) * (1.0f / static_cast<f32>(kLenMax));
+    trust = static_cast<f32>(w >> 26) * (1.0f / static_cast<f32>(kTrustMax));
     f32 x = ox, y = oy, z = 1.0f - std::fabs(ox) - std::fabs(oy);
     if (z < 0.0f) {
         const f32 tx = (1.0f - std::fabs(y)) * (x >= 0.0f ? 1.0f : -1.0f);
@@ -209,6 +227,63 @@ inline void unpackNormal(u32 w, f32 dir[3], f32& len) {
     }
     const f32 l = std::sqrt(x * x + y * y + z * z);
     dir[0] = x / l; dir[1] = y / l; dir[2] = z / l;
+}
+inline void unpackNormal(u32 w, f32 dir[3], f32& len) { f32 trust; unpackNormal(w, dir, len, trust); }
+
+// ---------------------------------------------------------------- scatter and lookup (mirrors voxi_neurac_io / _lookup.hlsli)
+// Per-cell per-frame sample cap of a cascade (mirrors rcCapFor): cascade 0 from sampleCap, the coarse two from coarseCaps.
+inline u32 capForCascade(const RcInfo& info, u32 c) {
+    const u32 cap = c == 0 ? info.sampleCap : (c == 1 ? (info.coarseCaps & 255u) : ((info.coarseCaps >> 8) & 255u));
+    return cap < kMaxCap ? cap : kMaxCap;
+}
+
+// Load-adaptive accept rate from last frame's arrival count.
+inline f32 acceptRate(u32 prev, u32 cap) {
+    if (prev <= cap) return 1.0f;
+    const f32 r = static_cast<f32>(cap) / static_cast<f32>(prev), lo = static_cast<f32>(kMinAcceptRate);
+    return r > lo ? r : lo;
+}
+
+// Murmur3 finalizer over the sample's position and direction bits, top 16 bits (mirrors rcHash16).
+inline u32 hash16(const f32 hitPos[3], const f32 dir[3], u32 cascade) {
+    u32 a[3], b[3];
+    std::memcpy(a, hitPos, 12);
+    std::memcpy(b, dir, 12);
+    u32 h = 0x9E3779B9u * (cascade + 1u);
+    h = (h ^ a[0]) * 0x85EBCA6Bu;
+    h = (h ^ a[1]) * 0xC2B2AE35u;
+    h = (h ^ a[2]) * 0x85EBCA6Bu;
+    h = (h ^ b[0]) * 0xC2B2AE35u;
+    h = (h ^ b[1]) * 0x85EBCA6Bu;
+    h = (h ^ b[2]) * 0xC2B2AE35u;
+    h ^= h >> 16;  h *= 0x85EBCA6Bu;
+    h ^= h >> 13;  h *= 0xC2B2AE35u;
+    h ^= h >> 16;
+    return h >> 16;
+}
+
+// The cell a sample trains in this cascade: binned at the lookup's own cell, floor((hit + N size/2) / size).
+// Returns false when that cell is outside the interior [kMarginCells, kRes - 1 - kMarginCells] of the window.
+inline bool scatterCell(const f32 hitPos[3], const f32 N[3], u32 /*cascade*/, const i32 origin[3], f32 size,
+                        i32 outCell[3]) {
+    bool inside = true;
+    for (int a = 0; a < 3; ++a) {
+        outCell[a] = static_cast<i32>(std::floor((hitPos[a] + N[a] * (0.5f * size)) / size));
+        const i32 rel = outCell[a] - origin[a];
+        if (rel < static_cast<i32>(kMarginCells) || rel > static_cast<i32>(kRes - 1 - kMarginCells)) inside = false;
+    }
+    return inside;
+}
+
+// One corner's weight in a cascade lookup (mirrors rcLookupCascade). dotNN = dot(cellNormal, N), unsaturated;
+// trust in [0,1]. netStrength 0 gives the stage-1 weight exactly.
+inline f32 lookupCornerWeight(f32 tri, f32 dotNN, f32 len, u32 nEff, u32 age, f32 trust, f32 netStrength) {
+    const f32 nd = dotNN * static_cast<f32>(kNormalK);
+    const f32 sat = nd < 0.0f ? 0.0f : (nd > 1.0f ? 1.0f : nd);
+    const f32 ne = static_cast<f32>(nEff) * 0.25f;
+    const f32 trustF = 1.0f + (trust - 1.0f) * netStrength;   // lerp(1, trust, netStrength)
+    return tri * sat * len * (ne < 1.0f ? ne : 1.0f) *
+           (1.0f - static_cast<f32>(age) / static_cast<f32>(kAgeMax)) * trustF;
 }
 
 }  // namespace aver::voxi::neurac

@@ -789,6 +789,7 @@
         "Aver.Formats",
         "Aver.RHI",
         "Aver.Render.Denoise",
+        "Aver.Render.Neural",
         "Aver.Render.PBR"
       ],
       "consequence": "No voxel GI, ray-traced lighting or path tracing; the frame uses the plain raster path."

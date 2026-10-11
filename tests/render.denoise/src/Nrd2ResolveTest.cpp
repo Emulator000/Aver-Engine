@@ -5,10 +5,13 @@
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -412,6 +415,399 @@ void testTemporal() {
           "the clamp box is the per-channel min and max");
 }
 
+// ---- FidelityFX history handling ----
+
+using V3 = std::array<f32, 3>;
+
+std::string readText(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+// The repository root: AVER_REPO_ROOT when the target defines it, else four levels up from this file.
+std::filesystem::path repoRoot() {
+    std::vector<std::filesystem::path> cands;
+#ifdef AVER_REPO_ROOT
+    cands.emplace_back(AVER_REPO_ROOT);
+#endif
+    cands.push_back(std::filesystem::path(__FILE__).parent_path().parent_path().parent_path().parent_path());
+    for (const auto& c : cands)
+        if (std::filesystem::exists(c / "modules" / "render.denoise" / "shaders" / "nrd2_resolve.hlsli")) return c;
+    return cands.back();
+}
+
+bool identChar(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
+
+// The number after `name =` in HLSL text (a declaration may list several constants); NaN when absent.
+f64 hlslConstant(const std::string& text, const std::string& name) {
+    size_t at = 0;
+    while ((at = text.find(name, at)) != std::string::npos) {
+        const bool startOk = at == 0 || !identChar(text[at - 1]);
+        size_t p = at + name.size();
+        at = p;
+        if (!startOk || (p < text.size() && identChar(text[p]))) continue;
+        while (p < text.size() && (text[p] == ' ' || text[p] == '\t')) ++p;
+        if (p >= text.size() || text[p] != '=' || (p + 1 < text.size() && text[p + 1] == '=')) continue;
+        ++p;
+        char* end = nullptr;
+        const f64 d = std::strtod(text.c_str() + p, &end);
+        if (end != text.c_str() + p) return d;
+    }
+    return std::numeric_limits<f64>::quiet_NaN();
+}
+
+// Moments straight from the definition (double, 2D window), the oracle for the separable CPU twin.
+struct MomRef { f64 mean[3] = {}, var[3] = {}, w = 0; };
+MomRef momentsRef(const std::vector<V3>& v, const std::vector<f32>& valid) {
+    MomRef r;
+    f64 s[3] = {}, s2[3] = {};
+    for (int j = 0; j < 9; ++j)
+        for (int i = 0; i < 9; ++i) {
+            const f64 w = std::exp(-3.0 * (i - 4) * (i - 4) / 25.0) * std::exp(-3.0 * (j - 4) * (j - 4) / 25.0) * valid[j * 9 + i];
+            r.w += w;
+            for (int k = 0; k < 3; ++k) { s[k] += w * v[j * 9 + i][k]; s2[k] += w * v[j * 9 + i][k] * v[j * 9 + i][k]; }
+        }
+    for (int k = 0; k < 3; ++k) { r.mean[k] = s[k] / r.w; r.var[k] = std::fabs(s2[k] / r.w - r.mean[k] * r.mean[k]); }
+    return r;
+}
+
+void testTemporalFfx() {
+    AVER_INFO("FidelityFX history handling");
+
+    // Constants: the CPU values match the shader's literals; the Catmull-Rom polynomials match sr_taa.hlsl's.
+    {
+        const std::filesystem::path root = repoRoot();
+        const std::string hlsl = readText(root / "modules" / "render.denoise" / "shaders" / "nrd2_resolve.hlsli");
+        check(!hlsl.empty(), "nrd2_resolve.hlsli is readable");
+        struct Lit { const char* name; f32 v; };
+        const Lit lits[] = {
+            {"kNrd2FfxThreshold", kNrd2FfxThreshold}, {"kNrd2FfxNormalW", kNrd2FfxNormalW},
+            {"kNrd2FfxDepthW", kNrd2FfxDepthW},       {"kNrd2FfxRejectW", kNrd2FfxRejectW},
+            {"kNrd2FfxClipK", kNrd2FfxClipK},         {"kNrd2FfxMeanMix", kNrd2FfxMeanMix},
+            {"kNrd2FfxGaussK", kNrd2FfxGaussK},
+        };
+        for (const Lit& l : lits) {
+            const f64 v = hlslConstant(hlsl, l.name);
+            check(!std::isnan(v) && std::fabs(v - l.v) < 1e-6, std::string("nrd2_resolve.hlsli ") + l.name + " equals the CPU constant");
+        }
+        const std::string sr = readText(root / "modules" / "render.sr" / "shaders" / "sr_taa.hlsl");
+        const char* poly[] = {"f * (-0.5 + f * (1.0 - 0.5 * f))", "1.0 + f * f * (-2.5 + 1.5 * f)",
+                              "f * (0.5 + f * (2.0 - 1.5 * f))", "f * f * (-0.5 + 0.5 * f)"};
+        bool same = !hlsl.empty() && !sr.empty();
+        for (const char* p : poly) same = same && hlsl.find(p) != std::string::npos && sr.find(p) != std::string::npos;
+        check(same, "nrd2CatmullRom's four polynomials are sr_taa.hlsl's, character for character");
+    }
+
+    // Catmull-Rom weights.
+    {
+        bool sums = true, ramp = true;
+        for (u32 k = 0; k <= 64; ++k) {
+            const f32 f = static_cast<f32>(k) / 64.0f;
+            f32 w[4];
+            nrd2CatmullRom(f, w);
+            sums = sums && nearly(w[0] + w[1] + w[2] + w[3], 1.0f, 1e-6f);
+            ramp = ramp && nearly(-w[0] + w[2] + 2.0f * w[3], f, 1e-5f);   // taps at -1, 0, 1, 2 carry the ramp x
+        }
+        check(sums, "Catmull-Rom weights sum to 1 for every fraction");
+        check(ramp, "and reproduce a linear ramp exactly");
+        f32 a[4], b[4], h[4];
+        nrd2CatmullRom(0.0f, a); nrd2CatmullRom(1.0f, b); nrd2CatmullRom(0.5f, h);
+        check(a[0] == 0.0f && a[1] == 1.0f && a[2] == 0.0f && a[3] == 0.0f && b[0] == 0.0f && b[1] == 0.0f && b[2] == 1.0f && b[3] == 0.0f,
+              "f = 0 and f = 1 interpolate their own tap");
+        check(nearly(h[0], -1.0f / 16.0f) && nearly(h[1], 9.0f / 16.0f) && nearly(h[2], 9.0f / 16.0f) && nearly(h[3], -1.0f / 16.0f),
+              "f = 0.5 gives -1/16, 9/16, 9/16, -1/16");
+    }
+
+    // The 12-tap fetch.
+    {
+        auto patch = [](auto fn) {
+            std::vector<V3> p(16);
+            for (u32 j = 0; j < 4; ++j) for (u32 i = 0; i < 4; ++i) p[j * 4 + i] = fn(i, j);
+            return p;
+        };
+        auto fetch = [](const std::vector<V3>& p, u32 mask, f32 fx, f32 fy, f32 sharp) {
+            f32 t[16][3];
+            for (u32 i = 0; i < 16; ++i) for (u32 k = 0; k < 3; ++k) t[i][k] = p[i][k];
+            return nrd2HistFetch(t, mask, fx, fy, sharp);
+        };
+        auto bilinear = [](const std::vector<V3>& p, u32 mask, f32 fx, f32 fy) {
+            const u32 core[4] = {5, 6, 9, 10};
+            V3 acc{};
+            f32 sum = 0.0f;
+            for (u32 i = 0; i < 4; ++i) {
+                if (!((mask >> core[i]) & 1u)) continue;
+                const f32 b = ((i & 1u) ? fx : 1.0f - fx) * ((i >> 1) ? fy : 1.0f - fy);
+                sum += b;
+                for (u32 k = 0; k < 3; ++k) acc[k] += b * p[core[i]][k];
+            }
+            for (u32 k = 0; k < 3; ++k) acc[k] /= sum;
+            return acc;
+        };
+        const u32 all = 0xFFFFu;
+
+        // A pulse overshoots (raw 12-tap 1.14 > 1) and a dark pulse undershoots (raw < 0): the min/max of the valid taps bounds both.
+        const auto pulse = patch([](u32 i, u32) { return V3{(i == 1 || i == 2) ? 1.0f : 0.0f, 0.5f, 0.5f}; });
+        const auto dark  = patch([](u32 i, u32) { return V3{(i == 1 || i == 2) ? 0.0f : 1.0f, 0.5f, 0.5f}; });
+        const Nrd2HistFetch hi = fetch(pulse, all, 0.5f, 0.5f, 1.0f), lo = fetch(dark, all, 0.5f, 0.5f, 1.0f);
+        check(hi.ok && hi.catmull && hi.colour[0] == 1.0f && lo.ok && lo.catmull && lo.colour[0] == 0.0f,
+              "a step edge's ringing is clamped to the taps' range and never goes below 0");
+        bool bounded = true;
+        for (u32 a = 0; a <= 16; ++a) for (u32 b = 0; b <= 16; ++b) {
+            const auto step = patch([](u32 i, u32) { return V3{i < 2 ? 0.0f : 8.0f, i < 2 ? 0.0f : 8.0f, 0.0f}; });
+            const Nrd2HistFetch s = fetch(step, all, a / 16.0f, b / 16.0f, 1.0f);
+            bounded = bounded && s.colour[0] >= -1e-6f && s.colour[0] <= 8.0f + 1e-5f && s.colour[2] == 0.0f;
+        }
+        check(bounded, "a step stays within [0, 8] at every fraction");
+
+        // Constant patch: exactly the constant, even with hot corners (dropped) and an invalid hot outer tap.
+        auto flat = patch([](u32 i, u32 j) {
+            const bool corner = (i == 0 || i == 3) && (j == 0 || j == 3);
+            return V3{corner ? 1000.0f : 0.37f, 2.0f, 5.0f};
+        });
+        flat[1] = {1000.0f, 1000.0f, 1000.0f};
+        const Nrd2HistFetch fl = fetch(flat, all & ~2u, 0.3f, 0.8f, 1.0f);
+        check(fl.ok && fl.catmull && nearly(fl.colour[0], 0.37f, 1e-6f) && nearly(fl.colour[1], 2.0f, 1e-6f) && nearly(fl.colour[2], 5.0f, 1e-6f),
+              "a constant patch is preserved: corner taps are ignored, invalid taps excluded, weights renormalised");
+
+        // A linear ramp, smooth: close to the exact value (the dropped corners cost a little).
+        const auto ramp = patch([](u32 i, u32 j) { return V3{static_cast<f32>(i) + 0.5f * static_cast<f32>(j) + 10.0f, 1.0f, 1.0f}; });
+        const Nrd2HistFetch rp = fetch(ramp, all, 0.5f, 0.5f, 1.0f);
+        check(rp.catmull && nearly(rp.colour[0], 12.25f, 0.01f),
+              "a linear ramp stays close to its value at the fetch point (" + std::to_string(rp.colour[0]) + ")");
+
+        // Fallback: any invalid core tap -> the validity-weighted bilinear of the valid ones, no Catmull-Rom.
+        const auto var = patch([](u32 i, u32 j) { return V3{1.0f + static_cast<f32>(i), 2.0f * static_cast<f32>(j), 3.0f}; });
+        for (u32 bad : {5u, 6u, 9u, 10u}) {
+            const u32 mask = all & ~(1u << bad);
+            const Nrd2HistFetch f = fetch(var, mask, 0.3f, 0.6f, 1.0f);
+            const V3 want = bilinear(var, mask, 0.3f, 0.6f);
+            check(f.ok && !f.catmull && nearly(f.colour[0], want[0], 1e-5f) && nearly(f.colour[1], want[1], 1e-5f) &&
+                      nearly(f.colour[2], want[2], 1e-5f),
+                  "core tap " + std::to_string(bad) + " invalid: the validity-weighted bilinear of the other three");
+        }
+        check(!fetch(var, 0u, 0.5f, 0.5f, 1.0f).ok && !fetch(var, all & ~(1u << 5 | 1u << 6 | 1u << 9 | 1u << 10), 0.5f, 0.5f, 1.0f).ok,
+              "no valid core tap means no history (outer taps alone do not count)");
+        check(!fetch(var, 1u << 6, 0.0f, 0.0f, 1.0f).ok, "a lone valid tap with zero bilinear weight gives no history");
+
+        // Sharpness is the share of the Catmull-Rom: 0 is the bilinear, 0.5 their midpoint.
+        const Nrd2HistFetch s0 = fetch(pulse, all, 0.4f, 0.6f, 0.0f), s1 = fetch(pulse, all, 0.4f, 0.6f, 1.0f),
+                            sh = fetch(pulse, all, 0.4f, 0.6f, 0.5f);
+        const V3 bil = bilinear(pulse, all, 0.4f, 0.6f);
+        check(!s0.catmull && nearly(s0.colour[0], bil[0], 1e-6f) && s1.catmull &&
+                  nearly(sh.colour[0], 0.5f * (s0.colour[0] + s1.colour[0]), 1e-5f),
+              "sharp 0 is the bilinear fetch and sharp 0.5 halfway to the Catmull-Rom");
+        check(nearly(fetch(var, all, 0.0f, 0.0f, 1.0f).colour[0], var[5][0], 1e-5f) && nearly(fetch(var, all, 1.0f, 1.0f, 1.0f).colour[1], var[10][1], 1e-5f),
+              "on a texel centre the fetch returns that texel");
+    }
+
+    // FFX factor.
+    {
+        const f32 nW = kNrd2FfxNormalW, dW = kNrd2FfxDepthW;
+        check(nrd2FfxFactor(1.0f, 3.0f, 3.0f, nW, dW) == 1.0f, "factor 1 at cos 1 and no depth error");
+        const f32 f9 = nrd2FfxFactor(0.9f, 3.0f, 3.0f, nW, dW);
+        check(nearly(f9, std::exp(-0.14f), 1e-5f) && nearly(f9, 0.869f, 1e-3f) && f9 < kNrd2FfxThreshold,
+              "cos 0.9 gives exp(-0.14), about 0.869, below the threshold");
+        bool monoN = true, monoZ = true;
+        for (u32 k = 0; k < 20; ++k) {
+            monoN = monoN && nrd2FfxFactor(1.0f - 0.05f * (k + 1), 3.0f, 3.0f, nW, dW) < nrd2FfxFactor(1.0f - 0.05f * k, 3.0f, 3.0f, nW, dW);
+            monoZ = monoZ && nrd2FfxFactor(1.0f, 3.0f + 0.1f * (k + 1), 3.0f, nW, dW) < nrd2FfxFactor(1.0f, 3.0f + 0.1f * k, 3.0f, nW, dW);
+        }
+        check(monoN && monoZ, "monotone in the normal agreement and in the depth error");
+        check(nearly(nrd2FfxFactor(1.0f, 2.0f * 1.10536f, 2.0f, nW, dW), kNrd2FfxThreshold, 1e-3f) &&
+                  nrd2FfxFactor(1.0f, 2.0f * 1.09f, 2.0f, nW, dW) > kNrd2FfxThreshold &&
+                  nrd2FfxFactor(1.0f, 2.0f * 1.12f, 2.0f, nW, dW) < kNrd2FfxThreshold,
+              "a relative depth error of 0.105 puts the factor right at 0.9");
+        check(nearly(nrd2FfxFactor(1.0f, 2.2f, 2.0f, nW, dW), nrd2FfxFactor(1.0f, 1.8f, 2.0f, nW, dW)) &&
+                  nrd2FfxFactor(-0.5f, 2.0f, 2.0f, nW, dW) == nrd2FfxFactor(0.0f, 2.0f, 2.0f, nW, dW) &&
+                  nrd2FfxFactor(1.0f, 4.0f, 2.0f, nW, 0.0f) == 1.0f,
+              "depth error counts both ways, a back-facing cosine is clamped to 0, depthW 0 ignores depth");
+    }
+
+    // 3x3 search and the 2x2 rebuild.
+    {
+        const f32 a[9] = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.95f, 0.8f};
+        const f32 tie[9] = {0.1f, 0.6f, 0.1f, 0.6f, 0.6f, 0.6f, 0.1f, 0.6f, 0.1f};
+        const f32 tieNb[9] = {0.1f, 0.7f, 0.1f, 0.7f, 0.6f, 0.7f, 0.1f, 0.7f, 0.1f};
+        const f32 zero[9] = {};
+        check(nrd2FfxSearch(a) == 7 && nrd2FfxSearch(tie) == 4 && nrd2FfxSearch(tieNb) == 1 && nrd2FfxSearch(zero) == 4,
+              "search picks the highest factor; the centre wins ties; equal neighbours resolve to the first");
+
+        Nrd2HistTap t[4];
+        for (u32 i = 0; i < 4; ++i) {
+            t[i].ok = true; t[i].factor = 1.0f; t[i].nrm[2] = 1.0f; t[i].z = 2.0f;
+            t[i].colour[0] = static_cast<f32>(i + 1); t[i].colour[1] = 10.0f; t[i].colour[2] = 0.0f;
+        }
+        const f32 n[3] = {0.0f, 0.0f, 1.0f};
+        const f32 thr = kNrd2FfxThreshold;
+        Nrd2Rebuild r = nrd2FfxRebuild(t, 0.5f, 0.5f, n, 2.0f, kNrd2FfxNormalW, kNrd2FfxDepthW, thr);
+        check(nearly(r.factor, 1.0f) && nearly(r.w[0], 0.25f) && nearly(r.w[3], 0.25f) && nearly(r.colour[0], 2.5f) && nearly(r.colour[1], 10.0f),
+              "rebuild of four good taps: bilinear weights, factor 1");
+
+        t[1].factor = 0.5f * thr;    // exactly thr / 2: not valid
+        r = nrd2FfxRebuild(t, 0.25f, 0.0f, n, 2.0f, kNrd2FfxNormalW, kNrd2FfxDepthW, thr);
+        check(r.w[1] == 0.0f && nearly(r.w[0], 1.0f) && nearly(r.colour[0], 1.0f) && nearly(r.factor, 1.0f),
+              "the validity cut is hard at thr / 2 and the weights renormalise");
+        t[1].factor = 0.5f * thr + 1e-4f;
+        r = nrd2FfxRebuild(t, 0.25f, 0.0f, n, 2.0f, kNrd2FfxNormalW, kNrd2FfxDepthW, thr);
+        check(nearly(r.w[0], 0.75f) && nearly(r.w[1], 0.25f), "a hair above thr / 2 the tap counts with its bilinear weight");
+        t[1].factor = 1.0f;
+
+        // Two valid taps whose normals average short: the blended factor fails the threshold.
+        Nrd2HistTap u[4];
+        for (u32 i = 0; i < 4; ++i) { u[i] = t[i]; u[i].factor = 0.6f; }
+        u[0].nrm[0] = 0.8f; u[0].nrm[2] = 0.6f; u[1].nrm[0] = -0.8f; u[1].nrm[2] = 0.6f;
+        u[2].ok = u[3].ok = false;
+        r = nrd2FfxRebuild(u, 0.5f, 0.0f, n, 2.0f, kNrd2FfxNormalW, kNrd2FfxDepthW, thr);
+        check(r.w[0] > 0.0f && r.w[2] == 0.0f && r.factor == 0.0f, "a rebuilt factor below the threshold gives 0 (no history)");
+        for (u32 i = 0; i < 4; ++i) u[i].ok = false;
+        r = nrd2FfxRebuild(u, 0.5f, 0.5f, n, 2.0f, kNrd2FfxNormalW, kNrd2FfxDepthW, thr);
+        check(r.factor == 0.0f && r.w[0] == 0.0f && r.colour[0] == 0.0f, "no valid tap gives no history");
+        Nrd2HistTap distant[4];
+        for (u32 i = 0; i < 4; ++i) { distant[i] = t[i]; distant[i].z = 2.6f; }
+        r = nrd2FfxRebuild(distant, 0.5f, 0.5f, n, 2.0f, kNrd2FfxNormalW, kNrd2FfxDepthW, thr);
+        check(r.factor == 0.0f, "taps at the wrong depth rebuild to no history");
+    }
+
+    // Moments.
+    {
+        const std::vector<f32> one(81, 1.0f);
+        std::vector<V3> flat(81, V3{0.5f, 2.0f, 7.0f});
+        Nrd2Moments m = nrd2Moments(flat, one);
+        check(nearly(m.mean[0], 0.5f, 1e-6f) && nearly(m.mean[2], 7.0f, 1e-5f) && m.var[0] < 1e-5f && m.var[1] < 1e-5f && m.var[2] < 1e-3f &&
+                  m.weight > 0.0f,
+              "a constant patch has zero variance");
+
+        std::vector<V3> two(81);
+        for (u32 j = 0; j < 9; ++j) for (u32 i = 0; i < 9; ++i) two[j * 9 + i] = i < 4 ? V3{1.0f, 1.0f, 1.0f} : V3{3.0f, 0.0f, 6.0f};
+        m = nrd2Moments(two, one);
+        MomRef ref = momentsRef(two, one);
+        bool ok = true;
+        for (u32 k = 0; k < 3; ++k) ok = ok && nearly(m.mean[k], static_cast<f32>(ref.mean[k]), 1e-5f) && nearly(m.var[k], static_cast<f32>(ref.var[k]), 1e-4f);
+        check(ok && m.var[0] > 0.5f && nearly(m.weight, static_cast<f32>(ref.w), 1e-4f), "a two-value patch matches the analytic Gaussian-weighted mean and variance");
+
+        // Validity weights: invalid pixels (garbage values) drop out, fractional ones count in proportion.
+        std::vector<V3> junk = two;
+        std::vector<f32> val(81, 1.0f);
+        for (u32 j = 0; j < 9; ++j) for (u32 i = 0; i < 9; ++i) {
+            if (i >= 6) { val[j * 9 + i] = 0.0f; junk[j * 9 + i] = V3{1.0e6f, -1.0e6f, 1.0e6f}; }
+            else if (j == 2) val[j * 9 + i] = 0.5f;
+        }
+        m = nrd2Moments(junk, val);
+        ref = momentsRef(junk, val);   // weight 0 x garbage is 0
+        ok = true;
+        for (u32 k = 0; k < 3; ++k) ok = ok && nearly(m.mean[k], static_cast<f32>(ref.mean[k]), 1e-4f) && nearly(m.var[k], static_cast<f32>(ref.var[k]), 3e-4f);
+        check(ok && nearly(m.weight, static_cast<f32>(ref.w), 1e-4f), "validity-weighted: invalid pixels drop out, half-valid ones count half");
+        const Nrd2Moments none = nrd2Moments(two, std::vector<f32>(81, 0.0f));
+        check(none.weight == 0.0f && none.mean[0] == 0.0f && none.var[2] == 0.0f, "no valid pixel gives zeros and weight 0");
+        check(nrd2MomentWeight(0) == 1.0f && nearly(nrd2MomentWeight(4), std::exp(-3.0f * 16.0f / 25.0f)) && nrd2MomentWeight(-3) == nrd2MomentWeight(3) &&
+                  nrd2MomentWeight(1) > nrd2MomentWeight(2),
+              "the window's 1D weight is exp(-3 i^2 / 25), symmetric and falling");
+    }
+
+    // ClipAABB and the reject.
+    {
+        const f32 lo[3] = {-1.0f, -2.0f, -2.0f}, hi[3] = {1.0f, 2.0f, 2.0f}, inside[3] = {0.5f, -1.0f, 1.9f}, outside[3] = {4.0f, 3.0f, 0.0f};
+        const V3 same = nrd2ClipAabb(lo, hi, inside);
+        check(same[0] == inside[0] && same[1] == inside[1] && same[2] == inside[2], "a point inside the box is unchanged");
+        const V3 c = nrd2ClipAabb(lo, hi, outside);
+        check(nearly(c[0], 1.0f, 2e-3f) && nearly(c[1], 0.75f, 2e-3f) && nearly(c[2], 0.0f, 1e-6f),
+              "(4, 3, 0) lands at (1, 0.75, 0) along the line to the centre, not at the per-channel clamp (1, 2, 0)");
+        const f32 big[3] = {11.0f, 6.0f, 1.0f}, l1[3] = {0.86f, 0.86f, 0.86f}, h1[3] = {1.14f, 1.14f, 1.14f};
+        const V3 d = nrd2ClipAabb(l1, h1, big);
+        check(nearly((d[0] - 1.0f) / (d[1] - 1.0f), 2.0f, 1e-3f) && d[0] < 1.2f, "the direction to the centre is kept");
+
+        const f32 mean[3] = {1.0f, 1.0f, 1.0f}, var[3] = {1.0f, 1.0f, 1.0f};
+        const f32 close[3] = {2.0f, 2.0f, 1.0f}, away[3] = {2.5f, 2.5f, 1.0f}, nanv[3] = {std::nanf(""), 1.0f, 1.0f}, zero[3] = {};
+        check(!nrd2FfxReject(close, mean, var, kNrd2FfxRejectW) && nrd2FfxReject(away, mean, var, kNrd2FfxRejectW) &&
+                  nrd2FfxReject(nanv, mean, var, kNrd2FfxRejectW),
+              "colour reject: kept inside 1.5 |var|, rejected beyond it, NaN rejects");
+        check(!nrd2FfxReject(away, mean, var, 4.0f) && nrd2FfxReject(mean, mean, zero, kNrd2FfxRejectW),
+              "a larger weight keeps more; an exactly zero variance rejects even an equal history (literal FFX)");
+    }
+
+    // Blend.
+    {
+        const f32 cur[3] = {2.0f, 2.0f, 2.0f}, avg[3] = {0.0f, 0.0f, 0.0f}, mean[3] = {0.0f, 0.0f, 0.0f}, var[3] = {1.0f, 1.0f, 1.0f},
+                  hist[3] = {0.4f, 0.4f, 0.4f};
+        const Nrd2TemporalOut one = nrd2TemporalBlendFfx(cur, avg, mean, var, hist, 1.0f, 4.0f);
+        check(nearly(one.out[0], 1.0f) && nearly(one.cur[1], 1.0f), "n = 1: the current value pulled by 1/2 to the anchor, no history");
+        const Nrd2TemporalOut four = nrd2TemporalBlendFfx(cur, avg, mean, var, hist, 4.0f, 4.0f);
+        check(nearly(four.cur[0], 1.6f) && nearly(four.hist[0], 0.4f) && nearly(four.out[0], 1.6f + (0.4f - 1.6f) * 0.75f),
+              "history weight 1 - 1/n (3/4 at n = 4) inside a wide box");
+
+        const f32 mean1[3] = {1.0f, 1.0f, 1.0f}, tight[3] = {0.01f, 0.01f, 0.01f}, spike[3] = {100.0f, 1.0f, 1.0f};
+        const Nrd2TemporalOut clip = nrd2TemporalBlendFfx(mean1, mean1, mean1, tight, spike, 32.0f, 1.0f);
+        check(nearly(clip.hist[0], 1.0f + 0.14f, 2e-3f) && nearly(clip.hist[1], 1.0f, 1e-5f) && nearly(clip.cur[0], 1.0f),
+              "a history spike is pulled to mean +- 1.4 sigma (0.14 here) along the line to the centre");
+        const f32 cur2[3] = {2.0f, 2.0f, 2.0f}, zero3[3] = {}, one3[3] = {1.0f, 1.0f, 1.0f}, h08[3] = {0.8f, 0.8f, 0.8f};
+        const Nrd2TemporalOut tightBox = nrd2TemporalBlendFfx(cur2, zero3, zero3, tight, zero3, 32.0f, 1.0f);
+        const Nrd2TemporalOut widened = nrd2TemporalBlendFfx(cur2, zero3, one3, tight, h08, 32.0f, 1.0f);
+        check(nearly(tightBox.cur[0], 0.141f, 2e-3f) && nearly(widened.cur[0], 2.0f * (1.0f - 1.0f / 33.0f), 1e-3f) &&
+                  nearly(widened.hist[0], 0.8f, 1e-5f),
+              "the box widens by the distance between the 9x9 mean and the anchor; the history box centres 0.2 of the way from the mean to it");
+
+        Rng rng(77);
+        bool between = true, nBlend = true;
+        for (u32 k = 0; k < 300; ++k) {
+            f32 c[3], a[3], m[3], v[3], h[3];
+            for (u32 j = 0; j < 3; ++j) {
+                c[j] = rng.range(0.0f, 4.0f); a[j] = rng.range(0.0f, 4.0f); m[j] = rng.range(0.0f, 4.0f);
+                v[j] = rng.range(0.0f, 2.0f); h[j] = rng.range(0.0f, 8.0f);
+            }
+            const f32 n = rng.range(1.0f, 32.0f);
+            const Nrd2TemporalOut o = nrd2TemporalBlendFfx(c, a, m, v, h, n, rng.range(0.5f, 6.0f));
+            for (u32 j = 0; j < 3; ++j) {
+                between = between && o.out[j] >= std::min(o.cur[j], o.hist[j]) - 1e-5f && o.out[j] <= std::max(o.cur[j], o.hist[j]) + 1e-5f;
+                nBlend = nBlend && nearly(o.out[j], o.cur[j] + (o.hist[j] - o.cur[j]) * (1.0f - 1.0f / n), 1e-4f);
+            }
+        }
+        check(between && nBlend, "the output is the clipped current and history blended by 1 - 1/n");
+    }
+
+    // Guided anchor.
+    {
+        const f32 A[3] = {2.0f, 3.0f, 4.0f}, g[3] = {1.5f, 1.0f, 0.5f}, gbar[3] = {1.0f, 1.0f, 1.0f};
+        auto exact = [&](const std::array<f32, 3>& r, const f32* want) { return r[0] == want[0] && r[1] == want[1] && r[2] == want[2]; };
+        const f32 zero[3] = {};
+        const f32 bad[3] = {std::nanf(""), 1.0f, 1.0f};
+        check(exact(nrd2GuidedAnchor(A, g, 0.0f, gbar, 1.0f, 1.0f), A) && exact(nrd2GuidedAnchor(A, g, 1.0f, gbar, 0.0f, 1.0f), A) &&
+                  exact(nrd2GuidedAnchor(A, g, 1.0f, gbar, 1.0f, 0.0f), A) && exact(nrd2GuidedAnchor(zero, g, 1.0f, gbar, 1.0f, 1.0f), zero) &&
+                  exact(nrd2GuidedAnchor(A, bad, 1.0f, gbar, 1.0f, 1.0f), A) && exact(nrd2GuidedAnchor(A, g, 1.0f, bad, 1.0f, 1.0f), A),
+              "no confidence, no guide tile, zero strength, a zero anchor or NaN input: the anchor, bit for bit");
+        check(exact(nrd2GuidedAnchor(A, gbar, 1.0f, gbar, 1.0f, 1.0f), A), "a guide equal to its tile mean leaves the anchor alone");
+
+        // Lamp-dominated (lum(A) >= lum(gbar)): s = 1, purely additive.
+        const f32 lampA[3] = {10.0f, 10.0f, 10.0f}, gl[3] = {1.5f, 1.2f, 0.8f};
+        const auto lamp = nrd2GuidedAnchor(lampA, gl, 1.0f, gbar, 1.0f, 1.0f);
+        check(nearly(lamp[0], 10.5f) && nearly(lamp[1], 10.2f) && nearly(lamp[2], 9.8f), "a lamp-dominated tile adds the guide's deviation");
+        // Indirect-dominated (lum(A) < lum(gbar)): A + (g - gbar) A / gbar = A g / gbar.
+        const f32 dimA[3] = {0.5f, 0.5f, 0.5f}, gh[3] = {1.2f, 1.2f, 1.2f};
+        const auto dim = nrd2GuidedAnchor(dimA, gh, 1.0f, gbar, 1.0f, 1.0f);
+        check(nearly(dim[0], 0.5f * 1.2f / 1.0f, 1e-6f), "an indirect-dominated tile scales the anchor by g / gbar");
+        // Partial confidence and strength scale the deviation.
+        const auto half = nrd2GuidedAnchor(lampA, gl, 0.5f, gbar, 1.0f, 1.0f), str = nrd2GuidedAnchor(lampA, gl, 1.0f, gbar, 1.0f, 0.5f);
+        check(nearly(half[0], 10.25f) && nearly(str[0], 10.25f), "confidence and strength scale the deviation");
+        // Bounds [A / 4, 4 A] per channel.
+        const f32 hot[3] = {500.0f, 500.0f, 500.0f}, cold[3] = {0.0f, 0.0f, 0.0f};
+        const f32 fifty[3] = {50.0f, 50.0f, 50.0f};
+        const auto up = nrd2GuidedAnchor(dimA, hot, 1.0f, gbar, 1.0f, 1.0f), down = nrd2GuidedAnchor(lampA, cold, 1.0f, fifty, 1.0f, 1.0f);
+        check(up[0] == 4.0f * dimA[0] && down[0] == 0.25f * lampA[0],
+              "the result stays within [A / 4, 4 A]");
+        bool inRange = true;
+        Rng rng(5);
+        for (u32 k = 0; k < 500; ++k) {
+            f32 a[3], gg[3], gb[3];
+            for (u32 j = 0; j < 3; ++j) { a[j] = rng.range(0.01f, 20.0f); gg[j] = rng.range(0.0f, 30.0f); gb[j] = rng.range(0.0f, 30.0f); }
+            const auto r = nrd2GuidedAnchor(a, gg, rng.uniform(), gb, 1.0f, rng.uniform());
+            for (u32 j = 0; j < 3; ++j) inRange = inRange && r[j] >= 0.25f * a[j] && r[j] <= 4.0f * a[j];
+        }
+        check(inRange, "and does for random inputs");
+        const f32 black[3] = {};
+        const auto onBlack = nrd2GuidedAnchor(lampA, gl, 1.0f, black, 1.0f, 1.0f);
+        check(nearly(onBlack[0], 10.0f + 1.5f), "a black guide tile mean counts as lamp-dominated (s = 1, no division by zero)");
+    }
+}
+
 void testCandidates() {
     AVER_INFO("grid, pattern and tile weight");
     const auto def = nrd2DefaultTheta(0);
@@ -500,6 +896,7 @@ int main() {
     testEnergy();
     testFiniteDifferences();
     testTemporal();
+    testTemporalFfx();
     testCandidates();
     testOracle(Nrd2OracleMode::Grad);
     testOracle(Nrd2OracleMode::Grid);

@@ -169,6 +169,18 @@ struct Settings {
     // NRD2 mixes no lighting across objects (the primary visibility's, as NeuRAA reads them): pyramid levels
     // keep one object, the resolve and the stabiliser's prefilter skip taps of another (NRD2.md "Object stop").
     bool nrd2ObjectStop = true;
+    // NRD2 temporal history handling after FidelityFX (docs/rendering/NRD2.md): the mean +- sigma history clip
+    // (off = the 5x5 min/max box) and its weight, the colour-distance reject, the depth weight of the
+    // disocclusion factor, the Catmull-Rom share of the history fetch (0 = bilinear), and the NeuRaC guide in
+    // the temporal anchor (only while NeuRaC is live) with the strength of its deviation term.
+    bool nrd2FfxClip = true;
+    f32 nrd2FfxClipWeight = 4.0f;
+    bool nrd2FfxReject = true;
+    f32 nrd2FfxRejectWeight = 1.5f;
+    f32 nrd2FfxDepthWeight = 1.0f;
+    f32 nrd2HistSharp = 1.0f;
+    bool nrd2NeuracGuide = true;
+    f32 nrd2NeuracGuideStrength = 1.0f;
     // NRD2 input despeckle (CSNrd2Despeckle): isolated outliers in D (1) and S (2) clamped before the pyramid,
     // so a lone bright sample (a small emitter hit by a GI ray) is not spread into a blotch.
     u32 nrd2Despeckle = 3;

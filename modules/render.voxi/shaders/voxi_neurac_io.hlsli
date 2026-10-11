@@ -3,6 +3,8 @@
 // Resources: gRcInfo (t22), gRcAccum (u20), gRcCells (u21).
 // WORLD UNITS: cascade cell sizes match cbuffer's gCamPos and engine world unit.
 
+#include "voxi_neurac_lookup.hlsli"
+
 // Lookup's last confidence (1 - fallback fraction) for debug view.
 static float gRcLastConf = 0.0;
 
@@ -10,44 +12,73 @@ static float gRcLastConf = 0.0;
 bool rcCacheOn() { return ((uint)gAmbientParams.w & 128u) != 0u; }
 
 // ---- SCATTER: one second-bounce ray = one Monte Carlo sample of incident radiance ----
-// Scatter a Monte Carlo sample. Only the finest cascade trains.
-// Count atomic enforces per-cell cap (one atomic, not sixteen).
+// Hash of a sample's identity to 16 bits (murmur3 finalizer over the position and direction bits).
+// CPU twin: neurac::hash16.
+uint rcHash16(float3 hitPos, float3 dir2, uint c) {
+    const uint3 a = asuint(hitPos), b = asuint(dir2);
+    uint h = 0x9E3779B9u * (c + 1u);
+    h = (h ^ a.x) * 0x85EBCA6Bu;
+    h = (h ^ a.y) * 0xC2B2AE35u;
+    h = (h ^ a.z) * 0x85EBCA6Bu;
+    h = (h ^ b.x) * 0xC2B2AE35u;
+    h = (h ^ b.y) * 0x85EBCA6Bu;
+    h = (h ^ b.z) * 0xC2B2AE35u;
+    h ^= h >> 16;  h *= 0x85EBCA6Bu;
+    h ^= h >> 13;  h *= 0xC2B2AE35u;
+    h ^= h >> 16;
+    return h >> 16;
+}
+
+// One cascade's share of a sample. Bins at the lookup's own cell (hit offset half a cell along N) and
+// trains only interior cells, so the cell holding a lookup point carries at least half its 1D weight.
+// Accepts at a rate set by last frame's arrival count, so the per-frame cap keeps a random subset
+// of arrivals rather than the first ones; the count atomic is the hard bound.
+void rcScatterCascade(uint c, float3 hitPos, float3 N, float3 dir2, float3 L, float wgt, RcInfo info) {
+    const float size = asfloat(info.cas[c].w);
+    const int3  cell = (int3)floor((hitPos + N * (0.5 * size)) / size);
+    const int3  rel  = cell - info.cas[c].xyz;
+    if (any(rel < AVER_RC_MARGIN_CELLS) || any(rel > AVER_RC_RES - 1 - AVER_RC_MARGIN_CELLS)) return;
+    const uint cap = rcCapFor(info, c);
+    if (cap == 0u) return;
+    const uint idx = rcCellIndex(c, cell);
+    InterlockedAdd(gRcAccum[AVER_RC_CELLS + idx], 1);                       // arrival
+    // High half = last frame's arrivals (constant during scatter); low half = accepted so far.
+    const uint word = (uint)gRcAccum[idx];
+    const uint prev = word >> 16;
+    if ((word & 0xFFFFu) >= cap) return;                                    // stale-safe prefilter: keeps the low half from carrying
+    const float rate = prev <= cap ? 1.0 : max((float)cap / (float)prev, (float)AVER_RC_MIN_ACCEPT_RATE);
+    if (rcHash16(hitPos, dir2, c) >= (uint)(rate * 65536.0)) return;
+    int old;
+    InterlockedAdd(gRcAccum[idx], 1, old);
+    if ((uint)(old & 0xFFFF) >= cap) return;
+    float y[4];
+    rcShBasis(dir2, y);
+    const uint base = (uint)AVER_RC_PAYLOAD_BASE + idx * (uint)AVER_RC_PAYLOAD_INTS;
+    int ignored;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const float3 t = L * (y[k] * wgt * AVER_RC_SH_SCALE);
+        InterlockedAdd(gRcAccum[base + k * 3 + 0], (int)round(t.x), ignored);
+        InterlockedAdd(gRcAccum[base + k * 3 + 1], (int)round(t.y), ignored);
+        InterlockedAdd(gRcAccum[base + k * 3 + 2], (int)round(t.z), ignored);
+    }
+    const float3 nn = N * AVER_RC_N_SCALE;
+    InterlockedAdd(gRcAccum[base + 12], (int)round(nn.x), ignored);
+    InterlockedAdd(gRcAccum[base + 13], (int)round(nn.y), ignored);
+    InterlockedAdd(gRcAccum[base + 14], (int)round(nn.z), ignored);
+}
+
+// Scatter a Monte Carlo sample into every cascade whose interior holds it, finest first.
+// [loop], not unrolled: the twin is register-bound.
 void rcScatter(float3 hitPos, float3 N, float3 dir2, float3 indY, float cosDir2) {
     const float3 L = min(max(indY, 0.0), AVER_RC_LMAX);
     if (!all(isfinite(L)) || !all(isfinite(dir2)) || !all(isfinite(N))) return;
     const RcInfo info = gRcInfo[0];
-    const uint cap = min(info.hdr0.w, (uint)AVER_RC_MAX_CAP);
-    [unroll] for (uint c = 0; c < (uint)AVER_RC_CASCADES; ++c) {
-        const float size = asfloat(info.cas[c].w);
-        const int3  cell = (int3)floor(hitPos / size);
-        const int3  rel  = cell - info.cas[c].xyz;
-        if (all(rel >= 0) && all(rel < AVER_RC_RES)) {
-            const uint idx = rcCellIndex(c, cell);
-            int old;
-            InterlockedAdd(gRcAccum[idx], 1, old);
-            if ((uint)old >= cap) return;
-            float y[4];
-            rcShBasis(dir2, y);
-            const float wgt  = 3.14159265 / max(cosDir2, AVER_RC_MIN_COS);
-            const uint  base = (uint)AVER_RC_CELLS + idx * (uint)AVER_RC_PAYLOAD_INTS;
-            int ignored;
-            [unroll] for (int k = 0; k < 4; ++k) {
-                const float3 t = L * (y[k] * wgt * AVER_RC_SH_SCALE);
-                InterlockedAdd(gRcAccum[base + k * 3 + 0], (int)round(t.x), ignored);
-                InterlockedAdd(gRcAccum[base + k * 3 + 1], (int)round(t.y), ignored);
-                InterlockedAdd(gRcAccum[base + k * 3 + 2], (int)round(t.z), ignored);
-            }
-            const float3 nn = N * AVER_RC_N_SCALE;
-            InterlockedAdd(gRcAccum[base + 12], (int)round(nn.x), ignored);
-            InterlockedAdd(gRcAccum[base + 13], (int)round(nn.y), ignored);
-            InterlockedAdd(gRcAccum[base + 14], (int)round(nn.z), ignored);
-            return;
-        }
-    }
+    const float  wgt  = 3.14159265 / max(cosDir2, AVER_RC_MIN_COS);
+    [loop] for (uint c = 0; c < (uint)AVER_RC_CASCADES; ++c) rcScatterCascade(c, hitPos, N, dir2, L, wgt, info);
 }
 
 // ---- LOOKUP: cosine-convolved irradiance / PI at p for normal N, blended across cascades ----
-// Blend across cascades (finest first), weighting by trilinear * normal agreement * planarity.
+// Blend across cascades (finest first); the per-cascade core is in voxi_neurac_lookup.hlsli.
 // Returns confidence and unfilled light fraction in `remaining` for fallback fill.
 float3 rcLookup(float3 p, float3 N, out float remaining) {
     remaining = 1.0;
@@ -57,43 +88,10 @@ float3 rcLookup(float3 p, float3 N, out float remaining) {
     [loop] for (uint c = 0; c < (uint)AVER_RC_CASCADES; ++c) {
         if (remaining < 0.01) break;
         const float  size = asfloat(info.cas[c].w);
-        const int3   org  = info.cas[c].xyz;
-        const float3 q    = (p + N * (0.5 * size)) / size - (float3)org;   // position in window cells, [0, 64)
-        const float3 g    = q - 0.5;
-        const float3 fl   = floor(g);
-        const float3 f    = g - fl;
-        const int3   b    = (int3)fl;                                         // window-relative base corner
-        // Both corners (b and b + 1) must sit inside margin.
-        if (any(b < AVER_RC_MARGIN_CELLS) || any(b > AVER_RC_RES - 2 - AVER_RC_MARGIN_CELLS)) continue;
-        const float dEdge  = min(min(q.x, min(q.y, q.z)), min(AVER_RC_RES - q.x, min(AVER_RC_RES - q.y, AVER_RC_RES - q.z)));
-        const float aEdge  = saturate((dEdge - (float)AVER_RC_MARGIN_CELLS) / (float)AVER_RC_CROSSFADE_CELLS);
-        float3 acc[4] = { (float3)0, (float3)0, (float3)0, (float3)0 };
-        float  wsum = 0.0;
-        [unroll] for (int i = 0; i < 8; ++i) {
-            const int3   o  = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
-            const int3   wc = b + o + org;
-            const float3 tw = lerp(1.0 - f, f, (float3)o);
-            const float  tri = tw.x * tw.y * tw.z;
-            const RcCell cell = gRcCells[rcCellIndex(c, wc)];
-            const uint   meta = cell.b.w;
-            const uint   neff = (meta >> 24) & 15u;
-            const uint   age  = meta >> 28;
-            if (neff == 0u || (meta & 0xFFFFFFu) != rcTagPack(wc) || age >= (uint)AVER_RC_AGE_MAX) continue;
-            float len;
-            const float3 cn = rcUnpackNormal(cell.b.z, len);
-            const float  w  = tri * saturate(dot(cn, N) * AVER_RC_NORMAL_K) * len
-                            * min((float)neff * 0.25, 1.0) * (1.0 - (float)age / (float)AVER_RC_AGE_MAX);
-            if (w <= 0.0) continue;
-            float3 cc[4];
-            rcUnpackSh(cell.a, cell.b.xy, cc);
-            [unroll] for (int k = 0; k < 4; ++k) acc[k] += w * cc[k];
-            wsum += w;
-        }
-        if (wsum <= 1e-5) continue;
-        float3 blended[4];
-        [unroll] for (int k = 0; k < 4; ++k) blended[k] = acc[k] / wsum;
-        const float3 value = rcShIrradianceOverPi(blended, N);
-        const float  a     = aEdge * saturate(wsum);
+        const float3 q    = (p + N * (0.5 * size)) / size - (float3)info.cas[c].xyz;   // position in window cells, [0, 64)
+        float3 value;
+        float  a;
+        rcLookupCascade(c, q, N, value, a);
         outV      += remaining * a * value;
         remaining *= 1.0 - a;
     }
@@ -102,7 +100,7 @@ float3 rcLookup(float3 p, float3 N, out float remaining) {
 }
 
 // ---- VISUALISATION (gAmbientParams.w bits 8-10 mode, bit 11 cell grid; givis::packAmbientW) ----
-// NeuRaC visualiser: modes 1-4 show cached light / coverage / cascade / cell state.
+// NeuRaC visualiser: modes 1-5 show cached light / coverage / cascade / cell state / trust.
 // Looked up at the primary surface (world-space, trained at second-bounce hits).
 uint rcViewMode() { return ((uint)gAmbientParams.w >> 8) & 7u; }
 bool rcViewGrid() { return ((uint)gAmbientParams.w & 2048u) != 0u; }
@@ -141,6 +139,16 @@ float3 rcDebugColour(float3 p, float3 N) {
         const bool   live = neff != 0u && (meta & 0xFFFFFFu) == rcTagPack(wc) && age < (uint)AVER_RC_AGE_MAX;
         col = live ? float3((float)age / (float)AVER_RC_AGE_MAX, (float)neff / (float)AVER_RC_NEFF_MAX, 0.1)
                    : float3(0.2, 0.0, 0.3);
+    } else if (mode == 5u && cas >= 0) {
+        const int3   wc   = (int3)floor(qc);
+        const RcCell cell = gRcCells[rcCellIndex((uint)cas, wc)];
+        const uint   meta = cell.b.w;
+        const uint   neff = (meta >> 24) & 15u;
+        const uint   age  = meta >> 28;
+        const bool   live = neff != 0u && (meta & 0xFFFFFFu) == rcTagPack(wc) && age < (uint)AVER_RC_AGE_MAX;
+        float len, trust;
+        rcUnpackNormal(cell.b.z, len, trust);
+        col = live ? lerp(float3(1.0, 0.1, 0.05), float3(0.1, 1.0, 0.2), trust) : float3(0.2, 0.0, 0.3);
     }
     // Cell edges: darken within 4% of a boundary on the two axes the surface runs along.
     if (rcViewGrid() && cas >= 0) {

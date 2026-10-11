@@ -8,6 +8,7 @@
 #define AVER_RC_RES             64
 #define AVER_RC_CELLS_PER_CASC  262144      // 64^3
 #define AVER_RC_CELLS           786432      // 3 * 64^3
+#define AVER_RC_PAYLOAD_BASE    1572864     // 2 * AVER_RC_CELLS: counts and arrivals come first
 
 // Fixed-point scales: SH terms * 2^15, summed normals * 2^16.
 #define AVER_RC_SH_SCALE        32768.0
@@ -20,17 +21,21 @@
 #define AVER_RC_NORMAL_K        2.0         // corner weight = saturate(dot(cellNormal, N) * K)
 #define AVER_RC_MARGIN_CELLS    1           // a cascade is skipped if a corner is within this of its edge
 #define AVER_RC_CROSSFADE_CELLS 4           // edge fade width in cells
+#define AVER_RC_MIN_ACCEPT_RATE 0.03125     // 1/32: floor on the load-adaptive accept rate
+#define AVER_RC_TRUST_MAX       63          // 6-bit trust; 63 = 1.0
+#define AVER_RC_LEN_MAX         63          // 6-bit planarity
 
 // ---- RESOURCE ELEMENT LAYOUTS (shared with resolve shader and C++ side) ----
 // RcInfo, stride 80, ONE element, CPU-written Upload ring.
 struct RcInfo { uint4 hdr0; float4 hdr1; int4 cas[3]; };
+// hdr1 = (alphaMin, relaxAlpha, asfloat(coarseCaps = cap1 | cap2 << 8), netStrength). Cascade 0's cap is hdr0.w.
 // RcCell, stride 32, cascade-major: a.xyzw + b.xy = 12 SH values as fp16 pairs,
-// b.z = normal word, b.w = meta (tag bits 0-23 | n_eff bits 24-27 | age bits 28-31).
+// b.z = normal word (octU 10 | octV 10 | len 6 | trust 6), b.w = meta (tag bits 0-23 | n_eff bits 24-27 | age bits 28-31).
 // Valid iff n_eff > 0 && tag == rcTagPack(expected world cell) && age < AVER_RC_AGE_MAX.
 struct RcCell { uint4 a; uint4 b; };
 
-// Accumulator: per-cell counts [0, AVER_RC_CELLS), payload at AVER_RC_CELLS + cell*15 + k.
-// k = 0..11 SH sums, k = 12..14 summed surface normal.
+// Accumulator (ints): counts [0, K) = accepted | prevArrivals << 16; arrivals [K, 2K); payload at
+// AVER_RC_PAYLOAD_BASE + cell*15 + k, K = AVER_RC_CELLS. k = 0..11 SH sums, k = 12..14 summed surface normal.
 #define AVER_RC_PAYLOAD_INTS    15
 
 // 3 x 8 bits of (worldCell >> 6). Toroidal address (worldCell & 63) cannot distinguish cells 64 apart; tag can.
@@ -43,6 +48,13 @@ uint rcTagPack(int3 worldCell) {
 uint rcCellIndex(uint cascade, int3 worldCell) {
     const uint3 t = (uint3)(worldCell & 63);
     return cascade * AVER_RC_CELLS_PER_CASC + ((t.z * 64u) + t.y) * 64u + t.x;
+}
+
+// Per-cell per-frame sample cap of a cascade: the finest from hdr0.w, the coarse two packed in hdr1.z.
+uint rcCapFor(RcInfo info, uint cascade) {
+    const uint caps = asuint(info.hdr1.z);
+    const uint cap  = cascade == 0u ? info.hdr0.w : (cascade == 1u ? (caps & 255u) : ((caps >> 8) & 255u));
+    return min(cap, (uint)AVER_RC_MAX_CAP);
 }
 
 // Real L1 SH basis, order [Y0, Y1(y), Y1(z), Y1(x)].
@@ -60,7 +72,8 @@ float3 rcShIrradianceOverPi(float3 c[4], float3 N) {
     return max(e, 0.0);
 }
 
-// Octahedral encode/decode, 11 bits per axis; length (planarity: 1 = flat) in top 10 bits as unorm.
+// Octahedral encode/decode, 10 bits per axis. Normal word: octU 10 | octV 10 | len 6 | trust 6.
+// len = planarity (1 = flat); trust 63 = 1.0 (stage 2 lowers it).
 float2 rcOctEncode(float3 n) {
     float2 p = n.xy / max(abs(n.x) + abs(n.y) + abs(n.z), 1e-6);
     if (n.z < 0.0) p = (1.0 - abs(p.yx)) * float2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
@@ -71,19 +84,25 @@ float3 rcOctDecode(float2 p) {
     if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
     return normalize(n);
 }
-uint rcPackNormal(float3 meanVec) {
+uint rcPackNormal(float3 meanVec, uint trust6) {
     const float len = length(meanVec);
     const float3 dir = len > 1e-6 ? meanVec / len : float3(0.0, 0.0, 1.0);
     const float2 o = saturate(rcOctEncode(dir) * 0.5 + 0.5);
-    const uint u = (uint)(o.x * 2047.0 + 0.5);
-    const uint v = (uint)(o.y * 2047.0 + 0.5);
-    const uint l = (uint)(saturate(len) * 1023.0 + 0.5);
-    return u | (v << 11) | (l << 22);
+    const uint u = (uint)(o.x * 1023.0 + 0.5);
+    const uint v = (uint)(o.y * 1023.0 + 0.5);
+    const uint l = (uint)(saturate(len) * (float)AVER_RC_LEN_MAX + 0.5);
+    return u | (v << 10) | (l << 20) | (min(trust6, (uint)AVER_RC_TRUST_MAX) << 26);
+}
+uint rcNormalTrust6(uint w) { return w >> 26; }
+float3 rcUnpackNormal(uint w, out float len, out float trust) {
+    const float2 o = float2((float)(w & 1023u), (float)((w >> 10) & 1023u)) * (1.0 / 1023.0);
+    len   = (float)((w >> 20) & 63u) * (1.0 / (float)AVER_RC_LEN_MAX);
+    trust = (float)(w >> 26) * (1.0 / (float)AVER_RC_TRUST_MAX);
+    return rcOctDecode(o * 2.0 - 1.0);
 }
 float3 rcUnpackNormal(uint w, out float len) {
-    const float2 o = float2((float)(w & 2047u), (float)((w >> 11) & 2047u)) * (1.0 / 2047.0);
-    len = (float)(w >> 22) * (1.0 / 1023.0);
-    return rcOctDecode(o * 2.0 - 1.0);
+    float trust;
+    return rcUnpackNormal(w, len, trust);
 }
 
 // 12 SH values (order [c0.rgb, cY.rgb, cZ.rgb, cX.rgb]) as 6 words of two fp16.

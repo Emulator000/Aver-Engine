@@ -13,6 +13,7 @@
 #include "aver/render/denoise/Nrd2.hpp"
 #include "aver/render/denoise/Nrd2Capture.hpp"
 #include "aver/voxi/NeuRaC.hpp"      // rc_ -- the radiance cache's buffers and resolve pass
+#include "aver/voxi/NeuRaCGuide.hpp"  // rcGuide_ -- the cache lookup NRD2 anchors on
 #include "aver/voxi/VoxiFroxelFog.hpp"   // froxel_ -- volumetric fog (light shafts)
 
 #include <unordered_map>
@@ -1350,6 +1351,8 @@ private:
     u32 giRestirVisibility_ = 2;
     // RADIANCE CACHE state (stage 1). Created on the first frame Cached is wanted and destroyed when it stops being.
     NeuRaC rc_;
+    // The per-pixel cache lookup handed to NRD2 as its guide; created and destroyed with rc_.
+    NeuRaCGuide rcGuide_;
     bool neuracLive_ = false;
     u32 neuracView_ = 0;   // setNeuRaCView: mode in bits 0-2, grid bit 3 (packed into gAmbientParams.w << 8)
     // The NeuRaC::Bindings::generation last written into table 0's t22/u20/u21; a different
