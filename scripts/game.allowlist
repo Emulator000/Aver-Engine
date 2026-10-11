@@ -35,6 +35,7 @@ AverCrashReporter.exe
 Aver.UI.Abi.dll
 Aver.Synapse.Abi.dll   ?AVER_MODULE_SCENE
 Aver.Prefab.Abi.dll     ?AVER_MODULE_SCENE
+Aver.LevelInstance.Abi.dll   ?AVER_MODULE_SCENE
 Aver.Render.PBR.dll   ?AVER_MODULE_PBR
 Aver.Render.Voxi.dll  ?AVER_MODULE_VOXI
 Aver.Scene.dll        ?AVER_MODULE_SCENE

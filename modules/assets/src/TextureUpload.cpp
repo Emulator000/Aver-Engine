@@ -1,11 +1,14 @@
 // Decodes an image file and creates the GPU texture for it.
 #include "aver/assets/TextureUpload.hpp"
 
+#include "TextureUploadDetail.hpp"
 #include "aver/assets/TextureCache.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/Bc7.hpp"
 #include "aver/formats/Texture.hpp"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -122,6 +125,98 @@ rhi::TextureHandle uploadCompressed(rhi::IResourceFactory& res, const std::strin
 
 } // namespace
 
+// ---- the decode / resize / mip helpers shared with the atlas builder (TextureUploadDetail.hpp) ----
+namespace detail {
+
+bool decodeTexture(const std::string& path, TextureUsage usage, fmt::TextureData& out, std::string* err) {
+    fmt::TextureLoadOptions opt;
+    opt.srgb        = usage == TextureUsage::Colour;
+    opt.normalMap   = usage == TextureUsage::NormalMap;
+    opt.generateMips = false;   // the caller decides how mips are built
+    return fmt::loadTexture(path, out, opt, err);
+}
+
+void buildMips(fmt::TextureData& t, TextureUsage usage) {
+    fmt::generateMipChain(t, usage == TextureUsage::NormalMap);
+}
+
+namespace {
+// sRGB <-> linear, exact piecewise curve; a 256-entry table for the decode.
+const f32* srgbTable() {
+    static const std::array<f32, 256> t = [] {
+        std::array<f32, 256> a{};
+        for (int i = 0; i < 256; ++i) {
+            const f32 c = static_cast<f32>(i) / 255.0f;
+            a[static_cast<usize>(i)] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        return a;
+    }();
+    return t.data();
+}
+u8 encodeSrgb(f32 c) {
+    c = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
+    const f32 s = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+    return static_cast<u8>(s * 255.0f + 0.5f);
+}
+} // namespace
+
+void resizeBox(const ImageData& src, u32 w, u32 h, TextureUsage usage, ImageData& out) {
+    out = ImageData{};
+    out.width = w; out.height = h; out.channels = src.channels; out.srgb = src.srgb;
+    out.pixels.assign(static_cast<usize>(w) * h * 4, 255);
+    if (!src.valid() || w == 0 || h == 0) return;
+    const bool lin = usage == TextureUsage::Colour;
+    const f32* tab = srgbTable();
+    const auto dec = [&](u8 v) { return lin ? tab[v] : static_cast<f32>(v) * (1.0f / 255.0f); };
+    const auto enc = [&](f32 v) {
+        if (lin) return encodeSrgb(v);
+        v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        return static_cast<u8>(v * 255.0f + 0.5f);
+    };
+    const auto px = [&](i64 x, i64 y) {
+        const i64 sx = ((x % src.width) + src.width) % src.width, sy = ((y % src.height) + src.height) % src.height;
+        return &src.pixels[(static_cast<usize>(sy) * src.width + static_cast<usize>(sx)) * 4];
+    };
+    const f32 kx = static_cast<f32>(src.width) / static_cast<f32>(w);
+    const f32 ky = static_cast<f32>(src.height) / static_cast<f32>(h);
+    for (u32 y = 0; y < h; ++y) {
+        for (u32 x = 0; x < w; ++x) {
+            f32 acc[4] = {0, 0, 0, 0};
+            if (kx >= 1.0f && ky >= 1.0f) {   // shrinking: area average with fractional edge weights
+                const f32 x0 = static_cast<f32>(x) * kx, x1 = x0 + kx, y0 = static_cast<f32>(y) * ky, y1 = y0 + ky;
+                f32 wsum = 0.0f;
+                for (i64 sy = static_cast<i64>(std::floor(y0)); sy < static_cast<i64>(std::ceil(y1)); ++sy) {
+                    const f32 wy = std::min(static_cast<f32>(sy + 1), y1) - std::max(static_cast<f32>(sy), y0);
+                    for (i64 sx = static_cast<i64>(std::floor(x0)); sx < static_cast<i64>(std::ceil(x1)); ++sx) {
+                        const f32 wx = std::min(static_cast<f32>(sx + 1), x1) - std::max(static_cast<f32>(sx), x0);
+                        const f32 wt = wx * wy;
+                        const u8* p = px(sx, sy);
+                        for (int c = 0; c < 3; ++c) acc[c] += dec(p[c]) * wt;
+                        acc[3] += static_cast<f32>(p[3]) * (1.0f / 255.0f) * wt;
+                        wsum += wt;
+                    }
+                }
+                if (wsum > 0.0f) for (f32& a : acc) a /= wsum;
+            } else {                          // growing: bilinear, wrapping
+                const f32 fx = (static_cast<f32>(x) + 0.5f) * kx - 0.5f, fy = (static_cast<f32>(y) + 0.5f) * ky - 0.5f;
+                const i64 ix = static_cast<i64>(std::floor(fx)), iy = static_cast<i64>(std::floor(fy));
+                const f32 tx = fx - static_cast<f32>(ix), ty = fy - static_cast<f32>(iy);
+                const f32 wts[4] = {(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
+                const u8* p[4] = {px(ix, iy), px(ix + 1, iy), px(ix, iy + 1), px(ix + 1, iy + 1)};
+                for (int t = 0; t < 4; ++t) {
+                    for (int c = 0; c < 3; ++c) acc[c] += dec(p[t][c]) * wts[t];
+                    acc[3] += static_cast<f32>(p[t][3]) * (1.0f / 255.0f) * wts[t];
+                }
+            }
+            u8* o = &out.pixels[(static_cast<usize>(y) * w + x) * 4];
+            for (int c = 0; c < 3; ++c) o[c] = enc(acc[c]);
+            o[3] = static_cast<u8>(std::clamp(acc[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    }
+}
+
+} // namespace detail
+
 // Decodes `path` and uploads it. Returns 0 on failure, with the reason in `err`.
 rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& path,
                                  TextureUsage usage, std::string* err, TextureUploadInfo* info) {
@@ -146,16 +241,13 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
         }
     }
 
-    fmt::TextureLoadOptions opt;
-    opt.srgb        = usage == TextureUsage::Colour;
-    opt.normalMap   = usage == TextureUsage::NormalMap;
-    // FALSE, DELIBERATELY: this function decides mip generation itself, below, so it can pass
-    // alphaLooksLikeCutout's verdict into generateMipChain -- loadTexture's own opt.generateMips
-    // path has no way to ask for that.
-    opt.generateMips = false;
+    // Decoded with mips OFF, deliberately: this function decides mip generation itself, below, so it can
+    // pass alphaLooksLikeCutout's verdict into generateMipChain -- loadTexture's own generateMips path
+    // has no way to ask for that.
+    const bool normalMap = usage == TextureUsage::NormalMap;
 
     fmt::TextureData tex;
-    if (!fmt::loadTexture(path, tex, opt, err)) return 0;
+    if (!detail::decodeTexture(path, usage, tex, err)) return 0;
     if (!tex.valid()) {
         if (err) *err = "decoded texture is empty: " + path;
         return 0;
@@ -174,7 +266,7 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
     // neither has a coverage fraction worth preserving either way.
     const bool cutout = willCompress && usage == TextureUsage::Colour &&
                         fmt::alphaLooksLikeCutout(tex.levels.front());
-    fmt::generateMipChain(tex, opt.normalMap, cutout ? kCoverageReferenceAlpha : -1.0f);
+    fmt::generateMipChain(tex, normalMap, cutout ? kCoverageReferenceAlpha : -1.0f);
 
     if (willCompress) {
         if (const rhi::TextureHandle h = uploadCompressed(res, path, usage, tex, cutout, info))

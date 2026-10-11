@@ -316,7 +316,7 @@ std::string SandboxApp::cbParentDir() const {
     static const char* kSource[] = {
         ".cs", ".cpp", ".cxx", ".cc", ".c", ".hpp", ".hxx", ".h", ".inl",
         ".hlsl", ".hlsli", ".glsl", ".json", ".xml", ".csproj", ".txt", ".md", ".ini", ".cmake",
-        ".ocgas"};
+        ".ocgas", ".ocso"};
     for (const char* s : kSource) if (ext == s) return true;
     return false;
 }
@@ -654,6 +654,44 @@ void SandboxApp::cbCreateBehaviourTree() {
         return;
     }
     cbAdoptNewAsset(target);
+}
+
+// AI: wave 3 #21 -- starters for the state tree, the environment query and the smart object definition. Each is a
+// file its own reader accepts (a refused starter would fail one step after the moment that looks like success).
+void SandboxApp::cbCreateStateTree() {
+    const std::filesystem::path target = cbFreeAssetPath("NewStateTree", ".ocst");
+    if (target.empty()) return;
+    std::string why;
+    if (!editor::stateTreeWriteStarter(target.string(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new state tree failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+void SandboxApp::cbCreateEqsQuery() {
+    const std::filesystem::path target = cbFreeAssetPath("NewQuery", ".oceqs");
+    if (target.empty()) return;
+    std::string why;
+    if (!editor::eqsWriteStarter(target.string(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new query failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target);
+}
+
+void SandboxApp::cbCreateSmartObject() {
+    const std::filesystem::path target = cbFreeAssetPath("NewSmartObject", ".ocso");
+    if (target.empty()) return;
+    std::string why;
+    if (!editor::aiWriteSmartObjectStarter(target.string(), &why)) {
+        cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+        AVER_ERROR("[Editor] new smart object failed: {}", why);
+        return;
+    }
+    cbAdoptNewAsset(target, /*openEditor=*/false);   // no tab: a double-click opens it in the IDE
 }
 
 // Writes a starter .ocui (a game UI layout) and opens it. The text is editor::uiStarterLayoutText, which the
@@ -1240,6 +1278,12 @@ void SandboxApp::drawContentBrowser() {
         uiReg_.track("cb.add.nodeGraph");
         if (ImGui::MenuItem("New Behaviour Tree"))  cbCreateBehaviourTree();
         uiReg_.track("cb.add.behaviourTree");
+        if (ImGui::MenuItem("New State Tree"))      cbCreateStateTree();   // AI: wave 3 #21
+        uiReg_.track("cb.add.stateTree");
+        if (ImGui::MenuItem("New EQS Query"))       cbCreateEqsQuery();
+        uiReg_.track("cb.add.eqsQuery");
+        if (ImGui::MenuItem("New Smart Object Definition")) cbCreateSmartObject();
+        uiReg_.track("cb.add.smartObject");
         if (ImGui::MenuItem("New UI Layout"))       cbCreateUiLayout();
         uiReg_.track("cb.add.uiLayout");
         if (ImGui::MenuItem("New Blend Space"))     cbCreateBlendSpace();
@@ -1874,6 +1918,9 @@ void SandboxApp::drawFolderTree(const std::string& dir) {
         {".wav",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".ogg",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
         {".ocbt",       {ICON_TREE,       IM_COL32( 63, 126, 255, 255), "Behaviour Tree"}},
+        {".ocst",       {ICON_TREE,       IM_COL32(110, 185, 255, 255), "State Tree"}},          // AI: wave 3 #21
+        {".oceqs",      {ICON_TUNE,       IM_COL32(120, 215, 170, 255), "Environment Query"}},
+        {".ocso",       {ICON_SETTINGS,   IM_COL32(225, 165,  90, 255), "Smart Object"}},
         {".ocui",       {ICON_TUNE,       IM_COL32(120, 200, 255, 255), "UI Layout"}},
         {".ocblend",    {ICON_WAVE,       IM_COL32(190, 140, 255, 255), "Blend Space"}},
         {".ocasm",      {ICON_TREE,       IM_COL32(190, 140, 255, 255), "Animation State Machine"}},

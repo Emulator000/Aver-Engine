@@ -34,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace aver::physics::detail {
@@ -214,6 +215,9 @@ struct World {
 
     std::unordered_map<JPH::BodyID, int32_t> byId;   // reverse of `bodies`
     std::unordered_map<int32_t, bool> sensors;       // which handles are sensors
+    // wave3: bodies (the terrain) whose contacts take the host's surface friction. Written by
+    // aver_phys_body_set_surface_sampled between steps, read by the contact listener on worker threads.
+    std::unordered_set<JPH::BodyID> surfaceSampled;
 
     // Written from Jolt's worker threads under the mutex, drained by the caller between steps.
     std::mutex                 eventMutex;

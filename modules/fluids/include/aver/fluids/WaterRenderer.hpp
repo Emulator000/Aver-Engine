@@ -62,6 +62,9 @@ public:
     // game::GameWater::update; without a caller the waves never leave t = 0.
     void tick(f32 dtSeconds);
 
+    // The wave clock, in seconds (wave 3: the CPU twin of the waves -- buoyancy -- samples at the GPU's own time).
+    f32 elapsedSeconds() const { return elapsedSeconds_; }
+
     void setWaterLevelCm(f32 zCm) { waterLevelCm_ = zCm; }
     f32 waterLevelCm() const { return waterLevelCm_; }
 

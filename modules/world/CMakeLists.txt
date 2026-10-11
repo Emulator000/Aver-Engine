@@ -12,6 +12,10 @@
 aver_add_module(Aver.World
   SOURCES
     src/LevelInstance.cpp
+    # [wave3/level-instances begin] the parse cache + closure + overrides, and the level-pack bake: Core + Formats only.
+    src/LevelAssetLibrary.cpp
+    src/LevelPack.cpp
+    # [wave3/level-instances end]
     # The vehicle driver: its lane maths is plain Core + Formats and compiles in every tree; the half that
     # builds Jolt vehicles is guarded on AVER_MODULE_SCENE and AVER_MODULE_PHYSICS like LevelInstance.cpp.
     src/VehicleSystem.cpp

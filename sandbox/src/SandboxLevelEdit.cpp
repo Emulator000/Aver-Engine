@@ -413,6 +413,8 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     if (!mr && world.hasComponent(e, scene::kComponentLight)) return false;
     if (!mr && world.hasComponent(e, scene::kComponentDecal)) return false;
     if (prefabSys_.isLinked(e)) return false;
+    // [wave3/level-instances] A member of a level instance is the child level's, not this one's (a commit reads them).
+    if (!capturingInstance_ && level_.instances().isMember(e)) return false;
     static const std::unordered_map<u32, const Transform*> kNone;
     const std::unordered_map<u32, const Transform*>& animPlaced = animPlacedPtr ? *animPlacedPtr : kNone;
     p.asset = world.name(e);
@@ -461,6 +463,8 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     // until the editor grows a way to show and edit a snap offset.
     const auto snapIt = entitySnapZ_.find(static_cast<u32>(e));
     if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
+    // [wave3/level-instances] The stable id the placement had when the level was loaded (or it was last saved with).
+    if (const auto idIt = entityPlaceId_.find(static_cast<u32>(e)); idIt != entityPlaceId_.end()) p.placementId = idIt->second;
     return true;
 }
 
@@ -556,6 +560,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
         for (usize i = 0; i < lp->size(); ++i) {
             const scene::Entity le = lp->entityAt(i);
             if (!world.valid(le)) continue;
+            if (level_.instances().isMember(le)) continue;   // [wave3/level-instances] the child level's light
             const auto* lc = static_cast<const scene::CLight*>(lp->dataAt(i));
             w.lights.push_back(editor::recordFromLight(*lc, transformFromMatrix(world.worldMatrix(le)),
                                                        world.name(le), paths));
@@ -564,7 +569,9 @@ bool SandboxApp::saveLevel(const std::string& path) {
 
     // PREFABINST records: every instance root, with its overrides. The linked entities are skipped as
     // placements below, and any prefab asset edited through an instance is written out with the level.
-    w.prefabInstances = prefabSys_.captureLevelInstances();
+    // [wave3/level-instances] A prefab that lives inside a level instance is the child level's record, not this level's.
+    w.prefabInstances = prefabSys_.captureLevelInstances([this](scene::Entity r) { return !level_.instances().isMember(r); });
+    w.levelInstances = level_.instances().captureRecords();   // [wave3/level-instances] LEVELINST: links, not members
     {
         std::string prefabWhy;
         if (!prefabModel_.saveDirtyAssets(&prefabWhy))
@@ -572,7 +579,8 @@ bool SandboxApp::saveLevel(const std::string& path) {
     }
 
     // DECAL records, from every authored CDecal entity (pooled gameplay decals are skipped inside).
-    w.decals = editor::recordsFromDecalEntities(world, editor::LightAssetPaths::scan(project_.contentDir()));
+    w.decals = editor::recordsFromDecalEntities(world, editor::LightAssetPaths::scan(project_.contentDir()),
+                                                [this](scene::Entity d) { return level_.instances().isMember(d); });   // [wave3/level-instances]
 
     // WHICH PLACEMENT SLOT EACH ENTITY WILL OCCUPY, decided BEFORE any is written, because a
     // child may be reached before its parent -- levelEntities_ is the swap-removed dense array
@@ -592,6 +600,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
             if (!world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer) &&
                 world.hasComponent(e, scene::kComponentDecal)) continue;   // saved as a DECAL record
             if (prefabSys_.isLinked(e)) continue;                          // saved inside a PREFABINST record
+            if (level_.instances().isMember(e)) continue;                  // [wave3/level-instances] the child level's
             slotOf.emplace(static_cast<u32>(e), slot++);
         }
     }
@@ -637,6 +646,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
         if (!mr && world.hasComponent(e, scene::kComponentLight)) continue;   // saved as a LIGHT record
         if (!mr && world.hasComponent(e, scene::kComponentDecal)) continue;   // saved as a DECAL record
         if (prefabSys_.isLinked(e)) continue;                                 // saved inside a PREFABINST record
+        if (level_.instances().isMember(e)) continue;                         // [wave3/level-instances] saved inside a LEVELINST record
         fmt::OcWorldPlacement p;
         // THE PARENT, AND WITH IT THE REASON CLocal IS NOW CORRECT TO WRITE. This loop has always
         // written loc->xf -- the LOCAL transform -- into a format that read every placement back
@@ -688,6 +698,11 @@ bool SandboxApp::saveLevel(const std::string& path) {
 
     // Ids, world bounds and on-demand mesh folders for a level World Settings set to stream.
     stampStreamFields(w, slotOf);
+    // [wave3/level-instances begin] Ids stay on the placements that have them (instance overrides are keyed by them), and
+    // EXTENT lets another level bound an instance of this one without loading meshes.
+    if (!streamedSave) keepPlacementIds(w, slotOf);
+    writeLevelExtent(w);
+    // [wave3/level-instances end]
     // THE SEQUENCE, written from the editor's model with each actor mapped to the slot it is saved in.
     seqEditor_.save(w, slotOf);
     if (streamedSave) appendStreamedSequenceTracks(w);

@@ -98,6 +98,17 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
                                   MaterialFlag_Layer1NormalMap)))
         flags |= MaterialFlag_SlopeBlend;
     if (d.uvMode == UvMode::WorldAligned) flags |= MaterialFlag_WorldAlignedUv;
+    // ---- wave3 terrain layers ----
+    // The slots are reinterpreted (MaterialFlag_TerrainLayers): atlas maps in 0..2 are always present, and
+    // 3..5 hold weightmaps and parameters, not occlusion / emissive / layer 1, so those bits must not
+    // be set for anything else that reads them.
+    if (d.terrain.enabled()) {
+        flags &= ~(MaterialFlag_OcclusionMap | MaterialFlag_EmissiveMap | MaterialFlag_Layer1BaseColorMap |
+                   MaterialFlag_Layer1MetalRoughMap | MaterialFlag_Layer1NormalMap | MaterialFlag_SlopeBlend);
+        flags |= MaterialFlag_BaseColorMap | MaterialFlag_MetalRoughMap | MaterialFlag_NormalMap |
+                 MaterialFlag_TerrainLayers;
+    }
+    // ---- end wave3 terrain layers ----
     // POSITIVE sense (set when it DOES cast), so a material packed before this bit existed -- every
     // one of them, with a zero in bit 13 -- would read as "casts nothing" if the sense were
     // inverted. castShadow defaults to true, so the positive spelling is the one that agrees with

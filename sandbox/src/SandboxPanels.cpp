@@ -353,6 +353,9 @@ void SandboxApp::materialPanel(pbr::MaterialHandle handle) {
         // IsItemDeactivatedAfterEdit fires once, when focus leaves.
         track(false);
     }
+#if AVER_MODULE_LANDSCAPE
+    changed |= buildTerrainLayersSection(*d, track);   // wave3: layered terrain materials
+#endif
     if (started) matEditActive_ = true;
     // Whether anything moved is ImGui's answer, not a diff: a memcmp is wrong (MaterialDesc holds
     // std::strings whose pointers can differ without the value differing) and a field-by-field
@@ -719,6 +722,10 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     }
     ImGui::Spacing();
 
+    // wave3: Sculpt | Paint | Water. The sculpt controls below are the first tab, unchanged.
+    if (ImGui::BeginTabBar("##landscapeTabs")) {
+    if (ImGui::BeginTabItem("Sculpt")) {
+    landscapeTab_ = LandscapeTab::Sculpt;
     ImGui::TextDisabled("SCULPT");
     // 6 tools; only the first 4 have a hotkey (SculptRaise..SculptFlatten, keys 1-4). Ramp/Noise
     // are mouse/panel-only for now, so no tooltip advertises a key that does nothing.
@@ -778,6 +785,23 @@ void SandboxApp::buildLandscapeModePanel(Engine& e) {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Replaces every height in this section with the noise above.\n"
                           "One undo step -- Ctrl+Z restores what was here.");
+
+    ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Paint")) {
+        landscapeTab_ = LandscapeTab::Paint;
+        buildLandscapePaintTab(e);
+        ImGui::EndTabItem();
+    }
+#if AVER_MODULE_FLUIDS
+    if (ImGui::BeginTabItem("Water")) {
+        landscapeTab_ = LandscapeTab::Water;
+        buildLandscapeWaterTab(e);
+        ImGui::EndTabItem();
+    }
+#endif
+    ImGui::EndTabBar();
+    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -895,7 +919,9 @@ void SandboxApp::buildPanels(Engine& e) {
 std::string SandboxApp::outlinerLabelFor(scene::Entity e) const {
     const scene::World& w = scene::World::instance();
     const auto lit = entityLabels_.find(static_cast<u32>(e));
-    if (lit != entityLabels_.end()) return lit->second;
+    // [wave3/level-instances] an instance being edited in place says so in the outliner
+    if (lit != entityLabels_.end())
+        return level_.instances().editing(e) ? lit->second + " [editing]" : lit->second;
     const std::string nm = w.name(e);
     return nm.empty() ? ("Entity " + std::to_string((u32)e)) : nm;
 }
@@ -1046,6 +1072,14 @@ void SandboxApp::drawOutlinerRow(const OutlinerRow& row,
                 keybinds_.chordFor(editor::CommandId::EditDelete)).c_str())) {
             outlinerDeleteRequest_ = row.ent;
         }
+        // [wave3/level-instances begin] the selection (and what is under it) becomes a level, replaced by an instance of it
+        if (ImGui::MenuItem("Create Level Instance...")) {
+            levelInstanceModel_.setContentDir(project_.contentDir());
+            const auto lbl = entityLabels_.find(static_cast<u32>(row.ent));
+            editor::levelInstanceCreateDialogOpen(levelInstanceDlg_, selectedEntities(),
+                                                  lbl != entityLabels_.end() ? lbl->second : std::string("Level"));
+        }
+        // [wave3/level-instances end]
         ImGui::EndPopup();
     }
     // Only a row that is on screen: a scrolled-out row of an open subtree has no rect a click
@@ -1693,6 +1727,9 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 editor::prefabCreateDialogOpen(prefabDlg_, selEntity_, lit != entityLabels_.end() ? lit->second : nm, "Prefabs");
             }
             uiReg_.track("details.createPrefab");
+            // [wave3/level-instances] LEVEL INSTANCE: what this is an instance of, edit in place, packed, streaming, overrides.
+            levelInstanceModel_.setContentDir(project_.contentDir());
+            editor::levelInstanceDetailsDraw(levelInstanceModel_, selEntity_, levelInstanceUiCallbacks());
         }
         if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
             if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {

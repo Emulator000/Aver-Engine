@@ -252,6 +252,7 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     // SEQKEY outside a sequence, or after an unknown track kind, are ignored.
     i32 seqOpen = -1, trackOpen = -1;
     i32 prefabOpen = -1;   // the open PREFABINST, -1 outside one
+    i32 levelInstOpen = -1;   // [wave3/level-instances] the open LEVELINST, -1 outside one
 
     usize pos = 0;
     while (pos <= text.size()) {
@@ -290,6 +291,14 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
         if (!equalsCI(key, "OCWORLD") && !equalsCI(key, "OCMAP")) sawRecord = true;
         // PREFABINST / POVERRIDE / ENDPREFABINST (OcPrefab.cpp); the open instance is its only state.
         if (parseOcPrefabInstanceLine(t, out.prefabInstances, prefabOpen)) continue;
+        // [wave3/level-instances begin]
+        if (parseOcLevelInstanceLine(t, out.levelInstances, levelInstOpen)) continue;
+        if (equalsCI(key, "EXTENT") && t.size() >= 7) {
+            out.hasExtent = true;
+            for (usize k = 0; k < 3; ++k) { out.extentMin[k] = tokF(t, 1 + k); out.extentMax[k] = tokF(t, 4 + k); }
+            continue;
+        }
+        // [wave3/level-instances end]
         if (equalsCI(key, "OCWORLD") || equalsCI(key, "OCMAP")) {
             out.version = t.size() > 1 ? parseI32(t[1], 1) : 1;
             sawHeader = true;
@@ -549,6 +558,51 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "steepness")    && i + 1 < t.size()) gw.steepness    = parseF64(t[++i]);
             }
             out.waves.push_back(std::move(gw));
+        // ---- wave3 water bodies ----
+        } else if (equalsCI(key, "RIVER")) {
+            OcRiver rv;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")      && i + 1 < t.size()) rv.name      = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "material")  && i + 1 < t.size()) rv.material  = std::string(t[++i]);
+                else if (equalsCI(t[i], "depth")     && i + 1 < t.size()) rv.depthCm   = parseF64(t[++i], rv.depthCm);
+                else if (equalsCI(t[i], "bank")      && i + 1 < t.size()) rv.bankCm    = parseF64(t[++i], rv.bankCm);
+                else if (equalsCI(t[i], "slow")      && i + 1 < t.size()) rv.bankSlow  = parseF64(t[++i], rv.bankSlow);
+                else if (equalsCI(t[i], "flowscale") && i + 1 < t.size()) rv.flowScale = parseF64(t[++i], rv.flowScale);
+            }
+            out.rivers.push_back(std::move(rv));
+        } else if (equalsCI(key, "RIVERPT")) {
+            std::string river;
+            OcRiverPoint pt;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "river") && i + 1 < t.size()) river = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "at")    && i + 3 < t.size()) {
+                    pt.x = parseF64(t[i+1]); pt.y = parseF64(t[i+2]); pt.z = parseF64(t[i+3]); i += 3;
+                } else if (equalsCI(t[i], "width") && i + 1 < t.size()) pt.widthCm = parseF64(t[++i], pt.widthCm);
+                else if (equalsCI(t[i], "flow")    && i + 1 < t.size()) pt.flowCmS = parseF64(t[++i], pt.flowCmS);
+            }
+            for (OcRiver& rv : out.rivers)
+                if (rv.name == river) { rv.points.push_back(pt); break; }
+        } else if (equalsCI(key, "LAKE")) {
+            OcLake lk;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")     && i + 1 < t.size()) lk.name      = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "material") && i + 1 < t.size()) lk.material  = std::string(t[++i]);
+                else if (equalsCI(t[i], "level")    && i + 1 < t.size()) lk.levelCm   = parseF64(t[++i], lk.levelCm);
+                else if (equalsCI(t[i], "depth")    && i + 1 < t.size()) lk.depthCm   = parseF64(t[++i], lk.depthCm);
+                else if (equalsCI(t[i], "bank")     && i + 1 < t.size()) lk.bankCm    = parseF64(t[++i], lk.bankCm);
+                else if (equalsCI(t[i], "edge")     && i + 1 < t.size()) lk.maxEdgeCm = parseF64(t[++i], lk.maxEdgeCm);
+            }
+            out.lakes.push_back(std::move(lk));
+        } else if (equalsCI(key, "LAKEPT")) {
+            std::string lake;
+            OcLakePoint pt;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "lake") && i + 1 < t.size()) lake = percentDecode(t[++i]);
+                else if (equalsCI(t[i], "at")   && i + 2 < t.size()) { pt.x = parseF64(t[i+1]); pt.y = parseF64(t[i+2]); i += 2; }
+            }
+            for (OcLake& lk : out.lakes)
+                if (lk.name == lake) { lk.points.push_back(pt); break; }
+        // ---- end wave3 water bodies ----
         } else if (equalsCI(key, "LIGHT")) {
             OcLight lt;
             for (usize i = 1; i < t.size(); ++i) {
@@ -1121,6 +1175,47 @@ std::string writeOcworld(const OcWorldData& w) {
         }
     }
 
+    // ---- wave3 water bodies ----
+    // Optional tokens are written only when they differ from the struct default, so an untouched
+    // record round-trips byte for byte.
+    if (!w.rivers.empty()) {
+        s += "\n";
+        const OcRiver rd;
+        const OcRiverPoint pd;
+        for (const OcRiver& rv : w.rivers) {
+            const std::string nm = rv.name.empty() ? std::string("unnamed") : rv.name;
+            s += "RIVER name " + percentEncode(nm);
+            if (!rv.material.empty()) s += " material " + rv.material;
+            if (rv.depthCm   != rd.depthCm)   s += " depth "     + num(rv.depthCm);
+            if (rv.bankCm    != rd.bankCm)    s += " bank "      + num(rv.bankCm);
+            if (rv.bankSlow  != rd.bankSlow)  s += " slow "      + num(rv.bankSlow);
+            if (rv.flowScale != rd.flowScale) s += " flowscale " + num(rv.flowScale);
+            s += "\n";
+            for (const OcRiverPoint& pt : rv.points) {
+                s += "RIVERPT river " + percentEncode(nm) + " at " + num(pt.x) + " " + num(pt.y) + " " + num(pt.z);
+                if (pt.widthCm != pd.widthCm) s += " width " + num(pt.widthCm);
+                if (pt.flowCmS != pd.flowCmS) s += " flow "  + num(pt.flowCmS);
+                s += "\n";
+            }
+        }
+    }
+    if (!w.lakes.empty()) {
+        s += "\n";
+        const OcLake ld;
+        for (const OcLake& lk : w.lakes) {
+            const std::string nm = lk.name.empty() ? std::string("unnamed") : lk.name;
+            s += "LAKE name " + percentEncode(nm) + " level " + num(lk.levelCm);
+            if (!lk.material.empty()) s += " material " + lk.material;
+            if (lk.depthCm   != ld.depthCm)   s += " depth " + num(lk.depthCm);
+            if (lk.bankCm    != ld.bankCm)    s += " bank "  + num(lk.bankCm);
+            if (lk.maxEdgeCm != ld.maxEdgeCm) s += " edge "  + num(lk.maxEdgeCm);
+            s += "\n";
+            for (const OcLakePoint& pt : lk.points)
+                s += "LAKEPT lake " + percentEncode(nm) + " at " + num(pt.x) + " " + num(pt.y) + "\n";
+        }
+    }
+    // ---- end wave3 water bodies ----
+
     if (!w.lights.empty()) {
         s += "\n";
         for (const OcLight& lt : w.lights) {
@@ -1252,6 +1347,10 @@ std::string writeOcworld(const OcWorldData& w) {
     }
 
     appendOcPrefabInstances(s, w.prefabInstances);   // nothing for a level without prefabs
+    // [wave3/level-instances begin]
+    appendOcLevelInstances(s, w.levelInstances);     // nothing for a level without instances
+    if (w.hasExtent) { s += "\n"; s += writeOcExtentLine(w.extentMin, w.extentMax); }
+    // [wave3/level-instances end]
 
     s += "\n";
     const auto line = [&](const OcWorldPlacement& p, const char* keyword, const char* keywordG) {

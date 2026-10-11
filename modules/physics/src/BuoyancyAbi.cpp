@@ -10,6 +10,7 @@
 // check to stay correct, only to stay cheap, and a wasted table entry for a dead handle costs nothing
 // worse than a few bytes until the next clear() or clearAll().
 #include "aver/physics/physics_abi.h"
+#include "aver/physics/physics_water_abi.h"
 #include "Buoyancy.hpp"
 #include "Convert.hpp"
 
@@ -103,6 +104,34 @@ int32_t aver_phys_clear_water_volume(int32_t body) {
     table.clear(body);
     return table.count() != before ? 1 : 0;
 }
+
+// ---- wave3 water and surface samplers: see physics_water_abi.h ----
+int32_t aver_phys_set_water_sampler(aver_phys_water_sampler_fn fn, void* user) {
+    waterSampler().user.store(user);
+    waterSampler().fn.store(fn);
+    return 1;
+}
+
+void aver_phys_clear_water_sampler(void) {
+    waterSampler().fn.store(nullptr);
+    waterSampler().user.store(nullptr);
+}
+
+int32_t aver_phys_has_water_sampler(void) {
+    return waterSampler().fn.load() ? 1 : 0;
+}
+
+int32_t aver_phys_set_surface_sampler(aver_phys_surface_sampler_fn fn, void* user) {
+    surfaceSampler().user.store(user);
+    surfaceSampler().fn.store(fn);
+    return 1;
+}
+
+void aver_phys_clear_surface_sampler(void) {
+    surfaceSampler().fn.store(nullptr);
+    surfaceSampler().user.store(nullptr);
+}
+// ---- end wave3 water and surface samplers ----
 
 // How many bodies had buoyancy applied on the last evaluate() -- see Buoyancy.hpp for why this
 // number exists at all.

@@ -52,78 +52,26 @@ f32 nodeHeight(const BtAssetNode& n, const BtLayoutParams& p) {
     return h;
 }
 
-struct LayoutState {
-    const std::vector<std::vector<i32>>& kids;
-    const BtLayoutParams& p;
-    std::vector<BtNodeBox>& boxes;
-    f32 cursor = 0.0f;
-};
-
-void placeX(LayoutState& s, i32 idx) {
-    const std::vector<i32>& kids = s.kids[static_cast<usize>(idx)];
-    if (kids.empty()) {
-        s.boxes[static_cast<usize>(idx)].x = s.cursor;
-        s.cursor += s.p.nodeW + s.p.gapX;
-        return;
-    }
-    for (const i32 k : kids) placeX(s, k);
-    const f32 first = s.boxes[static_cast<usize>(kids.front())].x;
-    const f32 last = s.boxes[static_cast<usize>(kids.back())].x;
-    s.boxes[static_cast<usize>(idx)].x = (first + last) * 0.5f;
-}
-
 } // namespace
 
 // ---- layout -------------------------------------------------------------------------------------
 
 std::vector<BtNodeBox> btLayout(const BtAsset& asset, const BtLayoutParams& p) {
     const usize n = asset.nodes.size();
-    std::vector<BtNodeBox> boxes(n);
-    if (n == 0) return boxes;
-
-    std::vector<std::vector<i32>> kids(n);
-    std::vector<i32> depth(n, 0);
-    for (usize i = 1; i < n; ++i) {
-        const i32 parent = asset.nodes[i].node.parent;
-        if (parent < 0 || static_cast<usize>(parent) >= i) continue;   // malformed: leave it at depth 0
-        kids[static_cast<usize>(parent)].push_back(static_cast<i32>(i));
-        depth[i] = depth[static_cast<usize>(parent)] + 1;
-    }
-
-    LayoutState s{kids, p, boxes};
-    placeX(s, 0);
-
-    i32 maxDepth = 0;
-    for (const i32 d : depth) maxDepth = std::max(maxDepth, d);
-    std::vector<f32> rowH(static_cast<usize>(maxDepth) + 1, 0.0f);
+    std::vector<i32> parents(n, -2);
+    std::vector<f32> heights(n, 0.0f);
     for (usize i = 0; i < n; ++i) {
-        boxes[i].w = p.nodeW;
-        boxes[i].h = nodeHeight(asset.nodes[i], p);
-        rowH[static_cast<usize>(depth[i])] = std::max(rowH[static_cast<usize>(depth[i])], boxes[i].h);
+        heights[i] = nodeHeight(asset.nodes[i], p);
+        const i32 parent = asset.nodes[i].node.parent;
+        if (i == 0) parents[i] = -1;                                              // the root
+        else if (parent >= 0 && static_cast<usize>(parent) < i) parents[i] = parent;   // malformed: an orphan
     }
-    std::vector<f32> rowY(rowH.size(), 0.0f);
-    for (usize d = 1; d < rowY.size(); ++d) rowY[d] = rowY[d - 1] + rowH[d - 1] + p.gapY;
-    for (usize i = 0; i < n; ++i) boxes[i].y = rowY[static_cast<usize>(depth[i])];
-    return boxes;
+    return layoutTree(parents, heights, TreeLayoutParams{p.nodeW, p.gapX, p.gapY});
 }
 
-BtNodeBox btLayoutBounds(const std::vector<BtNodeBox>& boxes) {
-    if (boxes.empty()) return {};
-    f32 x0 = boxes[0].x, y0 = boxes[0].y, x1 = boxes[0].x + boxes[0].w, y1 = boxes[0].y + boxes[0].h;
-    for (const BtNodeBox& b : boxes) {
-        x0 = std::min(x0, b.x); y0 = std::min(y0, b.y);
-        x1 = std::max(x1, b.x + b.w); y1 = std::max(y1, b.y + b.h);
-    }
-    return BtNodeBox{x0, y0, x1 - x0, y1 - y0};
-}
+BtNodeBox btLayoutBounds(const std::vector<BtNodeBox>& boxes) { return treeBounds(boxes); }
 
-i32 btHitTest(const std::vector<BtNodeBox>& boxes, f32 x, f32 y) {
-    for (usize i = boxes.size(); i-- > 0;) {
-        const BtNodeBox& b = boxes[i];
-        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return static_cast<i32>(i);
-    }
-    return -1;
-}
+i32 btHitTest(const std::vector<BtNodeBox>& boxes, f32 x, f32 y) { return treeHitTest(boxes, x, y); }
 
 std::string btNodeTitle(const BtAssetNode& n) {
     std::string s = synapse::btNodeKindName(n.node.kind);
@@ -195,6 +143,8 @@ bool BtGraphEditor::save(std::string* why) {
     dirty_ = false;
 #if AVER_BTGE_LIVE
     synapse::btSystem().reloadTree(path_);   // running entities pick the new tree up on their next tick
+    if (const std::string rel = aiRelativeAssetPath(path_); !rel.empty())
+        synapse::btSystem().reloadTree(rel);   // AI: wave 3 #21 -- brains assigned by content path hash that spelling
 #endif
     return true;
 }
@@ -487,45 +437,6 @@ LiveRefs liveRefs(u32 entity, usize nodeCount) {
     return r;
 }
 
-// An editable value of `type`. Returns true when `v` changed. `liveEdit` widgets write in place, so
-// the caller takes its undo snapshot on IsItemActivated.
-bool valueEditor(const char* label, BbValue& v, BbType type, bool& activated) {
-    bool changed = false;
-    activated = false;
-    switch (type) {
-        case BbType::Bool: {
-            bool b = v.i != 0;
-            if (ImGui::Checkbox(label, &b)) { v.i = b ? 1 : 0; changed = true; activated = true; }
-            break;
-        }
-        case BbType::Int:
-        case BbType::Entity: {
-            int n = static_cast<int>(v.i);
-            if (ImGui::InputInt(label, &n, 0, 0)) { v.i = type == BbType::Entity ? std::max(0, n) : n; changed = true; }
-            activated = ImGui::IsItemActivated();
-            break;
-        }
-        case BbType::Float:
-            changed = ImGui::DragFloat(label, &v.f, 0.05f);
-            activated = ImGui::IsItemActivated();
-            break;
-        case BbType::Vec3: {
-            f32 c[3] = {v.v.x, v.v.y, v.v.z};
-            if (ImGui::DragFloat3(label, c, 0.5f)) { v.v = Vec3{c[0], c[1], c[2]}; changed = true; }
-            activated = ImGui::IsItemActivated();
-            break;
-        }
-        case BbType::String: {
-            char buf[128];
-            std::snprintf(buf, sizeof buf, "%s", v.s.c_str());
-            if (ImGui::InputText(label, buf, sizeof buf)) { v.s = buf; changed = true; }
-            activated = ImGui::IsItemActivated();
-            break;
-        }
-    }
-    return changed;
-}
-
 bool opAllowedFor(BbType t, BbOp op) {
     if (op == BbOp::IsSet || op == BbOp::NotSet || op == BbOp::Eq || op == BbOp::Ne) return true;
     return t != BbType::Vec3;
@@ -572,7 +483,7 @@ void BtGraphEditor::drawToolbar() {
     if (ImGui::Button("Delete")) deleteSelected();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Reset view")) { panX_ = 24.0f; panY_ = 24.0f; zoom_ = 1.0f; }
+    if (ImGui::Button("Reset view")) view_.reset();
 
     const usize problems = asset_.validate().size();
     if (problems > 0) {
@@ -607,42 +518,28 @@ void BtGraphEditor::drawCanvas(f32 width) {
     ImGuiIO& io = ImGui::GetIO();
 
     const auto toGraph = [&](const ImVec2& s) {
-        return ImVec2((s.x - origin.x - panX_) / zoom_, (s.y - origin.y - panY_) / zoom_);
+        return ImVec2((s.x - origin.x - view_.panX) / view_.zoom, (s.y - origin.y - view_.panY) / view_.zoom);
     };
     const auto toScreen = [&](f32 x, f32 y) {
-        return ImVec2(origin.x + panX_ + x * zoom_, origin.y + panY_ + y * zoom_);
+        return ImVec2(origin.x + view_.panX + x * view_.zoom, origin.y + view_.panY + y * view_.zoom);
     };
 
     const ImVec2 g = toGraph(io.MousePos);
     const i32 hit = hovered ? btHitTest(boxes, g.x, g.y) : -1;
+    bool clickedEmpty = false;
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        if (hit >= 0) selected_ = hit; else panning_ = true;
+        if (hit >= 0) selected_ = hit; else clickedEmpty = true;
     }
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && hit >= 0) {
         selected_ = hit;
         ImGui::OpenPopup("##btgctx");
     }
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) panning_ = false;
-    if ((panning_ && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) ||
-        (hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f))) {
-        panX_ += io.MouseDelta.x;
-        panY_ += io.MouseDelta.y;
-    }
-    if (hovered && io.MouseWheel != 0.0f) {
-        if (io.KeyCtrl) {
-            const f32 z = std::clamp(zoom_ * (io.MouseWheel > 0 ? 1.1f : 1.0f / 1.1f), 0.5f, 1.8f);
-            panX_ = (io.MousePos.x - origin.x) - g.x * z;
-            panY_ = (io.MousePos.y - origin.y) - g.y * z;
-            zoom_ = z;
-        } else {
-            panY_ += io.MouseWheel * 40.0f;
-        }
-    }
+    canvasInput(view_, origin.x, origin.y, hovered, clickedEmpty);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PushClipRect(origin, ImVec2(origin.x + avail.x, origin.y + avail.y), true);
     ImFont* font = ImGui::GetFont();
-    const f32 fontSize = ImGui::GetFontSize() * zoom_;
+    const f32 fontSize = ImGui::GetFontSize() * view_.zoom;
 
     // edges, with the execution order beside each child
     for (usize i = 1; i < asset_.nodes.size(); ++i) {
@@ -655,13 +552,13 @@ void BtGraphEditor::drawCanvas(f32 width) {
         const f32 k = (b.y - a.y) * 0.5f;
         const bool ran = live.trace && i < live.traceCount && live.trace[i].visited && live.trace[i].tick == live.tick;
         dl->AddBezierCubic(a, ImVec2(a.x, a.y + k), ImVec2(b.x, b.y - k), b,
-                           ran ? IM_COL32(245, 175, 40, 255) : IM_COL32(150, 155, 165, 220), (ran ? 2.5f : 1.5f) * zoom_);
+                           ran ? IM_COL32(245, 175, 40, 255) : IM_COL32(150, 155, 165, 220), (ran ? 2.5f : 1.5f) * view_.zoom);
         const std::vector<i32> sibs = synapse::btAssetChildren(asset_, p);
         for (usize s = 0; s < sibs.size(); ++s)
             if (sibs[s] == static_cast<i32>(i)) {
                 char num[12];
                 std::snprintf(num, sizeof num, "%zu", s + 1);
-                dl->AddText(font, fontSize * 0.85f, ImVec2(b.x + 5.0f * zoom_, b.y - fontSize - 2.0f * zoom_),
+                dl->AddText(font, fontSize * 0.85f, ImVec2(b.x + 5.0f * view_.zoom, b.y - fontSize - 2.0f * view_.zoom),
                             IM_COL32(190, 195, 205, 255), num);
             }
     }
@@ -672,8 +569,8 @@ void BtGraphEditor::drawCanvas(f32 width) {
         const BtNodeBox& b = boxes[i];
         const ImVec2 p0 = toScreen(b.x, b.y);
         const ImVec2 p1 = toScreen(b.x + b.w, b.y + b.h);
-        const f32 round = 5.0f * zoom_;
-        const f32 headerH = lp.headerH * zoom_;
+        const f32 round = 5.0f * view_.zoom;
+        const f32 headerH = lp.headerH * view_.zoom;
         const synapse::BtNodeTrace* tr = (live.trace && i < live.traceCount && live.trace[i].visited) ? &live.trace[i] : nullptr;
         const bool freshRun = tr && tr->tick == live.tick && tr->status == synapse::BtStatus::Running;
 
@@ -682,18 +579,18 @@ void BtGraphEditor::drawCanvas(f32 width) {
                           ImDrawFlags_RoundCornersTop);
 
         dl->PushClipRect(p0, p1, true);
-        dl->AddText(font, fontSize, ImVec2(p0.x + 6.0f * zoom_, p0.y + (headerH - fontSize) * 0.5f),
+        dl->AddText(font, fontSize, ImVec2(p0.x + 6.0f * view_.zoom, p0.y + (headerH - fontSize) * 0.5f),
                     IM_COL32(245, 245, 250, 255), btNodeTitle(n).c_str());
-        f32 ty = p0.y + headerH + 3.0f * zoom_;
+        f32 ty = p0.y + headerH + 3.0f * view_.zoom;
         for (const BtDecorator& d : n.decorators) {
             const bool pass = live.board ? synapse::evaluateDecorator(d, live.board) : true;
             const ImU32 col = !live.board ? IM_COL32(215, 190, 120, 255)
                                           : (pass ? IM_COL32(120, 215, 140, 255) : IM_COL32(230, 120, 120, 255));
-            dl->AddText(font, fontSize * 0.9f, ImVec2(p0.x + 8.0f * zoom_, ty), col, ("- " + btDecoratorText(d)).c_str());
-            ty += lp.lineH * zoom_;
+            dl->AddText(font, fontSize * 0.9f, ImVec2(p0.x + 8.0f * view_.zoom, ty), col, ("- " + btDecoratorText(d)).c_str());
+            ty += lp.lineH * view_.zoom;
         }
         if (!n.comment.empty())
-            dl->AddText(font, fontSize * 0.9f, ImVec2(p0.x + 8.0f * zoom_, ty), IM_COL32(150, 160, 175, 255), n.comment.c_str());
+            dl->AddText(font, fontSize * 0.9f, ImVec2(p0.x + 8.0f * view_.zoom, ty), IM_COL32(150, 160, 175, 255), n.comment.c_str());
         dl->PopClipRect();
 
         if (tr) {
@@ -702,14 +599,14 @@ void BtGraphEditor::drawCanvas(f32 width) {
             const ImU32 dim = fresh ? col : (col & 0x00FFFFFFu) | (110u << 24);
             const char* label = tr->gated ? "blocked" : statusText(tr->status);
             const ImVec2 ts = ImGui::CalcTextSize(label);
-            const f32 sc = zoom_ * 0.85f;
-            dl->AddText(font, fontSize * 0.85f, ImVec2(p1.x - ts.x * sc - 4.0f * zoom_, p0.y + 3.0f * zoom_),
+            const f32 sc = view_.zoom * 0.85f;
+            dl->AddText(font, fontSize * 0.85f, ImVec2(p1.x - ts.x * sc - 4.0f * view_.zoom, p0.y + 3.0f * view_.zoom),
                         tr->gated ? IM_COL32(230, 120, 120, fresh ? 255 : 120) : dim, label);
-            dl->AddRect(p0, p1, dim, round, 0, (freshRun ? 3.0f : 1.5f) * zoom_);
+            dl->AddRect(p0, p1, dim, round, 0, (freshRun ? 3.0f : 1.5f) * view_.zoom);
         } else {
-            dl->AddRect(p0, p1, IM_COL32(95, 100, 112, 255), round, 0, 1.0f * zoom_);
+            dl->AddRect(p0, p1, IM_COL32(95, 100, 112, 255), round, 0, 1.0f * view_.zoom);
         }
-        if (static_cast<i32>(i) == selected_) dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 255), round, 0, 2.0f * zoom_);
+        if (static_cast<i32>(i) == selected_) dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 255), round, 0, 2.0f * view_.zoom);
     }
     dl->PopClipRect();
 
@@ -783,7 +680,7 @@ bool BtGraphEditor::drawDecoratorEditor(usize di) {
         BbValue v = d.value;
         if (v.type != type) v = synapse::bbDefault(type);
         bool activated = false;
-        if (valueEditor("Value", v, type, activated)) {
+        if (bbValueEditor("Value", v, type, activated)) {
             if (activated) pushUndo();
             d.value = v;
             dirty_ = true;
@@ -925,149 +822,14 @@ void BtGraphEditor::drawNodePanel() {
 
 void BtGraphEditor::drawBlackboardPanel() {
     const LiveRefs live = liveRefs(debugEntity_, asset_.nodes.size());
-    ImGui::TextWrapped("Keys the tree reads and writes. Agent keys are private to each agent; Shared keys live "
-                       "on the team board all agents of a team see.");
-
-    const int cols = live.board ? 5 : 4;
-    if (ImGui::BeginTable("##bbkeys", cols,
-                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-        ImGui::TableSetupColumn("Name");
-        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-        ImGui::TableSetupColumn("Scope", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-        ImGui::TableSetupColumn("Default");
-        if (live.board) ImGui::TableSetupColumn("Live");
-        ImGui::TableHeadersRow();
-
-        std::string removeKeyName;
-        for (usize ki = 0; ki < asset_.schema.keys.size(); ++ki) {
-            const BbKeyDef key = asset_.schema.keys[ki];   // copy: edits below may reallocate the list
-            ImGui::PushID(static_cast<int>(ki));
-            ImGui::TableNextRow();
-
-            ImGui::TableSetColumnIndex(0);
-            char nb[64];
-            std::snprintf(nb, sizeof nb, "%s", key.name.c_str());
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            ImGui::InputText("##name", nb, sizeof nb);
-            if (ImGui::IsItemDeactivatedAfterEdit() && key.name != nb) renameKey(key.name, nb);
-
-            ImGui::TableSetColumnIndex(1);
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::BeginCombo("##type", synapse::bbTypeName(key.type))) {
-                for (u8 t = 0; t <= static_cast<u8>(BbType::Entity); ++t) {
-                    const BbType bt = static_cast<BbType>(t);
-                    if (ImGui::Selectable(synapse::bbTypeName(bt), bt == key.type) && bt != key.type) {
-                        BbKeyDef nk = key;
-                        nk.type = bt;
-                        setKey(key.name, nk);
-                        break;
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            ImGui::TableSetColumnIndex(2);
-            ImGui::SetNextItemWidth(-FLT_MIN);
-            if (ImGui::BeginCombo("##scope", synapse::bbScopeName(key.scope))) {
-                for (u8 sc = 0; sc <= static_cast<u8>(BbScope::Shared); ++sc) {
-                    const BbScope s = static_cast<BbScope>(sc);
-                    if (ImGui::Selectable(synapse::bbScopeName(s), s == key.scope) && s != key.scope) {
-                        BbKeyDef nk = key;
-                        nk.scope = s;
-                        setKey(key.name, nk);
-                        break;
-                    }
-                }
-                ImGui::EndCombo();
-            }
-
-            ImGui::TableSetColumnIndex(3);
-            ImGui::SetNextItemWidth(-60.0f);
-            BbValue dv = key.defaultValue;
-            bool activated = false;
-            if (valueEditor("##default", dv, key.type, activated)) {
-                if (activated) pushUndo();
-                asset_.schema.keys[ki].defaultValue = dv;
-                dirty_ = true;
-            } else if (activated) {
-                pushUndo();
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("x")) removeKeyName = key.name;
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this key");
-
-            if (live.board) {
-                ImGui::TableSetColumnIndex(4);
-                const i32 li = live.board->indexOf(key.name);
-                if (li < 0) {
-                    ImGui::TextDisabled("-");
-                } else {
-                    const auto fl = flash_.find(key.name);
-                    const f32 t = fl == flash_.end() ? 0.0f : fl->second;
-                    const ImVec4 col = ImVec4(0.75f + 0.25f * t, 0.85f - 0.2f * t, 0.75f - 0.45f * t, 1.0f);
-                    ImGui::TextColored(col, "%s", synapse::bbToString(live.board->valueAt(li)).c_str());
-                }
-            }
-            ImGui::PopID();
-        }
-        ImGui::EndTable();
-        if (!removeKeyName.empty()) removeKey(removeKeyName);
-    }
-
-    ImGui::Separator();
-    char kb[64];
-    std::snprintf(kb, sizeof kb, "%s", newKeyName_.c_str());
-    ImGui::SetNextItemWidth(160.0f);
-    if (ImGui::InputText("##newkey", kb, sizeof kb)) newKeyName_ = kb;
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(90.0f);
-    if (ImGui::BeginCombo("##newtype", synapse::bbTypeName(static_cast<BbType>(newKeyType_)))) {
-        for (int t = 0; t <= static_cast<int>(BbType::Entity); ++t)
-            if (ImGui::Selectable(synapse::bbTypeName(static_cast<BbType>(t)), t == newKeyType_)) newKeyType_ = t;
-        ImGui::EndCombo();
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(newKeyName_.empty() || asset_.schema.indexOf(newKeyName_) >= 0);
-    if (ImGui::Button("Add key")) {
-        BbKeyDef def;
-        def.name = newKeyName_;
-        def.type = static_cast<BbType>(newKeyType_);
-        def.defaultValue = synapse::bbDefault(def.type);
-        if (addKey(def)) newKeyName_.clear();
-    }
-    ImGui::EndDisabled();
-    ImGui::TextDisabled("Conventional keys filled from perception each tick: Target (Entity), CanSeeTarget (Bool), TimeSinceSeen (Float).");
+    drawSchemaPanel(asset_.schema, live.board, liveBoard_, schemaState_, *this);
 }
 
 void BtGraphEditor::drawDebugPanel() {
 #if AVER_BTGE_LIVE
-    scene::World& world = scene::World::instance();
-    synapse::BtSystem& sys = synapse::btSystem();
-    const u64 thisId = fnv1a64(path_);
-
-    std::vector<scene::Entity> candidates = sys.entitiesUsing(world, thisId);
-    const bool exact = !candidates.empty();
-    if (!exact) candidates = sys.entitiesUsing(world, 0);   // every entity with a tree
-
-    const char* current = "(none)";
-    if (debugEntity_ != 0 && world.valid(static_cast<scene::Entity>(debugEntity_)))
-        current = world.name(static_cast<scene::Entity>(debugEntity_));
-    if (ImGui::BeginCombo("Debug entity", current)) {
-        if (ImGui::Selectable("(none)", debugEntity_ == 0)) {
-            if (sys.watched() == debugEntity_) sys.watch(scene::kInvalidEntity);
-            debugEntity_ = 0;
-        }
-        for (const scene::Entity e : candidates) {
-            if (!world.valid(e)) continue;
-            if (ImGui::Selectable(world.name(e), debugEntity_ == e)) {
-                debugEntity_ = e;
-                sys.watch(e);
-            }
-        }
-        ImGui::EndCombo();
-    }
-    if (!exact)
-        ImGui::TextDisabled("No entity in the current scene uses this exact file; showing every entity with a tree.");
+    std::vector<u64> ids{fnv1a64(path_)};
+    if (const std::string rel = aiRelativeAssetPath(path_); !rel.empty()) ids.push_back(fnv1a64(rel));
+    drawEntityPicker(debugEntity_, ids, "tree");
 
     const LiveRefs live = liveRefs(debugEntity_, asset_.nodes.size());
     if (debugEntity_ == 0) {
@@ -1114,22 +876,7 @@ void BtGraphEditor::draw(Engine& e) {
     }
 
     // Flash keys that changed since the last frame (live board only).
-    {
-        const LiveRefs live = liveRefs(debugEntity_, asset_.nodes.size());
-        const f32 dt = ImGui::GetIO().DeltaTime;
-        for (auto& kv : flash_) kv.second = std::max(0.0f, kv.second - dt * 1.5f);
-        if (live.board) {
-            for (usize i = 0; i < live.board->size(); ++i) {
-                const std::string& name = live.board->keyDef(static_cast<i32>(i)).name;
-                const u64 stamp = live.board->stampAt(static_cast<i32>(i));
-                u64& last = lastStamp_[name];
-                if (last != 0 && stamp != last) flash_[name] = 1.0f;
-                last = stamp;
-            }
-        } else {
-            lastStamp_.clear();
-        }
-    }
+    liveBoard_.update(liveRefs(debugEntity_, asset_.nodes.size()).board, ImGui::GetIO().DeltaTime);
 
     drawToolbar();
     ImGui::Separator();
@@ -1153,13 +900,13 @@ void BtGraphEditor::draw(Engine& e) {
 
 void BtGraphEditor::resetLayout() {
     resetSplitPane(split_, kPrefSplit, kDefaultCanvasFraction);
-    panX_ = 24.0f; panY_ = 24.0f; zoom_ = 1.0f;
+    view_.panX = 24.0f; view_.panY = 24.0f; view_.zoom = 1.0f;
 }
 
 #else   // AVER_WITH_IMGUI
 
 void BtGraphEditor::draw(Engine& e) { (void)e; }
-void BtGraphEditor::resetLayout() { panX_ = 24.0f; panY_ = 24.0f; zoom_ = 1.0f; }
+void BtGraphEditor::resetLayout() { view_.panX = 24.0f; view_.panY = 24.0f; view_.zoom = 1.0f; }
 
 #endif  // AVER_WITH_IMGUI
 

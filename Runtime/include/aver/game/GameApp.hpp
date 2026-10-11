@@ -42,6 +42,10 @@
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_VOXI
 #  include "aver/game/SceneDecalFeed.hpp"
+#  include "aver/game/SceneLightFeed.hpp"   // [wave3/level-instances]
+#endif
+#if AVER_MODULE_SCENE
+#  include "aver/game/LevelInstancesAbiHost.hpp"   // [wave3/level-instances]
 #endif
 #if AVER_MODULE_LANDSCAPE
 #  include "aver/game/GameLandscape.hpp"
@@ -344,6 +348,7 @@ private:
     bool voxiAttached_ = false;
 #if AVER_MODULE_SCENE
     SceneDecalFeed sceneDecalFeed_;   // CDecal entities -> Voxi's projected-decal list, per frame
+    SceneLightFeed sceneLightFeed_;   // [wave3/level-instances] CLight entities -> Voxi lamps, per frame (the packaged game had none)
 #endif
     u32  msaaPushed_ = 0;   // sample count last given to the device
     // Frame-budget state. Ticked once a frame and seeded from project_.frameBudgetMs.
@@ -426,6 +431,9 @@ private:
     prefab::PrefabLibrary prefabLib_;
     std::unique_ptr<prefab::PrefabSystem> prefabSys_;
     AverPrefabHost prefabHost_{};
+#  ifdef AVER_WITH_LEVELINST_ABI
+    AverLevelInstanceHost levelInstHost_{};   // [wave3/level-instances] the script seam onto level_.instances()
+#  endif
 #endif
     GameLevel level_;
 #if AVER_MODULE_LANDSCAPE

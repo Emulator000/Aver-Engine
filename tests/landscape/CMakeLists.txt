@@ -73,3 +73,12 @@ add_executable(TerrainGenTool src/TerrainGenTool.cpp)
 target_link_libraries(TerrainGenTool PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(TerrainGenTool PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LayerPaintTest / CarveTest -- weightmap paint and river/lake carving (wave 3, landscape layers).
+# Aver.Landscape only: no renderer, no device.
+foreach(_t LayerPaintTest CarveTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.Landscape Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(${_t} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

@@ -15,6 +15,10 @@
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
+#  include "aver/physics/physics_water_abi.h"
+#endif
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_terrain_abi.h"
 #endif
 
 namespace aver::game {
@@ -34,6 +38,9 @@ bool GameLandscape::loadLandscape(rhi::IDevice* device, const std::string& path)
     }
     landscapeData_ = std::move(data);
     landscapeTree_ = std::move(tree);
+    if (!landscapeData_.warning.empty())
+        AVER_WARN("[Landscape] '{}': the stored paint layers were dropped: {}", path, landscapeData_.warning);
+    rebuildRemap();   // wave3 layers
     // The section is tile (0,0) of the ring now -- its outer rim borders a procedural neighbour like
     // any ring tile's does, needing the same generous floor. 2x the noise amplitude is the
     // mathematical bound on how much a ridged-fBm field can vary at all (TerrainNoise.hpp).
@@ -81,6 +88,7 @@ void GameLandscape::rebuildCollision() {
                   hf.sampleCount, hf.sampleCount);
     else
         AVER_WARN("[Landscape] physics refused the heightfield; terrain has no collision");
+    updateSurfaceSampler();   // wave3 layers: the new body takes the layers' friction
 #endif
     // CLEARED EVEN WITHOUT PHYSICS COMPILED IN, and even when the build above failed. The flag means
     // "the shape no longer describes the mesh, so ask again at the next moment that matters", and in
@@ -118,6 +126,21 @@ void GameLandscape::unload(rhi::IDevice* device) {
     strokeEmpty_ = true;
     strokeBefore_.clear();
     pendingInvalidate_ = false;
+
+    // ---- wave3 layers ----
+    layerTable_.clear();
+    sectionToMaterial_.fill(-1);
+    weightsDirty_ = false;
+    wStrokeActive_ = false;
+    wStrokeEmpty_ = true;
+    wStrokeBefore_.clear();
+#if AVER_MODULE_PHYSICS
+    aver_phys_clear_surface_sampler();
+#endif
+#if AVER_MODULE_PBR
+    releaseTerrain(device);
+#endif
+    // ---- end wave3 layers ----
 }
 
 bool GameLandscape::groundHeightAt(f64 worldXCm, f64 worldYCm, f64& outWorldZCm) const {
@@ -138,13 +161,20 @@ bool GameLandscape::scatterHeightAt(f32 worldXCm, f32 worldYCm, f32& outWorldZCm
 
 #if AVER_MODULE_PBR
 void GameLandscape::applySurface(landscape::LandscapeRenderer& r, GameContent& content,
-                                  pbr::MaterialSystem& materials) {
+                                  pbr::MaterialSystem& materials, bool ring) {
     if (landscapeMaterial_.empty()) return;
     if (!materials.ready()) return;
     const pbr::MaterialHandle h = content.materialForSurface(landscapeMaterial_);
     if (!h) return;
-    const pbr::MaterialConstants& mc = materials.constants(h);
-    r.setSurfaceBinding(materials.bindingSet(h), &mc, sizeof(pbr::MaterialConstants));
+    // wave3 layers: a layered terrain material draws through its derived copy -- the section's carries its weightmaps,
+    // the ring tiles' has none.
+    pbr::MaterialHandle use = h;
+    if (terrainActive_) {
+        use = ring ? ringMat_ : secMat_;
+        if (!use) use = h;
+    }
+    const pbr::MaterialConstants& mc = materials.constants(use);
+    r.setSurfaceBinding(materials.bindingSet(use), &mc, sizeof(pbr::MaterialConstants));
 
     // AND THE TEXTURE SCALE -- read from the resolved material's own uvTilesPerCm, not the fallback's:
     // constants() returns fallbackConstants_ for any handle not yet valid, and materialForSurface()
@@ -159,9 +189,10 @@ void GameLandscape::applySurface(landscape::LandscapeRenderer& r, GameContent& c
 void GameLandscape::applySurfaceToAll(rhi::IDevice* device, GameContent& content,
                                        pbr::MaterialSystem& materials) {
     const f32 wasTiling = landscapeUvTilingCm_;
+    syncTerrain(content, materials);   // wave3 layers: derived materials first, so the bindings below pick them
     if (landscapeRenderer_) applySurface(*landscapeRenderer_, content, materials);
     for (auto& kv : landscapeRingTiles_)
-        if (kv.second.renderer) applySurface(*kv.second.renderer, content, materials);
+        if (kv.second.renderer) applySurface(*kv.second.renderer, content, materials, true);
 
     // THE CACHED MESHES CARRY THE OLD SCALE, so eviction belongs here (compared once around the whole
     // sweep), not inside applySurface, which runs once per renderer and would leave every OTHER ring
@@ -319,7 +350,7 @@ void GameLandscape::updateRingTiles(rhi::IDevice* device, f32 cameraXCm, f32 cam
         // A tile born mid-session has to be told the surface too, or the ring renders untextured
         // around a textured home section -- a seam that moves with the camera.
 #if AVER_MODULE_PBR
-        if (content && materials) applySurface(*tile.renderer, *content, *materials);
+        if (content && materials) applySurface(*tile.renderer, *content, *materials, true);
 #endif
         landscapeRingTiles_.emplace(t, std::move(tile));
     }
@@ -336,9 +367,13 @@ void GameLandscape::draw(rhi::IDevice& device, const Vec3& eye, const Mat4& view
     // Bind the level's terrain material the first frame the material system is ready. Level load
     // cannot be trusted to be late enough: MaterialSystem::ready() also needs its GPU side up, with no
     // guaranteed order against the load, so the test runs every frame and self-heals.
+    // wave3 layers: notice an edited terrain material (and rebind), then keep the weight textures current.
+    const bool terrainChanged = content && materials && !landscapeMaterial_.empty() && materials->ready() &&
+                                syncTerrain(*content, *materials);
     if (content && materials && !landscapeMaterial_.empty() &&
-        (!landscapeRenderer_->hasSurfaceBinding() || !landscapeUvTilingResolved_))
+        (terrainChanged || !landscapeRenderer_->hasSurfaceBinding() || !landscapeUvTilingResolved_))
         applySurfaceToAll(&device, *content, *materials);
+    flushWeights(&device, materials);
 #else
     (void)content; (void)materials;
 #endif
@@ -540,6 +575,519 @@ bool GameLandscape::save(std::string* why) {
     rebuildCollision();
     return true;
 }
+
+// ---- wave3 layers ----
+namespace {
+
+constexpr usize kLayerCap = 8;
+
+void copyUtf8(char* dst, i32 cap, const std::string& s) {
+    if (!dst || cap <= 0) return;
+    const usize n = std::min<usize>(s.size(), static_cast<usize>(cap) - 1);
+    std::copy(s.begin(), s.begin() + static_cast<std::ptrdiff_t>(n), dst);
+    dst[n] = 0;
+}
+
+} // namespace
+
+void GameLandscape::rebuildRemap() {
+    sectionToMaterial_.fill(-1);
+    const std::vector<std::string>& names = landscapeData_.layerNames;
+    for (usize s = 0; s < names.size() && s < kLayerCap; ++s)
+        for (usize m = 0; m < layerTable_.size(); ++m)
+            if (layerTable_[m].name == names[s]) { sectionToMaterial_[s] = static_cast<i32>(m); break; }
+    weightsDirty_ = true;
+}
+
+void GameLandscape::setLayerTable(std::vector<LayerInfo> layers) {
+    if (layers.size() > kLayerCap) layers.resize(kLayerCap);
+    layerTable_ = std::move(layers);
+    rebuildRemap();
+    updateSurfaceSampler();
+}
+
+const std::string& GameLandscape::materialLayerName(u32 i) const {
+    static const std::string kNone;
+    return i < layerTable_.size() ? layerTable_[i].name : kNone;
+}
+
+i32 GameLandscape::surfaceThunk(f32 x, f32 y, f32* outFriction, f32* outRestitution, void* user) {
+    const auto* self = static_cast<const GameLandscape*>(user);
+    f32 fr = 0.0f, re = 0.0f;
+    if (!self || !self->surfaceFrictionAt(x, y, fr, re)) return 0;
+    if (outFriction) *outFriction = fr;
+    if (outRestitution) *outRestitution = re;
+    return 1;
+}
+
+void GameLandscape::updateSurfaceSampler() {
+#if AVER_MODULE_PHYSICS
+    // The heightfield body takes the layers' friction only while there are layers to ask.
+    if (landscapeBody_ < 0) return;
+    if (layerTable_.empty()) {
+        aver_phys_body_set_surface_sampled(landscapeBody_, 0);
+        return;
+    }
+    aver_phys_set_surface_sampler(&GameLandscape::surfaceThunk, this);
+    aver_phys_body_set_surface_sampled(landscapeBody_, 1);
+#endif
+}
+
+bool GameLandscape::ensureLayer(const std::string& name, u32& outIndex) {
+    if (!loaded_ || wStrokeActive_ || layerTable_.empty()) return false;
+    if (!landscapeData_.hasLayers()) {
+        u32 base = 0;
+        if (!landscape::ensureLayer(landscapeData_, layerTable_.front().name, base)) return false;
+    }
+    if (!landscape::ensureLayer(landscapeData_, name, outIndex)) return false;
+    dirty_ = true;
+    rebuildRemap();
+    return true;
+}
+
+bool GameLandscape::removeLayer(u32 index) {
+    if (!loaded_ || wStrokeActive_ || !landscape::removeLayer(landscapeData_, index)) return false;
+    dirty_ = true;
+    rebuildRemap();
+    return true;
+}
+
+void GameLandscape::fillLayer(u32 layer) {
+    if (!loaded_ || !landscapeData_.layersValid() || layer >= landscapeData_.layerNames.size()) return;
+    if (wStrokeActive_) growWeightStroke(landscape::BrushRect{0, 0, landscapeData_.sampleCount - 1, landscapeData_.sampleCount - 1, false});
+    landscape::fillLayer(landscapeData_, layer);
+    weightsDirty_ = dirty_ = true;
+}
+
+void GameLandscape::autoFillBySlope(u32 layer, f32 minSlopeDeg, f32 maxSlopeDeg, f32 minZCm, f32 maxZCm, f32 featherDeg, f32 amount) {
+    if (!loaded_ || !landscapeData_.layersValid() || layer >= landscapeData_.layerNames.size()) return;
+    if (wStrokeActive_) growWeightStroke(landscape::BrushRect{0, 0, landscapeData_.sampleCount - 1, landscapeData_.sampleCount - 1, false});
+    landscape::autoFillBySlope(landscapeData_, layer, minSlopeDeg, maxSlopeDeg, minZCm, maxZCm, featherDeg, amount);
+    weightsDirty_ = dirty_ = true;
+}
+
+landscape::BrushRect GameLandscape::paint(rhi::IDevice*, const landscape::PaintParams& p, f32 amount) {
+    if (!loaded_ || !landscapeData_.layersValid()) return landscape::BrushRect{};
+    growWeightStroke(landscape::paintRect(landscapeData_, p));
+    const landscape::BrushRect touched = landscape::applyPaint(landscapeData_, p, amount);
+    if (!touched.empty) weightsDirty_ = dirty_ = true;
+    return touched;
+}
+
+void GameLandscape::beginWeightStroke() {
+    wStrokeActive_ = true;
+    wStrokeEmpty_ = true;
+    wStrokeBefore_.clear();
+    wStrokePlanes_ = landscapeData_.layerNames.empty() ? 0u : static_cast<u32>(landscapeData_.layerNames.size() - 1);
+}
+
+void GameLandscape::growWeightStroke(const landscape::BrushRect& r) {
+    if (r.empty || !wStrokeActive_ || wStrokePlanes_ == 0) return;
+    const u32 n = landscapeData_.sampleCount;
+    const usize nn = static_cast<usize>(n) * n;
+    if (landscapeData_.weights.size() < static_cast<usize>(wStrokePlanes_) * nn) return;
+    u32 nx0 = r.x0, ny0 = r.y0, nx1 = r.x1, ny1 = r.y1;
+    if (!wStrokeEmpty_) {
+        nx0 = std::min(nx0, wStrokeX0_); ny0 = std::min(ny0, wStrokeY0_);
+        nx1 = std::max(nx1, wStrokeX1_); ny1 = std::max(ny1, wStrokeY1_);
+    }
+    if (nx1 >= n || ny1 >= n) return;
+    // Re-capture at the grown size: samples already inside the old rect keep their ORIGINAL pre-stroke value.
+    const u32 nw = nx1 - nx0 + 1, nh = ny1 - ny0 + 1;
+    const usize oldW = wStrokeEmpty_ ? 0 : wStrokeX1_ - wStrokeX0_ + 1, oldH = wStrokeEmpty_ ? 0 : wStrokeY1_ - wStrokeY0_ + 1;
+    std::vector<u8> grown(static_cast<usize>(wStrokePlanes_) * nw * nh);
+    for (u32 pl = 0; pl < wStrokePlanes_; ++pl)
+        for (u32 y = ny0; y <= ny1; ++y)
+            for (u32 x = nx0; x <= nx1; ++x) {
+                const bool inOld = !wStrokeEmpty_ && x >= wStrokeX0_ && x <= wStrokeX1_ && y >= wStrokeY0_ && y <= wStrokeY1_;
+                grown[(static_cast<usize>(pl) * nh + (y - ny0)) * nw + (x - nx0)] =
+                    inOld ? wStrokeBefore_[(static_cast<usize>(pl) * oldH + (y - wStrokeY0_)) * oldW + (x - wStrokeX0_)]
+                          : landscapeData_.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x];
+            }
+    wStrokeBefore_ = std::move(grown);
+    wStrokeX0_ = nx0; wStrokeY0_ = ny0; wStrokeX1_ = nx1; wStrokeY1_ = ny1;
+    wStrokeEmpty_ = false;
+}
+
+bool GameLandscape::endWeightStroke(std::vector<u8>& before, std::vector<u8>& after, u32& x0, u32& y0, u32& x1, u32& y1, u32& planes) {
+    if (!wStrokeActive_) return false;
+    wStrokeActive_ = false;
+    if (wStrokeEmpty_ || !loaded_ || wStrokePlanes_ == 0) { wStrokeBefore_.clear(); return false; }
+    const u32 n = landscapeData_.sampleCount;
+    const usize nn = static_cast<usize>(n) * n;
+    const u32 w = wStrokeX1_ - wStrokeX0_ + 1, h = wStrokeY1_ - wStrokeY0_ + 1;
+    after.resize(static_cast<usize>(wStrokePlanes_) * w * h);
+    for (u32 pl = 0; pl < wStrokePlanes_; ++pl)
+        for (u32 y = wStrokeY0_; y <= wStrokeY1_; ++y)
+            for (u32 x = wStrokeX0_; x <= wStrokeX1_; ++x)
+                after[(static_cast<usize>(pl) * h + (y - wStrokeY0_)) * w + (x - wStrokeX0_)] =
+                    landscapeData_.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x];
+    before = std::move(wStrokeBefore_);
+    x0 = wStrokeX0_; y0 = wStrokeY0_; x1 = wStrokeX1_; y1 = wStrokeY1_;
+    planes = wStrokePlanes_;
+    wStrokeBefore_.clear();
+    if (before == after) return false;   // a stroke that changed nothing makes no undo entry
+    weightsDirty_ = true;                // upload at once, not on the 100 ms timer
+    return true;
+}
+
+bool GameLandscape::applyWeightRect(u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src) {
+    if (!loaded_ || src.empty() || !landscapeData_.layersValid()) return false;
+    const u32 n = landscapeData_.sampleCount;
+    if (x1 >= n || y1 >= n || x0 > x1 || y0 > y1) return false;
+    const u32 stored = landscapeData_.layerNames.empty() ? 0u : static_cast<u32>(landscapeData_.layerNames.size() - 1);
+    if (planes == 0 || planes > stored) return false;
+    const u32 w = x1 - x0 + 1, h = y1 - y0 + 1;
+    if (src.size() != static_cast<usize>(planes) * w * h) return false;
+    const usize nn = static_cast<usize>(n) * n;
+    for (u32 pl = 0; pl < planes; ++pl)
+        for (u32 y = y0; y <= y1; ++y)
+            for (u32 x = x0; x <= x1; ++x)
+                landscapeData_.weights[static_cast<usize>(pl) * nn + static_cast<usize>(y) * n + x] =
+                    src[(static_cast<usize>(pl) * h + (y - y0)) * w + (x - x0)];
+    weightsDirty_ = dirty_ = true;
+    return true;
+}
+
+bool GameLandscape::surfaceFrictionAt(f32 xCm, f32 yCm, f32& outFriction, f32& outRestitution) const {
+    if (!loaded_ || layerTable_.empty()) return false;
+    f32 sw[8];
+    if (!landscape::layerWeightsAt(landscapeData_, xCm, yCm, sw)) return false;
+    f32 mw[8] = {};
+    const usize L = std::max<usize>(landscapeData_.layerNames.size(), 1);
+    for (usize s = 0; s < L && s < kLayerCap; ++s) {
+        const i32 c = s < landscapeData_.layerNames.size() ? sectionToMaterial_[s] : 0;
+        mw[c >= 0 ? static_cast<usize>(c) : 0] += sw[s];
+    }
+    f32 fr = 0.0f, re = 0.0f, total = 0.0f;
+    for (usize m = 0; m < layerTable_.size(); ++m) {
+        fr += layerTable_[m].friction * mw[m];
+        re += layerTable_[m].restitution * mw[m];
+        total += mw[m];
+    }
+    if (total <= 1e-6f) return false;
+    outFriction = fr / total;
+    outRestitution = re / total;
+    return true;
+}
+
+bool GameLandscape::sampleGround(f32 xCm, f32 yCm, GroundInfo& out) const {
+    if (!loaded_) return false;
+    f32 z = 0.0f;
+    if (!landscape::surfaceHeightAt(landscapeData_, xCm, yCm, z)) return false;
+    out = GroundInfo{};
+    out.z = z;
+
+    // The slope: central differences one sample apart, falling back to the centre height at the section's rim.
+    const f32 s = landscapeData_.spacingCm;
+    const auto h = [&](f32 x, f32 y) { f32 v = z; landscape::surfaceHeightAt(landscapeData_, x, y, v); return v; };
+    const f32 dzdx = (h(xCm + s, yCm) - h(xCm - s, yCm)) / (2.0f * s);
+    const f32 dzdy = (h(xCm, yCm + s) - h(xCm, yCm - s)) / (2.0f * s);
+    const f32 il = 1.0f / std::sqrt(dzdx * dzdx + dzdy * dzdy + 1.0f);
+    out.normal[0] = -dzdx * il; out.normal[1] = -dzdy * il; out.normal[2] = il;
+
+    if (layerTable_.empty()) return true;
+    f32 sw[8];
+    if (!landscape::layerWeightsAt(landscapeData_, xCm, yCm, sw)) return true;
+    const usize L = std::max<usize>(landscapeData_.layerNames.size(), 1);
+    for (usize i = 0; i < L && i < kLayerCap; ++i) {
+        const i32 c = i < landscapeData_.layerNames.size() ? sectionToMaterial_[i] : 0;
+        out.weights[c >= 0 ? static_cast<usize>(c) : 0] += sw[i];
+    }
+    out.dominant = landscape::dominantLayer(out.weights, static_cast<u32>(layerTable_.size()));
+    f32 fr = 0.0f, re = 0.0f, total = 0.0f;
+    for (usize m = 0; m < layerTable_.size(); ++m) {
+        fr += layerTable_[m].friction * out.weights[m];
+        re += layerTable_[m].restitution * out.weights[m];
+        total += out.weights[m];
+    }
+    if (total > 1e-6f) { out.friction = fr / total; out.restitution = re / total; }
+    out.surface = layerTable_[out.dominant].surfaceName();
+    return true;
+}
+
+void GameLandscape::heightsEdited(rhi::IDevice* device, const landscape::BrushRect& touched) {
+    if (touched.empty) return;
+    std::string why;
+    if (landscapeTree_.build(landscapeData_, landscapeTree_.nodeQuads(), &why)) {
+        landscapeTree_.widenRimSkirts(2.0f * landscapeNoiseParams_.amplitudeCm);
+        landscapeTree_.resetHysteresis();
+        if (landscapeRenderer_ && device)
+            landscapeRenderer_->forgetOverlapping(*device, landscapeTree_, touched.x0, touched.y0, touched.x1, touched.y1);
+    } else {
+        AVER_ERROR("[Landscape] a height edit left the section unbuildable: {}", why);
+    }
+    dirty_ = true;
+    collisionStale_ = true;
+}
+
+landscape::BrushRect GameLandscape::carveRiver(rhi::IDevice* device, const landscape::CarvePoint* pts, u32 n,
+                                               const landscape::CarveParams& p) {
+    if (!loaded_) return landscape::BrushRect{};
+    growStroke(landscape::carveRect(landscapeData_, pts, n, p));
+    const landscape::BrushRect touched = landscape::carveRiver(landscapeData_, pts, n, p);
+    heightsEdited(device, touched);
+    return touched;
+}
+
+landscape::BrushRect GameLandscape::carveBasin(rhi::IDevice* device, const f32* polyXY, u32 count, f32 levelCm,
+                                               const landscape::CarveParams& p) {
+    if (!loaded_) return landscape::BrushRect{};
+    growStroke(landscape::basinRect(landscapeData_, polyXY, count, p));
+    const landscape::BrushRect touched = landscape::carveBasin(landscapeData_, polyXY, count, levelCm, p);
+    heightsEdited(device, touched);
+    return touched;
+}
+
+void GameLandscape::setSurfaceMaterial(const std::string& name) {
+    landscapeMaterial_ = name;
+    landscapeUvTilingResolved_ = false;   // draw() re-applies the surface (and re-syncs the terrain material) next frame
+#if AVER_MODULE_PBR
+    baseSig_ = 0;                          // force syncTerrain to look again
+#endif
+}
+
+void GameLandscape::installProviders() {
+#if AVER_MODULE_FRAMEWORK
+    aver_fw_set_terrain_provider(
+        [](f32 x, f32 y, f32* outZ, f32* outNormal3, i32* outDominant, f32* outWeights, void* user) -> i32 {
+            GroundInfo g;
+            if (!static_cast<const GameLandscape*>(user)->sampleGround(x, y, g)) return 0;
+            if (outZ) *outZ = g.z;
+            if (outNormal3) for (int i = 0; i < 3; ++i) outNormal3[i] = g.normal[i];
+            if (outDominant) *outDominant = static_cast<i32>(g.dominant);
+            if (outWeights) for (int i = 0; i < AVER_FW_TERRAIN_MAX_LAYERS; ++i) outWeights[i] = g.weights[i];
+            return 1;
+        },
+        [](void* user) -> i32 { return static_cast<i32>(static_cast<const GameLandscape*>(user)->materialLayerCount()); },
+        [](i32 layer, char* nameBuf, i32 nameCap, char* surfaceBuf, i32 surfaceCap, f32* outFriction, f32* outRestitution,
+           void* user) -> i32 {
+            const LayerInfo* l = layer < 0 ? nullptr : static_cast<const GameLandscape*>(user)->materialLayer(static_cast<u32>(layer));
+            if (!l) return 0;
+            copyUtf8(nameBuf, nameCap, l->name);
+            copyUtf8(surfaceBuf, surfaceCap, l->surfaceName());
+            if (outFriction) *outFriction = l->friction;
+            if (outRestitution) *outRestitution = l->restitution;
+            return 1;
+        },
+        this);
+#endif
+}
+
+#if AVER_MODULE_PBR
+namespace {
+
+// Everything that decides how the derived section / ring materials and the layer table must look.
+u64 terrainSignature(const pbr::MaterialDesc& d) {
+    u64 h = 1469598103934665603ull;   // FNV-1a
+    const auto mix = [&h](const void* p, usize n) {
+        const u8* b = static_cast<const u8*>(p);
+        for (usize i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    };
+    const auto str = [&](const std::string& s) { mix(s.data(), s.size()); const u8 z = 0; mix(&z, 1); };
+    const auto ref = [&](const pbr::TextureRef& r) { str(r.path); mix(&r.id, sizeof r.id); };
+    mix(d.baseColorFactor, sizeof d.baseColorFactor);
+    const f32 scalars[] = {d.metallicFactor, d.roughnessFactor, d.normalScale, d.occlusionStrength, d.reflectance, d.f90,
+                           d.uvTiling, d.terrain.blendDepth};
+    mix(scalars, sizeof scalars);
+    mix(&d.terrain.tileTexels, sizeof d.terrain.tileTexels);
+    mix(&d.terrain.padTexels, sizeof d.terrain.padTexels);
+    mix(&d.graphId, sizeof d.graphId);
+    for (const pbr::TerrainLayerDesc& l : d.terrain.layers) {
+        str(l.name); str(l.surface); str(l.foliage);
+        ref(l.baseColor); ref(l.normal); ref(l.metalRough); ref(l.height);
+        const f32 f[] = {l.tilingCm, l.heightBias, l.friction, l.restitution, l.foliageDensity, l.foliageMinWeight};
+        mix(f, sizeof f);
+    }
+    return h;
+}
+
+rhi::TextureHandle makeRgba8(rhi::IResourceFactory& res, u32 n, const std::vector<std::vector<u8>>& levels, const char* name) {
+    std::vector<const void*> ptrs;
+    ptrs.reserve(levels.size());
+    for (const std::vector<u8>& l : levels) ptrs.push_back(l.data());
+    rhi::TextureDesc d;
+    d.width = d.height = n;
+    d.mips = static_cast<u32>(levels.size());
+    d.format = rhi::Format::RGBA8Unorm;
+    d.bind = rhi::ResourceBind::ShaderResource;
+    d.initialState = rhi::ResourceState::ShaderResource;
+    d.initialData = ptrs.data();
+    d.initialDataCount = static_cast<u32>(ptrs.size());
+    d.initialRowPitch = n * 4;
+    d.debugName = name;
+    return res.createTexture(d);
+}
+
+} // namespace
+
+void GameLandscape::makeTerrainSectionDescs(const pbr::MaterialDesc& base, pbr::MaterialDesc& sec, pbr::MaterialDesc& ring) {
+    sec = base;
+    ring = base;
+    sec.name = base.name + "#sec";
+    ring.name = base.name + "#ring";
+    // Slots 3..5 hold the section's weightmaps and parameters under the terrain flag; the ring has none.
+    for (u32 i = static_cast<u32>(pbr::TextureSlot::Occlusion); i < pbr::kTextureSlotCount; ++i) {
+        sec.textures[i] = pbr::TextureRef{};
+        ring.textures[i] = pbr::TextureRef{};
+    }
+    sec.textures[static_cast<u32>(pbr::TextureSlot::Occlusion)].path = "@rt:land.w0";
+    sec.textures[static_cast<u32>(pbr::TextureSlot::Emissive)].path = "@rt:land.w1";
+    sec.textures[static_cast<u32>(pbr::TextureSlot::Layer1BaseColor)].path = "@rt:land.params";
+}
+
+bool GameLandscape::syncTerrain(GameContent& content, pbr::MaterialSystem& materials) {
+    if (landscapeMaterial_.empty() || !materials.ready()) return false;
+    lastMaterials_ = &materials;
+    pbr::MaterialLibrary& lib = pbr::MaterialLibrary::get();
+    const pbr::MaterialHandle h = content.materialForSurface(landscapeMaterial_);
+    const pbr::MaterialDesc* d = h && lib.valid(h) ? lib.desc(h) : nullptr;
+    if (!d || !d->terrain.enabled()) {
+        if (!terrainActive_) return false;
+        // The material stopped being layered (edited, or swapped): back to the plain single-material path.
+        releaseTerrain(nullptr);
+        layerTable_.clear();
+        rebuildRemap();
+        updateSurfaceSampler();
+        return true;
+    }
+    const u64 sig = terrainSignature(*d);
+    if (terrainActive_ && baseMat_ == h && sig == baseSig_) return false;
+
+    pbr::MaterialDesc sec, ring;
+    makeTerrainSectionDescs(*d, sec, ring);
+    if (secMat_) lib.update(secMat_, sec); else secMat_ = lib.create(sec);
+    if (ringMat_) lib.update(ringMat_, ring); else ringMat_ = lib.create(ring);
+
+    std::vector<LayerInfo> layers;
+    for (const pbr::TerrainLayerDesc& l : d->terrain.layers) {
+        LayerInfo li;
+        li.name = l.name; li.surface = l.surface; li.foliage = l.foliage;
+        li.friction = l.friction; li.restitution = l.restitution;
+        li.tilingCm = l.tilingCm; li.foliageDensity = l.foliageDensity; li.foliageMinWeight = l.foliageMinWeight;
+        layers.push_back(std::move(li));
+    }
+    baseMat_ = h;
+    baseSig_ = sig;
+    terrainActive_ = true;
+    paramsDirty_ = true;
+    setLayerTable(std::move(layers));   // remap + physics sampler; marks the weights dirty
+    AVER_INFO("[Landscape] layered terrain material '{}': {} layer(s)", d->name, d->terrain.layers.size());
+    return true;
+}
+
+void GameLandscape::releaseTerrain(rhi::IDevice* device) {
+    pbr::MaterialLibrary& lib = pbr::MaterialLibrary::get();
+    if (lastMaterials_ && lastMaterials_->ready()) {
+        for (const char* nm : {"land.w0", "land.w1", "land.params"}) {
+            const rhi::TextureHandle t = lastMaterials_->clearRuntimeTexture(nm);
+            if (t) retired_.push_back({t, flushFrame_});
+        }
+    } else {
+        for (const u32 t : {texA_, texB_, texParams_}) if (t) retired_.push_back({t, flushFrame_});
+    }
+    texA_ = texB_ = texParams_ = 0;
+    paramsDirty_ = true;
+    if (secMat_) lib.destroy(secMat_);
+    if (ringMat_) lib.destroy(ringMat_);
+    secMat_ = ringMat_ = baseMat_ = 0;
+    baseSig_ = 0;
+    terrainActive_ = false;
+    if (device) {
+        if (rhi::IResourceFactory* res = device->resources())
+            for (const Retired& r : retired_) res->destroyTexture(r.texture);
+        retired_.clear();
+        lastMaterials_ = nullptr;
+    }
+}
+
+void GameLandscape::flushWeights(rhi::IDevice* device, pbr::MaterialSystem* materials) {
+    ++flushFrame_;
+    rhi::IResourceFactory* res = device ? device->resources() : nullptr;
+    // Replaced textures wait a few frames: the swap reaches the binding sets on the next MaterialSystem::update().
+    if (res) {
+        for (auto it = retired_.begin(); it != retired_.end();) {
+            if (flushFrame_ - it->frame >= 4) { res->destroyTexture(it->texture); it = retired_.erase(it); }
+            else ++it;
+        }
+    }
+    if (!loaded_ || !terrainActive_ || !res || !materials || !materials->ready() || !weightsDirty_) return;
+    using clock = std::chrono::steady_clock;
+    const auto now = clock::now();
+    // Throttled while painting. Every new texture takes a slot in the ray path's bindless table, which only ever grows, so
+    // the cadence is gentler than the design's 100 ms and a stroke's end uploads at once.
+    if (wStrokeActive_ && now - lastUpload_ < std::chrono::milliseconds(250)) return;
+
+    pbr::MaterialLibrary& lib = pbr::MaterialLibrary::get();
+    const pbr::MaterialDesc* base = lib.desc(baseMat_);
+    if (!base || !secMat_) return;
+    materials->bindingSet(secMat_);   // building the set resolves the atlas, whose layout the parameters need
+    pbr::TerrainTextures info;
+    if (!materials->terrainTextures(*base, info)) return;   // no atlas (yet): stay dirty, try again
+    lastUpload_ = now;
+    weightsDirty_ = false;
+    lastMaterials_ = materials;
+
+    rhi::TextureHandle a = 0, b = 0, p = 0;
+    const u32 n = landscapeData_.sampleCount;
+    const bool painted = landscapeData_.hasLayers() && landscapeData_.layerNames.size() >= 2 && landscapeData_.layersValid();
+    bool keepParams = false;
+    if (painted) {
+        std::vector<u8> imgA, imgB;
+        i32 chan[8];
+        for (usize i = 0; i < 8; ++i) chan[i] = sectionToMaterial_[i];
+        landscape::packWeightTextures(landscapeData_, chan, static_cast<u32>(layerTable_.size()), imgA, imgB);
+        std::vector<std::vector<u8>> la, lb;
+        landscape::buildMipChainRGBA8(n, imgA, la);
+        a = makeRgba8(*res, n, la, "terrain weights A");
+        // The second map (layers 5..7) only exists when some layer maps there; otherwise the slot keeps the shared zero texture.
+        bool needB = false;
+        for (usize s = 0; s < landscapeData_.layerNames.size() && s < 8; ++s)
+            needB |= chan[s] >= 5 && static_cast<usize>(chan[s]) < layerTable_.size();
+        if (needB) {
+            landscape::buildMipChainRGBA8(n, imgB, lb);
+            b = makeRgba8(*res, n, lb, "terrain weights B");
+        }
+
+        // The parameters depend on the layers and the section, not on the weights: reused across strokes.
+        keepParams = texParams_ != 0 && !paramsDirty_;
+        if (keepParams) p = texParams_;
+        if (!keepParams) {
+        paramsDirty_ = false;
+        f32 texels[pbr::kTerrainParamFloats];
+        pbr::TerrainSection sec;
+        sec.originXCm = landscapeData_.originCm[0];
+        sec.originYCm = landscapeData_.originCm[1];
+        sec.spacingCm = landscapeData_.spacingCm;
+        sec.n = n;
+        pbr::terrainParamTexels(*base, info, &sec, base->uvTiling > 0.0f ? 1.0f / base->uvTiling : 0.0f, texels);
+        rhi::TextureDesc td;
+        td.width = pbr::kTerrainParamWidth;
+        td.height = pbr::kTerrainParamHeight;
+        td.format = rhi::Format::R32Float;
+        td.bind = rhi::ResourceBind::ShaderResource;
+        td.initialState = rhi::ResourceState::ShaderResource;
+        const void* lv[1] = {texels};
+        td.initialData = lv;
+        td.initialDataCount = 1;
+        td.initialRowPitch = pbr::kTerrainParamWidth * 4;
+        td.debugName = "terrain params (section)";
+        p = res->createTexture(td);
+        }
+    }
+    // a/b/p stay 0 for an unpainted section: the slots fall back to zero weights and base-only parameters.
+    const rhi::TextureHandle ra = materials->setRuntimeTexture("land.w0", a);
+    const rhi::TextureHandle rb = materials->setRuntimeTexture("land.w1", b);
+    rhi::TextureHandle rp = 0;
+    if (!keepParams) rp = materials->setRuntimeTexture("land.params", p);
+    for (const rhi::TextureHandle t : {ra, rb, rp}) if (t) retired_.push_back({t, flushFrame_});
+    texA_ = a; texB_ = b; texParams_ = p;
+    lib.touch(secMat_);
+}
+#else
+void GameLandscape::flushWeights(rhi::IDevice*, pbr::MaterialSystem*) {}   // no PBR module: nothing to upload
+#endif // AVER_MODULE_PBR
+// ---- end wave3 layers ----
 
 } // namespace aver::game
 

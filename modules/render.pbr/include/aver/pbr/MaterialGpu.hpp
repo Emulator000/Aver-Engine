@@ -45,6 +45,13 @@ enum MaterialFlag : u32 {
     // the ray-driven local-light pass (CSRdLocalLights) to decide whether a draw's bounding sphere
     // becomes a light source; every other consumer of this material ignores the bit entirely.
     MaterialFlag_Light               = 1u << 16,
+
+    // ---- wave3 terrain layers ----
+    // A layered terrain material (MaterialDesc::terrain). Under this bit the texture slots mean:
+    // 0 albedo atlas (a = layer height), 1 ORM atlas, 2 normal atlas, 3 weightmap A (layers 1..4),
+    // 4 weightmap B (layers 5..7), 5 the parameter texture (8 x 9 R32Float, TerrainLayers.hpp).
+    // Clears SlopeBlend (they do not combine). Nothing about a material without it changes.
+    MaterialFlag_TerrainLayers       = 1u << 17,
 };
 
 // The packed per-material GPU constant block. MIRRORS the HLSL `cbuffer AverMaterial` in

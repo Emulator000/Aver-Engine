@@ -138,6 +138,12 @@ bool InstanceSetDoc::load(const std::string& path, std::string* why) {
     fmt::OcInstanceData data;
     if (!fmt::loadOcInstances(path, data, why)) return false;   // a failed (re)load leaves the old state
     if (!model_.load(data, why)) { loaded_ = false; return false; }
+    // [wave3/level-instances] a baked level pack (Binaries/LevelPacks) is read-only: Bake Pack regenerates it
+    {
+        std::string norm = path;
+        for (char& c : norm) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        model_.setReadOnly(norm.find("/levelpacks/") != std::string::npos);
+    }
     path_ = path;
     loaded_ = true;
     stamp_ = stampOf(path_);
@@ -874,6 +880,7 @@ private:
         ImGui::SameLine();
         ImGui::TextDisabled("  %s", std::filesystem::path(path_).filename().string().c_str());
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path_.c_str());
+        if (m.readOnly()) ImGui::TextColored(amber, "Read-only: a baked level pack. Bake Pack regenerates it.");   // [wave3/level-instances]
         ImGui::Separator();
 
         if (externalChange_) {

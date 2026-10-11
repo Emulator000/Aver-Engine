@@ -184,3 +184,16 @@ Editor rules (fully editable; sandbox/src/SandboxLevelStream.cpp):
   loaded-count readout, and Save and Reopen to apply a change.
 - Known limits: streamed `vehicle` placements park (they are not driven in Play); the outliner lists only
   what is loaded.
+
+<!-- [wave3/level-instances begin] -->
+## 7. Level instances as units
+
+A level instance (`LEVELINST`, docs/LEVEL_INSTANCES.md) is a unit of residency in its own right. `game::LevelInstances` builds a
+`world::PlacementStreamer` over the world boxes of the host level's top-level instances (`EXTENT` of the child through the instance
+transform) and realises or unrealises a whole instance at a time; `LevelStreaming` is unchanged and still owns the host level's
+placements. An instance streams when its record says `stream 1`, or says nothing and the host level has `STREAM` with a device; an
+instance with unknown bounds is never given to the streamer and stays loaded. Loads wait for every mesh the unit needs (prefetched within
+1.3 x `loadCm`), then run one unit per tick within the same near/far budget `LevelStreaming` uses; a unit is atomic, so keep a streamed child
+to a few thousand placements. Selected, edited, hand-loaded and override-dirty instances are pinned; overrides are stored on the record
+before an eviction. Nested instances load and unload with their top-level unit and ignore the child's own `STREAM` record.
+<!-- [wave3/level-instances end] -->

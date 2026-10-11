@@ -17,6 +17,9 @@ add_library(Aver.Landscape STATIC
   # (raise/lower/smooth/flatten/ramp/noise) that mutate an OcLandData's heights in place.
   src/HeightfieldRay.cpp
   src/Sculpt.cpp
+  # Weightmap paint (layers on an OcLandData) and one-shot river/lake carving. Both CPU-only.
+  src/Paint.cpp
+  src/Carve.cpp
   # The infinite fill past an authored section's own rim: a linkable copy of TerrainGenTool's noise
   # (TerrainNoise.cpp), and the tile coordinate + procedural-section synthesis built on top of it
   # (TerrainTile.cpp). See TerrainNoise.hpp for why this is not pcg::sampleInfinite.

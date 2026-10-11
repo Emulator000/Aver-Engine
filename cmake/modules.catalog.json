@@ -293,6 +293,25 @@
     },
     {
       "schema": 1,
+      "name": "Aver.LevelInstance.Abi",
+      "dir": "levelinstance.abi",
+      "displayName": "Level Instances ABI",
+      "description": "Plain-C seam to place, stream and query level instances from scripts.",
+      "category": "Gameplay",
+      "option": null,
+      "required": false,
+      "default": true,
+      "dependsOn": [
+        "Aver.Core",
+        "Aver.Scene"
+      ],
+      "derivedFrom": [
+        "Aver.Scene"
+      ],
+      "consequence": "Scripts cannot place, stream or query level instances."
+    },
+    {
+      "schema": 1,
       "name": "Aver.Mcp",
       "dir": "mcp",
       "displayName": "Editor Control Channel",
@@ -940,7 +959,7 @@
       "derivedFrom": [
         "Aver.Scene"
       ],
-      "consequence": "Scripts cannot reach steering, crowds, hearing, cover or squads."
+      "consequence": "Scripts cannot reach steering, crowds, hearing, cover, squads, queries or smart objects."
     },
     {
       "schema": 1,
@@ -980,7 +999,7 @@
       "derivedFrom": [
         "Aver.Scene"
       ],
-      "consequence": "No AI agents, perception or behaviour trees in a scene."
+      "consequence": "No AI agents, perception, behaviour trees, state trees, environment queries or smart objects in a scene."
     },
     {
       "schema": 1,

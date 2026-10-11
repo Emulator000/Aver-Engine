@@ -5,6 +5,8 @@
 #include "aver/core/Log.hpp"
 
 #include <chrono>
+#include <cstdio>
+#include <cstring>
 
 namespace aver::pbr {
 
@@ -93,11 +95,13 @@ bool MaterialSystem::createFallbackTextures() {
     const u8 white[4]  = {255, 255, 255, 255};
     const u8 normal[4] = {128, 128, 255, 255};
     const u8 mr[4]     = {0, 255, 255, 255};
+    const u8 zero[4]   = {0, 0, 0, 0};
 
+    zero_       = makePixel(*res_, zero,   rhi::Format::RGBA8Unorm,     "pbr fallback zero");
     white_      = makePixel(*res_, white,  rhi::Format::RGBA8UnormSrgb, "pbr fallback white");
     flatNormal_ = makePixel(*res_, normal, rhi::Format::RGBA8Unorm,     "pbr fallback normal");
     metalRough_ = makePixel(*res_, mr,     rhi::Format::RGBA8Unorm,     "pbr fallback metalrough");
-    if (white_ && flatNormal_ && metalRough_) return true;
+    if (white_ && flatNormal_ && metalRough_ && zero_) return true;
     AVER_ERROR("[PBR] the fallback textures could not be created");
     return false;
 }
@@ -129,7 +133,11 @@ void MaterialSystem::shutdown() {
     // init() hands the same numeric handle to something unrelated. entries_ is already cleared, so
     // clearing outright is exact, not merely convenient.
     liveSets_.clear();
-    for (rhi::TextureHandle* t : {&white_, &flatNormal_, &metalRough_}) {
+    // wave3 terrain layers: the runtime textures belong to their creators; only the bookkeeping goes.
+    rtTextures_.clear();
+    rtHandles_.clear();
+    terrainInfo_.clear();
+    for (rhi::TextureHandle* t : {&white_, &flatNormal_, &metalRough_, &zero_}) {
         if (*t) res_->destroyTexture(*t);
         *t = 0;
     }
@@ -152,6 +160,12 @@ void MaterialSystem::shutdown() {
 // Resolves a reference through the host's resolver, caching the result. 0 when unavailable.
 MaterialSystem::ResolvedTexture MaterialSystem::resolveTexture(const TextureRef& ref, TextureSlot slot,
                                                                bool retryFailed) {
+    // wave3 terrain layers: a runtime texture is looked up by name and never cached.
+    if (ref.path.size() > 4 && ref.path.compare(0, 4, "@rt:") == 0) {
+        ResolvedTexture rt;
+        rt.handle = runtimeTexture(ref.path.substr(4));
+        return rt;
+    }
     if (ref.empty() || !resolve_) return {};
     // THE COLOUR CLASS IS PART OF THE KEY. One file bound to two slots is still one upload when both
     // read it the same way -- but a PNG bound to BOTH base colour and occlusion is decoded sRGB for
@@ -234,8 +248,24 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
     static_assert(sizeof(fallback) / sizeof(fallback[0]) == kTextureSlotCount,
                   "every TextureSlot needs a fallback; a short list zero-fills and binds nothing");
     std::array<rhi::TextureHandle, kTextureSlotCount> effective{};
+    // wave3 terrain layers: slots 0..2 come from the atlas resolver and 3..5 are the section's weightmaps
+    // and parameters ("@rt:" refs), so a terrain material is valid on any mesh with no section data.
+    const bool terrain = d.terrain.enabled();
+    TerrainBound tb;
+    if (terrain) {
+        const TextureRef& pr = d.textures[static_cast<u32>(TextureSlot::Layer1BaseColor)];
+        tb = resolveTerrain(d, retryFailed, runtimeTexture(pr.path.size() > 4 ? pr.path.substr(4) : std::string()) == 0);
+    }
     for (u32 i = 0; i < kTextureSlotCount; ++i) {
-        const ResolvedTexture r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
+        ResolvedTexture r;
+        if (terrain) {
+            if (i < 3) { r.handle = tb.atlas[i]; for (int c = 0; c < 3; ++c) r.averageLinear[c] = tb.avg[c]; }
+            else if (i >= 3 && i <= 5) r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
+            if (i == 3 || i == 4) { if (!r.handle) r.handle = zero_; }
+            if (i == 5 && !r.handle) r.handle = tb.params;
+        } else {
+            r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
+        }
         const rhi::TextureHandle bound = r.handle ? r.handle : fallback[i];
         res_->setSrv(set, i, bound);
         // Recorded from the SAME expression that binds it, on the same line of reasoning, so the two
@@ -278,12 +308,116 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
     setTextures_[set] = effective;
 }
 
+// ---- wave3 terrain layers ----
+rhi::TextureHandle MaterialSystem::setRuntimeTexture(const std::string& name, rhi::TextureHandle h) {
+    rhi::TextureHandle replaced = 0;
+    const auto it = rtTextures_.find(name);
+    if (it != rtTextures_.end()) { replaced = it->second; rtHandles_.erase(replaced); }
+    if (h) { rtTextures_[name] = h; rtHandles_.insert(h); }
+    else if (it != rtTextures_.end()) rtTextures_.erase(it);
+    return replaced;
+}
+
+bool MaterialSystem::terrainTextures(const MaterialDesc& d, TerrainTextures& out) const {
+    char buf[24];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(terrainAtlasHash(d)));
+    const auto it = terrainInfo_.find(std::string("terrain|") + buf);
+    if (it == terrainInfo_.end()) return false;
+    out = it->second;
+    return true;
+}
+
+rhi::TextureHandle MaterialSystem::clearRuntimeTexture(const std::string& name) { return setRuntimeTexture(name, 0); }
+
+rhi::TextureHandle MaterialSystem::runtimeTexture(const std::string& name) const {
+    const auto it = rtTextures_.find(name);
+    return it == rtTextures_.end() ? 0 : it->second;
+}
+
+namespace {
+// Records a texture a terrain resolve produced in the same caches a resolveTexture result lands in.
+void adoptCached(std::unordered_map<std::string, rhi::TextureHandle>& cache,
+                 std::unordered_map<rhi::TextureHandle, std::string>& keyOf,
+                 std::unordered_map<std::string, usize>& bytes, const std::string& key,
+                 rhi::TextureHandle h, usize size) {
+    cache[key] = h;
+    if (!h) return;
+    keyOf[h] = key;
+    if (size) bytes[key] = size;
+}
+std::string hexKey(u64 v) {
+    char buf[24];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(v));
+    return buf;
+}
+} // namespace
+
+MaterialSystem::TerrainBound MaterialSystem::resolveTerrain(const MaterialDesc& d, bool retryFailed, bool needParams) {
+    TerrainBound out;
+    const std::string base = "terrain|" + hexKey(terrainAtlasHash(d));
+    const std::string ka = base + "|a", kn = base + "|n", ko = base + "|o";
+    auto cached = [&](const std::string& k) -> rhi::TextureHandle {
+        const auto it = cache_.find(k);
+        return it == cache_.end() ? 0 : it->second;
+    };
+    TerrainTextures info;
+    rhi::TextureHandle a = cached(ka), n = cached(kn), o = cached(ko);
+    const auto infoIt = terrainInfo_.find(base);
+    if (a && n && o && infoIt != terrainInfo_.end()) {
+        info = infoIt->second;
+    } else if (terrainResolve_ && (retryFailed || cache_.find(ka) == cache_.end())) {
+        TerrainTextures tt;
+        if (terrainResolve_(d, tt, terrainUser_) && tt.albedo && tt.normal && tt.orm) {
+            a = tt.albedo; n = tt.normal; o = tt.orm;
+            adoptCached(cache_, cacheKeyOf_, cacheBytes_, ka, a, tt.bytes);
+            adoptCached(cache_, cacheKeyOf_, cacheBytes_, kn, n, 0);
+            adoptCached(cache_, cacheKeyOf_, cacheBytes_, ko, o, 0);
+            terrainInfo_[base] = tt;
+            info = tt;
+        } else {
+            for (const std::string* k : {&ka, &kn, &ko}) cache_.emplace(*k, rhi::TextureHandle(0));
+            ++failedResolves_;
+        }
+    }
+    if (!(a && n && o)) return out;
+    out.atlas[0] = a; out.atlas[1] = o; out.atlas[2] = n;   // slots: BaseColor, MetalRough, Normal
+    for (int c = 0; c < 3; ++c) out.avg[c] = info.avg[0][c];
+    out.ok = true;
+
+    if (needParams) {
+        f32 texels[kTerrainParamFloats];
+        const f32 perCm = d.uvTiling > 0.0f ? 1.0f / d.uvTiling : 0.0f;
+        terrainParamTexels(d, info, nullptr, perCm, texels);
+        u64 h = 1469598103934665603ull;
+        for (const f32 f : texels) { u32 bits; std::memcpy(&bits, &f, 4); h = (h ^ bits) * 1099511628211ull; }
+        const std::string kp = "terrainparams|" + hexKey(h);
+        rhi::TextureHandle p = cached(kp);
+        if (!p) {
+            rhi::TextureDesc td;
+            td.width = kTerrainParamWidth; td.height = kTerrainParamHeight;
+            td.format = rhi::Format::R32Float;
+            td.bind = rhi::ResourceBind::ShaderResource;
+            td.initialState = rhi::ResourceState::ShaderResource;
+            const void* levels[1] = {texels};
+            td.initialData = levels;
+            td.initialDataCount = 1;
+            td.initialRowPitch = kTerrainParamWidth * 4;
+            td.debugName = "terrain params";
+            p = res_->createTexture(td);
+            adoptCached(cache_, cacheKeyOf_, cacheBytes_, kp, p, sizeof(texels));
+        }
+        out.params = p;
+    }
+    return out;
+}
+// ---- end wave3 terrain layers ----
+
 // See textureRefs_'s own comment. Skips white_/flatNormal_/metalRough_: those slots aren't in
 // cache_ at all, and counting them would let a level with no materials resident ever "evict" the
 // fallback every OTHER material also falls back to.
 void MaterialSystem::retainSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective) {
     for (const rhi::TextureHandle h : effective) {
-        if (!h || h == white_ || h == flatNormal_ || h == metalRough_) continue;
+        if (!h || h == white_ || h == flatNormal_ || h == metalRough_ || h == zero_ || isRuntimeTexture(h)) continue;
         ++textureRefs_[h];
     }
 }
@@ -291,7 +425,7 @@ void MaterialSystem::retainSlotTextures(const std::array<rhi::TextureHandle, kTe
 void MaterialSystem::releaseSlotTextures(const std::array<rhi::TextureHandle, kTextureSlotCount>& effective,
                                           u32& outTextures, usize& outBytes) {
     for (const rhi::TextureHandle h : effective) {
-        if (!h || h == white_ || h == flatNormal_ || h == metalRough_) continue;
+        if (!h || h == white_ || h == flatNormal_ || h == metalRough_ || h == zero_) continue;
         const auto rit = textureRefs_.find(h);
         if (rit == textureRefs_.end()) continue;   // counted by nothing live -- already released
         if (--rit->second > 0) continue;           // another material still holds it

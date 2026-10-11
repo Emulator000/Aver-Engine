@@ -9,12 +9,14 @@
 #pragma once
 
 #include "aver/core/Types.hpp"
+#include "aver/physics/physics_water_abi.h"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Math/Vec3.h>
 #include <Jolt/Physics/Body/BodyID.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
@@ -114,6 +116,21 @@ private:
     bool hasPlane_ = false;
     mutable int32_t lastApplied_ = 0;
 };
+
+// ---- wave3 water and surface samplers (physics_water_abi.h) ----
+// The host's callbacks. Set from the main thread while the world is not stepping; the water sampler is
+// read on the stepping thread, the surface sampler on Jolt worker threads, hence the atomics.
+struct WaterSamplerSlot {
+    std::atomic<aver_phys_water_sampler_fn> fn{nullptr};
+    std::atomic<void*> user{nullptr};
+};
+struct SurfaceSamplerSlot {
+    std::atomic<aver_phys_surface_sampler_fn> fn{nullptr};
+    std::atomic<void*> user{nullptr};
+};
+WaterSamplerSlot& waterSampler();
+SurfaceSamplerSlot& surfaceSampler();
+// ---- end wave3 water and surface samplers ----
 
 // Meyer's singleton: the one shared table both PhysicsWorld.cpp's step loop (evaluate(), once per
 // fixed substep) and BuoyancyAbi.cpp's ABI functions (set/clear/query) reach through. Constructed on

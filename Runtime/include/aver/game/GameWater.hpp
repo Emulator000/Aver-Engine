@@ -29,12 +29,14 @@
 #include "aver/fluids/WaterSurface.hpp"
 #include "aver/fluids/Underwater.hpp"
 #include "aver/fluids/GerstnerWave.hpp"
+#include "aver/fluids/WaterBody.hpp"
 
 #if AVER_FLUIDS_SIMULATED
 #include "aver/fluids/FluidScene.hpp"
 #include "aver/fluids/FluidVolume.hpp"
 #endif
 
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -108,8 +110,8 @@ public:
     // down (a live simulated volume's teardown calls into the solver).
     void shutdown(rhi::IDevice* device);
 
-    // Whether a surface (analytic or displaced) is currently live.
-    bool attached() const { return waterAttached_ || surfaceActive_; }
+    // Whether any water is currently live: the analytic or displaced ocean, or a river / lake (wave 3).
+    bool attached() const { return waterAttached_ || surfaceActive_ || !bodyDraws_.empty(); }
 
     // Holds the displaced surface still (no wave clock, no re-centring) so a path-traced reference can
     // trace it: PtSceneView::setIncludeDynamicMeshes needs geometry that only changes with a revision.
@@ -117,6 +119,18 @@ public:
     bool displacedSurfaceActive() const { return surfaceActive_ && surface_.drawHandle() != 0; }
     // Changes whenever the displaced surface's geometry may have changed while frozen (rebuilt, moved).
     u64 displacedSurfaceRevision() const { return surfaceRevision_; }
+    // ---- wave3 water bodies ----
+    // Where the ground is, for river and lake depth (a lambda over GameLandscape::groundHeightAt); one line per host
+    // beside init. Changing it makes the next rebuildBodies rebuild.
+    void setGroundHeightSource(std::function<bool(f64, f64, f64&)> fn);
+    // Builds (or rebuilds, when the RIVER / LAKE records or the ground source changed) the river and lake meshes and the
+    // point query. applyLevel calls it first; the editor calls it on every body edit. A no-op when nothing changed.
+    void rebuildBodies(rhi::IDevice& device, const fmt::OcWorldData& w);
+    // The highest water surface over a world XY: the ocean (waves at the GPU's clock), lakes and rivers.
+    bool sampleSurface(f32 xCm, f32 yCm, fluids::WaterQuery& out) const;
+    u32 bodyCount() const { return static_cast<u32>(bodyDraws_.size()); }
+    // ---- end wave3 water bodies ----
+
     // The live surface's authored height, or 0 when nothing is attached.
     f32 waterLevelCm() const {
         return surfaceActive_ ? surface_.levelCm() : (waterAttached_ ? waterRenderer_.waterLevelCm() : 0.0f);
@@ -131,6 +145,11 @@ private:
     // Stops drawing the displaced surface and frees its mesh; the feature stays registered (idle).
     void retireDisplaced();
     void drawDisplaced(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const;
+    void drawBodies(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const;
+    void destroyBodyMeshes();
+    // The wave clock of whichever ocean surface is live (0 with none).
+    f32 waveClock() const;
+    void installHostSamplers();
 
 #if AVER_FLUIDS_SIMULATED
     void drawOneFluid(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials,
@@ -149,6 +168,23 @@ private:
                                           const char* name, void* user);
 #endif
 #endif
+
+    // ---- wave3 water bodies: rivers and lakes as ordinary meshes, and the ocean as the CPU sampler sees it ----
+    struct BodyDraw { rhi::MeshHandle mesh = 0; std::string material; bool lake = false; };
+    rhi::IDevice* dev_ = nullptr;
+    fluids::WaterBodySet bodies_;
+    std::vector<BodyDraw> bodyDraws_;
+    u64 bodiesHash_ = 0;
+    u64 groundGen_ = 0;
+    std::function<bool(f64, f64, f64&)> ground_;
+    struct OceanInfo {
+        bool present = false, infinite = true, simulate = false;
+        f32 level = 0.0f;
+        f32 boundsMin[2] = {0, 0}, boundsMax[2] = {0, 0};
+        fluids::GerstnerWave waves[fluids::kMaxGerstnerWaves];
+        size_t waveCount = 0;
+    } ocean_;
+    // ---- end wave3 water bodies ----
 
     // ---- the analytic Gerstner surface, its buoyancy plane, and the underwater fog tuning it drives ----
     fluids::WaterRenderer waterRenderer_;

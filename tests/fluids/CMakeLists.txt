@@ -50,3 +50,14 @@ if(AVER_RHI_D3D12)
   endif()
   set_target_properties(WaterSurfaceCompileTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# WaterBodyTest -- the spline, the river and lake meshes and the water point query (wave 3, rivers and
+# lakes). CPU only; Aver.RHI for rhi::MeshVertex.
+add_executable(WaterBodyTest src/WaterBodyTest.cpp)
+target_link_libraries(WaterBodyTest PRIVATE Aver.Fluids Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(WaterBodyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# WaterBodyRecordTest -- RIVER / RIVERPT / LAKE / LAKEPT in .ocworld (parse, order, byte-stable round trip).
+add_executable(WaterBodyRecordTest src/WaterBodyRecordTest.cpp)
+target_link_libraries(WaterBodyRecordTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(WaterBodyRecordTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -45,6 +45,11 @@ aver_add_module(Aver.Runtime.Game.Core
     src/GameInput.cpp
     src/GameStreaming.cpp
     src/LevelStreaming.cpp
+    # [wave3/level-instances begin] LEVELINST records at run time: realise, stream as units, overrides, packed rows.
+    src/LevelInstances.cpp
+    src/LevelInstancesAbiHost.cpp
+    src/LevelPackBaker.cpp
+    # [wave3/level-instances end]
     src/GameWater.cpp
     src/MouseCapture.cpp
     src/PlayMobility.cpp
@@ -135,6 +140,13 @@ endif()
 if(TARGET Aver.Framework)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Framework)
 endif()
+# [wave3/level-instances begin] The plain-C seam onto level instances (LevelInstancesAbiHost.cpp builds the host table
+# for it); a PUBLIC link so both hosts see the header and the macro.
+if(TARGET Aver.LevelInstance.Abi)
+  target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.LevelInstance.Abi)
+  target_compile_definitions(Aver.Runtime.Game.Core PUBLIC AVER_WITH_LEVELINST_ABI=1)
+endif()
+# [wave3/level-instances end]
 if(TARGET Aver.Trifactor)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Trifactor)
 endif()

@@ -54,6 +54,58 @@ internal static class Native
     [DllImport(Lib)] internal static extern int aver_syn_squad_clear_target(int squadId);
     [DllImport(Lib)] internal static extern int aver_syn_squad_slot(int entity, out int outRole, out float outX, out float outY, out float outZ);
     [DllImport(Lib)] internal static extern int aver_syn_squad_spacing_push(int entity, out float outDx, out float outDy);
+    // ---- Queries, smart objects, managed seam (synapse_query_abi.h) -----------------------------------
+    [DllImport(Lib)] internal static extern int aver_syn_query_abi_version();
+    [DllImport(Lib)] internal static extern int aver_syn_set_content_root([MarshalAs(UnmanagedType.LPUTF8Str)] string dir);
+    [DllImport(Lib)] internal static extern int aver_syn_eqs_set_budget(float maxMs, int maxUnitsPerTick);
+
+    [DllImport(Lib)] internal static extern unsafe int aver_syn_managed_set_dispatch(delegate* unmanaged[Cdecl]<ManagedCallNative*, nint, int> fn, nint user);
+    [DllImport(Lib)] internal static extern int  aver_syn_managed_register(int kind, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern void aver_syn_managed_clear();
+    [DllImport(Lib)] internal static extern int  aver_syn_managed_installed();
+
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_load([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_reload([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+    [DllImport(Lib)] internal static extern IntPtr aver_syn_eqs_last_message();
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_start(int queryId, int querier, int target, float px, float py, float pz, int hasPoint, [MarshalAs(UnmanagedType.LPUTF8Str)] string? userTagsCsv, int priority);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_run(int queryId, int querier, int target, float px, float py, float pz, int hasPoint, [MarshalAs(UnmanagedType.LPUTF8Str)] string? userTagsCsv);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_status(int handle);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_count(int handle);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_item(int handle, int index, float[] outPos3, out int outEntity, out float outScore, out int outObject, out int outSlot);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_test_value(int handle, int index, int test, out float outValue);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_stats(int handle, out int generated, out int passed, out int evaluations, out int truncated);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_cancel(int handle);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_release(int handle);
+    [DllImport(Lib)] internal static extern int    aver_syn_eqs_pending();
+
+    [DllImport(Lib)] internal static extern int aver_syn_so_attach(int entity, [MarshalAs(UnmanagedType.LPUTF8Str)] string assetPath);
+    [DllImport(Lib)] internal static extern int aver_syn_so_set_enabled(int entity, int enabled);
+    [DllImport(Lib)] internal static extern int aver_syn_so_slot_count(int entity);
+    [DllImport(Lib)] internal static extern int aver_syn_so_slot_info(int entity, int slot, float[] outPos3, out float outYaw, float[] outEntry3, out float outEntryYaw, out int outState, out int outUser);
+    [DllImport(Lib)] internal static extern int aver_syn_so_set_slot_enabled(int entity, int slot, int enabled);
+    [DllImport(Lib)] internal static extern int aver_syn_so_find(int user, float x, float y, float z, float radius, [MarshalAs(UnmanagedType.LPUTF8Str)] string? slotTagsCsv, [MarshalAs(UnmanagedType.LPUTF8Str)] string? userTagsCsv, int flags, int[] outObjects, int[] outSlots, int cap);
+    [DllImport(Lib)] internal static extern int aver_syn_so_claim(int user, int @object, int slot, [MarshalAs(UnmanagedType.LPUTF8Str)] string? userTagsCsv, float ttlSec);
+    [DllImport(Lib)] internal static extern int aver_syn_so_last_refusal();
+    [DllImport(Lib)] internal static extern int aver_syn_so_use(int claim);
+    [DllImport(Lib)] internal static extern int aver_syn_so_release(int claim, int reason);
+    [DllImport(Lib)] internal static extern int aver_syn_so_claim_info(int claim, out int outObject, out int outSlot, out int outUser, out int outState, float[] outPos3, out float outYaw, float[] outEntry3, out float outEntryYaw);
+    [DllImport(Lib)] internal static extern int aver_syn_so_claims_of(int user, int[] @out, int cap);
+}
+
+/// <summary>Layout twin of AverSynManagedCall (synapse_query_abi.h). The native side static_asserts its own twin.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct ManagedCallNative
+{
+    public int StructBytes, Kind, NameId, Subject;
+    public float Dt, Elapsed;
+    public int First, Status;
+    public fixed float P[4];
+    public byte* Text;
+    public fixed float Pos[3];
+    public int ItemEntity;
+    public fixed float Ctx[3];
+    public int CtxEntity;
+    public float Value;
 }
 
 /// <summary>Why a Synapse call failed, mirroring aver::AbiError in

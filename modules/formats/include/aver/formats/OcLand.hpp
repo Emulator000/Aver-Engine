@@ -20,6 +20,12 @@ inline constexpr u32 kOcLandChunkHeights = avrFourCC("HGHT");
 // than treated as "no range at all".
 inline constexpr u32 kOcLandChunkRange = avrFourCC("LRNG");
 
+// OPTIONAL paint layers (wave 3): LLYR = layer names, LWGT = 8-bit weights. Both absent = unpainted.
+// Old readers skip them (parseAvr1 never checks Required), so a file without paint is byte-compatible.
+inline constexpr u32 kOcLandChunkLayers  = avrFourCC("LLYR");
+inline constexpr u32 kOcLandChunkWeights = avrFourCC("LWGT");
+inline constexpr u32 kOcLandMaxLayers = 8;
+
 // The smallest and largest grids this accepts.
 inline constexpr u32 kOcLandMinSamples = 2;
 inline constexpr u32 kOcLandMaxSamples = 4097;
@@ -63,6 +69,22 @@ struct OcLandData {
     f32 quantMaxCm = 0.0f;
     bool hasQuantRange = false;
 
+    // ---- wave3 paint layers ----
+    // Layer names; empty = never painted. [0] is the implicit base layer (weight 255 - sum of the rest).
+    std::vector<std::string> layerNames;
+    // Planar weights of layers 1..L-1, (L-1) * N*N bytes, row-major like `heights`.
+    std::vector<u8> weights;
+    // Set by parse when stored layers were dropped (bad chunk); never written.
+    std::string warning;
+
+    bool hasLayers() const { return !layerNames.empty(); }
+    // L <= 8, names match [A-Za-z0-9_]{1,31} and are unique, weights.size() == (L-1) * N*N.
+    bool layersValid() const;
+    // The weight (0..255) of `layer` at a sample; layer 0 = 255 - sum of the stored planes (>= 0).
+    // An unpainted section is layer 0 everywhere. 0 for a missing layer or an out-of-range sample.
+    u8 weightAt(u32 layer, u32 ix, u32 iy) const;
+    // ---- end wave3 paint layers ----
+
     // True when the sample count, spacing and heights agree.
     bool valid() const {
         return sampleCount >= kOcLandMinSamples && spacingCm > 0.0f &&
@@ -85,6 +107,9 @@ struct OcLandData {
     // The section's footprint in cm: (sampleCount - 1) spacings, so neighbours share an edge row.
     f32 extentCm() const { return static_cast<f32>(sampleCount - 1) * spacingCm; }
 };
+
+// True for a layer name the format accepts: [A-Za-z0-9_]{1,31}.
+bool ocLandLayerNameValid(const std::string& name);
 
 // Reads a section. `why` receives the reason on failure.
 bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why = nullptr);

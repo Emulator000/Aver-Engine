@@ -68,6 +68,11 @@ struct BrushRect {
     bool empty = true;   // true when the brush never overlaps a sample (off-grid, or radius <= 0)
 };
 
+// The radial weight shared by the sculpt and paint brushes: 1 at the centre, 0 at the rim (t01 =
+// distance / radius), smoothstep across a shoulder whose width `falloff` (0 hard disc .. 1 full
+// smoothstep) sets.
+f32 brushFalloff(f32 t01, f32 falloff);
+
 // The rect a brush touches, without editing anything -- what a caller invalidates ahead of a stroke,
 // or checks before bothering to call applyBrush() at all.
 BrushRect brushRect(const fmt::OcLandData& data, const BrushParams& p);

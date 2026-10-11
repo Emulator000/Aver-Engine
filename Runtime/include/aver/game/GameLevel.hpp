@@ -7,6 +7,7 @@
 
 #include <functional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #if AVER_MODULE_SCENE
@@ -15,6 +16,8 @@
 #  include "aver/formats/OcMap.hpp"
 #  include "aver/world/LevelInstance.hpp"
 #  include "aver/game/LevelStreaming.hpp"
+#  include "aver/game/LevelInstances.hpp"   // [wave3/level-instances]
+#  include "aver/world/LevelAssetLibrary.hpp"   // [wave3/level-instances]
 #  include "aver/formats/OcStream.hpp"
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
@@ -105,11 +108,18 @@ public:
     void spawnClassPlacements();
 #endif
 
-    usize entityCount() const { return levelEntities_.size() + streaming_.residentEntities(); }
+    usize entityCount() const { return levelEntities_.size() + streaming_.residentEntities() + instances_.stats().entities; }   // [wave3/level-instances]
     // The animated placements load() made kinematic bodies for: what the host hands to
     // world::driveKinematicBodies each frame after the animation tick. Empty without physics.
     const std::vector<world::AnimatedBody>& animatedBodies() const {
-        return streaming_.active() ? streaming_.animatedBodies() : animatedBodies_;
+        const std::vector<world::AnimatedBody>& base = streaming_.active() ? streaming_.animatedBodies() : animatedBodies_;
+        // [wave3/level-instances begin] plus the kinematic bodies of animated placements inside level instances
+        const std::vector<world::AnimatedBody>& inst = instances_.animatedBodies();
+        if (inst.empty()) return base;
+        animatedMerged_ = base;
+        animatedMerged_.insert(animatedMerged_.end(), inst.begin(), inst.end());
+        return animatedMerged_;
+        // [wave3/level-instances end]
     }
 
     // LEVEL STREAMING (docs/LEVEL_STREAMING.md): a level with a STREAM record is streamed by
@@ -117,6 +127,19 @@ public:
     void setDevice(rhi::IDevice* device) { device_ = device; }
     void setStreamHooks(LevelStreaming::Hooks hooks) { streamHooks_ = std::move(hooks); }
     LevelStreaming& streaming() { return streaming_; }
+    // [wave3/level-instances begin] LEVEL INSTANCES (docs/LEVEL_INSTANCES.md): the LEVELINST records of the loaded level,
+    // realised by instances() after the level's own placements. Hooks and the packed-rows sink are the host's,
+    // installed before load() like setStreamHooks. The library is what instances parse their child levels through;
+    // a host that wants to prefer an unsaved in-memory level over disk installs its loader before load().
+    LevelInstances& instances() { return instances_; }
+    const LevelInstances& instances() const { return instances_; }
+    world::LevelAssetLibrary& assets() { return assets_; }
+    void setInstanceHooks(LevelInstances::Hooks hooks) { instanceHooks_ = std::move(hooks); }
+    void setPackedSink(LevelInstances::PackedSink sink) { packedSink_ = std::move(sink); }
+    void setInstanceLoader(world::LevelAssetLibrary::Loader loader) { instanceLoader_ = std::move(loader); }
+    // Host: the renderer shows packed rows (ray-driven primary visibility), 2.8.4.
+    void setPackedRenderOk(bool ok) { instances_.setPackedRenderOk(ok); }
+    // [wave3/level-instances end]
     const LevelStreaming& streaming() const { return streaming_; }
     // Once a frame, before World::flush: streams around `viewers` and retires released meshes.
     void tickStreaming(const std::vector<Vec3>& viewers);
@@ -224,6 +247,16 @@ private:
 #if AVER_MODULE_SCENE
     LevelStreaming streaming_;
     LevelStreaming::Hooks streamHooks_;
+    // [wave3/level-instances begin]
+    LevelInstances instances_;
+    world::LevelAssetLibrary assets_;
+    LevelInstances::Hooks instanceHooks_;
+    LevelInstances::PackedSink packedSink_;
+    world::LevelAssetLibrary::Loader instanceLoader_;
+    bool instancesInit_ = false;
+    mutable std::vector<world::AnimatedBody> animatedMerged_;
+    std::unordered_set<u64> instanceMaterialsBound_;
+    // [wave3/level-instances end]
     rhi::IDevice* device_ = nullptr;
     GameContent* content_ = nullptr;
     u64 streamFrame_ = 0;

@@ -34,3 +34,19 @@ set_target_properties(PostVolumesTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAK
 add_executable(GameLocalizationTest src/GameLocalizationTest.cpp)
 target_link_libraries(GameLocalizationTest PRIVATE Aver.Runtime.Game.Core Aver.Framework Aver.Platform Aver.Core)
 set_target_properties(GameLocalizationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# [wave3/level-instances begin]
+# LevelLightsTest -- game::spawnLevelLights and the light helpers that moved to Runtime (aver/game/LevelLights.hpp): the
+# packaged game spawns LIGHT records now, so what a record means is pinned (ids, cone cosines, the component fields,
+# gatherLights). A real scene::World; no device.
+add_executable(LevelLightsTest src/LevelLightsTest.cpp)
+target_link_libraries(LevelLightsTest PRIVATE Aver.Runtime.Game.Core Aver.Scene Aver.Formats Aver.Core)
+set_target_properties(LevelLightsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# [wave3/level-instances end]
+
+# GameLandscapeLayersTest -- GameLandscape's paint layers headless (wave 3, landscape layers): the by-name layer remap,
+# ground samples, weight strokes with exact undo / redo, save and reload, carve, and the derived section / ring materials.
+# A temp .ocland; no device, no window, no physics.
+add_executable(GameLandscapeLayersTest src/GameLandscapeLayersTest.cpp)
+target_link_libraries(GameLandscapeLayersTest PRIVATE Aver.Runtime.Game.Core Aver.Landscape Aver.Formats Aver.Platform Aver.Core)
+set_target_properties(GameLandscapeLayersTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

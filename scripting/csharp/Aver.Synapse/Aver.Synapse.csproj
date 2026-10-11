@@ -15,10 +15,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Aver.Synapse</AssemblyName>
     <RootNamespace>Aver.Synapse</RootNamespace>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <Version>1.1.0</Version>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>

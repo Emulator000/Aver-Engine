@@ -68,6 +68,21 @@ void sanitise(MaterialDesc& d) {
     for (f32& ch : d.scatterColor) ch = std::clamp(ch, 0.0f, 1.0f);
     d.scatterAnisotropy = std::clamp(d.scatterAnisotropy, -0.99f, 0.99f);
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
+    // ---- wave3 terrain layers ----
+    {
+        TerrainDesc& t = d.terrain;
+        t.tileTexels = t.tileTexels <= 256 ? 256u : (t.tileTexels <= 512 ? 512u : 1024u);
+        t.padTexels = std::clamp(t.padTexels, 4u, 16u) & ~1u;
+        t.blendDepth = std::clamp(t.blendDepth, 0.0f, 1.0f);
+        if (t.layers.size() > kMaxTerrainLayers) t.layers.resize(kMaxTerrainLayers);
+        for (TerrainLayerDesc& l : t.layers) {
+            if (!(l.tilingCm > 1.0f)) l.tilingCm = 400.0f;
+            l.friction = std::max(l.friction, 0.0f);
+            l.restitution = std::clamp(l.restitution, 0.0f, 1.0f);
+            l.foliageDensity = std::max(l.foliageDensity, 0.0f);
+            l.foliageMinWeight = std::clamp(l.foliageMinWeight, 0.0f, 1.0f);
+        }
+    }
 }
 
 // Removes one handle from the live list.

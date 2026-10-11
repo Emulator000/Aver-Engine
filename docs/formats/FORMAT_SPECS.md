@@ -408,6 +408,22 @@ off switch, and packMaterial's `MaterialFlag_Light` tracks it exactly.
 
 `GRAPHREF <path>` names a `DOMAIN material` `.ocgraph` (§`OCGRAPH`) by its content-relative path — the rest of the line, so a path containing spaces is not cut short, and the same content-root convention `COMP mesh=` uses (never with the content directory on the front). It is a different mechanism from the inline `GRAPH{}` block above: `GRAPHREF` points at a graph asset a project authors and iterates on in the graph editor, while `GRAPH{}` is a small node list written inline in the material file itself. A file may carry either, both, or neither. Nothing in the `.ocmat` reader/writer resolves the path, loads the graph, or checks that it compiles — it is recorded verbatim for a loader to pass to `pbr::MaterialGraphRegistry::add`, which compiles it and returns the id that ends up in `MaterialConstants::graphId` (never round-tripped through the file itself, since the id is only stable for the current process).
 
+### 7.x Layered terrain materials — `TERRAIN` and `LAYER` (wave 3)
+
+A material with a `TERRAIN` record is a **layered terrain material**: up to 8 named layers blended per pixel by a landscape section's paint (`.ocland` §11e) and a height-based mix. Older readers skip both records and draw a plain material.
+
+```
+TERRAIN tile 512 pad 8 blend 0.15
+LAYER Grass tiling 400 baseColor {path:Textures/T/grass_diff.png} normal {path:Textures/T/grass_nor.png} metalRough {path:Textures/T/grass_orm.png} height {path:Textures/T/grass_h.png} surface Grass friction 0.8 restitution 0.05 foliage Foliage/Grass.ocfoliage density 8 minweight 0.5
+LAYER Rock tiling 600 heightbias 0.2 baseColor {guid:0x00000000000000AB}
+```
+
+- `TERRAIN`: `tile` is the texel size one layer tile is resampled to (256, 512 or 1024; anything else reads as 512), `pad` the wrapped texels kept around each tile in the atlas (4 to 16, forced even), `blend` the height-blend depth 0..1 (above 0.5 it fades to plain linear weights). Optional; without it the defaults above apply.
+- `LAYER <name>`: one per layer, **file order is the layer index and the first is the base layer** (whatever is not painted). Names are `[A-Za-z0-9_]{1,31}` and unique, because paint is stored by name. `tiling` is world centimetres per texture tile (default 400); `baseColor`/`normal`/`metalRough`/`height` are texture references in the `TEX` syntax (`{path:..}` or `{guid:0x..}`, a path may hold spaces); `metalRough` is glTF ORM (R occlusion, G roughness, B metallic); `height` is optional (the albedo's luminance stands in); `heightbias` shifts the layer in the height mix; `surface` is a free physical-surface name (default: the layer name); `friction` (default 0.6) and `restitution` (default 0) feed the terrain contact; `foliage` is a content-relative `.ocfoliage`, `density` instances per 100 m^2 and `minweight` (default 0.5) the paint weight needed for the editor's layer scatter.
+- More than 8 layers, a duplicate name or an invalid name **refuses the whole block** (a warning is logged) and the material loads as a plain one. A `LAYER` without a `TERRAIN` is ignored. Unknown tokens are skipped.
+- Optional tokens are written only when they differ from the default, so a parsed block writes back byte for byte. The ordinary `PARAM`s still apply to the blended result (`uvTiling` is the world size one mesh UV unit spans on the landscape mesh; `roughnessFactor` etc. multiply).
+- The GPU side: `MaterialFlag_TerrainLayers` (bit 17) reinterprets the texture slots (0 albedo atlas with height in alpha, 1 ORM atlas, 2 normal atlas, 3 and 4 the section's weightmaps, 5 an 8 x 9 R32Float parameter texture); the constant block stays 192 bytes. See `docs/MATERIALS.md`.
+
 ---
 
 ## 8. `.ocskel` — skeletal mesh + skeleton
@@ -1040,7 +1056,54 @@ POSTVOLUME infinite autoexposure 0 bloom 0.3
 - Written after `DECAL` and before `FOLIAGE`; nothing is written when there are none, so a level without volumes
   is byte-identical to before, and a parser that does not know the record skips it.
 
+### 11.x Rivers and lakes — `RIVER`, `RIVERPT`, `LAKE`, `LAKEPT` (wave 3)
+
+Water bodies as spline records, drawn as ordinary meshes (so rays see them) and answering the water query (`Water.Sample`, buoyancy). The `WATER` record stays the ocean.
+
+```
+RIVER name Thames material M_River depth 200 bank 300 slow 0.35 flowscale 1
+RIVERPT river Thames at 1000 -2000 150 width 900 flow 180
+LAKE name Mere material M_Lake level 150 depth 300 bank 400 edge 2500
+LAKEPT lake Mere at 4000 4000
+```
+
+- A `*PT` line names its body (percent-decoded like `LIGHT name`); an unknown body name skips the line, so a `RIVERPT` must follow its `RIVER`. File order is point order: a river runs downstream along it, a lake is implicitly closed (3 or more points, either winding).
+- `RIVER`: `depth` and `bank` are the carve parameters (cm), `slow` the bank speed as a fraction of the centre speed (0.35), `flowscale` a multiplier on every point's flow. `RIVERPT`: `at x y z`, `width` (cm, default 800), `flow` (cm/s downstream, default 150). `LAKE`: `level` is the water surface Z, `depth` and `bank` the carve parameters, `edge` the largest mesh edge (default 2500; the lake mesh is subdivided until every edge is at most this). `LAKEPT`: `at x y`.
+- Optional tokens are omitted at their defaults; an unnamed body is written as `unnamed`. A level without bodies writes nothing new, so it is byte-identical to before, and a parser that does not know the records skips them. The level header carries them through `saveLevel` untouched.
+- Written after `WAVE` and before `LIGHT`.
+
 ---
+
+<!-- [wave3/level-instances begin] -->
+**`LEVELINST`** (`OcWorldData::levelInstances`, `OcLevelInstance` in `OcLevelInst.hpp`) places ANOTHER `.ocworld` inside this one:
+asset, transform and a list of overrides, written before the placements exactly as `PREFABINST` is (an older reader skips the records,
+so the instance disappears visibly and nothing is misplaced; `docs/LEVEL_INSTANCES.md`). Keywords after the asset, any order, unknown
+tokens skipped:
+
+```
+LEVELINST Levels/Room.ocworld pos 1200 0 0 rot 90 0 0 scale 1 1 1 name Room%20A id=00000000000000a1 packed stream 1
+  LIOVERRIDE set 00000000000000c3 @Placement material string ~M_Red
+  LIOVERRIDE set 00000000000000c4 @Placement removed bool 1
+  LIOVERRIDE set 00000000000000b2/00000000000000c9 @Placement position vec3 0 0 40
+ENDLEVELINST
+EXTENT -500 -500 0 500 500 400
+```
+
+- `pos x y z` cm, `rot yaw pitch roll` degrees, `scale sx sy sz`: the instance's transform, the `PLACE` convention. `name` is the
+  percent-encoded outliner label; `id=<hex>` the instance's stable id (16 digits written, leading zeros optional on read); `packed` is
+  a bare token; `stream 0|1` forces the instance resident or streamed (absent = follow the host level's `STREAM`).
+- `LIOVERRIDE` is `POVERRIDE` with another keyword and the pseudo-component `@Placement`. Its path is the child placement's `id=`
+  (`<nested instance id>/<placement id>` through a nested instance). Only `set` is meaningful; `addcomp` / `rmcomp` parse and are ignored
+  with a warning. Fields: `position` / `rotation` (yaw pitch roll) / `scale` (vec3, in the child's frame, replacing not adding),
+  `material` (string; empty = the mesh's own), `visible`, `collide` (bool), `removed` (bool; drops the placement and its children), `name`.
+- A child's `SUN SKY FOG CLOUDS GAMEMODE DEFAULTPAWN SPAWN CAMERA STREAM` and the records `LANDSCAPE WATER WAVE PCGVOLUME SCATTER POSTVOLUME
+  SEQUENCE` are the host level's own and are ignored when it is instanced; the rest is described in `docs/LEVEL_INSTANCES.md`.
+- **`EXTENT minx miny minz maxx maxy maxz`** (cm, the level's own frame) is the union of the placements' world boxes, written by the editor
+  on every save, so another level can bound an instance of this one without loading meshes. Absent = unknown (the instance is then always
+  loaded). A level with no instances and no extent writes none of these records.
+- Child placements need stable `id=` tokens for overrides to address them; the editor keeps ids across saves and, once any placement has
+  one, gives every placement one.
+<!-- [wave3/level-instances end] -->
 
 ## 11a. `.ocparticle` — particle effect (text)
 
@@ -1201,6 +1264,126 @@ First non-comment line is the header `OCGAS 1`. `#` starts a comment (whole line
 Tag ids follow registration order (files in sorted order, `TAG` lines first within a file, then first use), so a given project gets the same ids every run until its definitions change; persistent data therefore uses names. The save payload that carries a live system is a separate text blob, `GASSTATE 1` (see the user guide).
 
 ---
+
+## 11e. `.ocland` weight layers (wave 3, letter assigned at merge if taken)
+
+Optional paint on a landscape section, two more chunks in the `LAND` container (flags 0, version 1; both skipped by readers that do not know them, so an older engine re-saving the file drops the paint):
+
+- `LLYR`: `u8 count` (1..8), then per layer `u8 nameLen, bytes[nameLen]` (names `[A-Za-z0-9_]{1,31}`, unique). Layer 0 is the implicit base.
+- `LWGT`: `(count - 1) * N * N` bytes, **planar**, layers 1..count-1 in order, each N x N row-major like the heights. Layer 0's weight is `255 - sum` of the others, so a fresh landscape stores nothing and unpainted terrain is layer 0 everywhere.
+
+`writeOcLand` refuses invalid layer data (a duplicate or bad name, more than 8 layers, a plane of the wrong size, or any sample whose stored sum exceeds 255). `parseOcLand` **fails soft**: with a short `LWGT`, more than 8 layers or a bad name the heights still load and `OcLandData::warning` says the layers were dropped. The heights and their quantisation (`LRNG`) are untouched. The names are matched to the terrain material's `LAYER` names at load, so reordering the material never scrambles paint.
+
+---
+
+<!-- [wave3/level-instances begin] -->
+## 11f. `.ocpack` — baked level pack sidecar (text)
+
+A level's statically packable mesh placements, baked into an instance table (`.ocinst`, child-local rows) that a PACKED level instance
+renders through the foliage path. The `.ocpack` says what the table is for. Both live under `Binaries/LevelPacks/<flat>.ocinst` and
+`.ocpack`, `<flat>` being the content-relative level path with `/` and `\` replaced by `_` and the extension dropped
+(`Levels/Room.ocworld` -> `Levels_Room`). Unknown records are skipped. `OcPack.hpp`; the design and the limits are in
+`docs/LEVEL_INSTANCES.md`.
+
+```
+OCPACK 1
+SOURCE 3f9a1c0e2b7d4455                     closureHash of the level when baked; a mismatch means stale
+TABLE Binaries/LevelPacks/Levels_Room.ocinst
+GROUP 0 collide 1 material M_Wood           one per .ocinst group, same order; `material -` = the mesh's own
+GROUP 1 collide 0 material -
+KEEP 00000000000000c3                       every placement NOT in the table (path ids, `b2/c9` inside nested instances)
+```
+
+- `SOURCE` is a 64-bit hash over the level and every level it nests (the records an instance takes; not `SUN` and the other host-owned
+  records). A pack whose `SOURCE` differs from the level's current hash is stale and the instance realises unpacked.
+- `GROUP n` lines must appear in order 0, 1, 2 ... and equal the table's group count. `collide 1` makes a static body per row.
+- `KEEP` lists the placements that stay entities (classes, vehicles, animated or hidden placements, `snap`, translucent or unloadable
+  meshes, and everything under a class, vehicle or animated one); the parents of a kept placement are kept too, so a kept child
+  always has its parent live. A packed child under a kept parent still packs, with its composed world transform.
+<!-- [wave3/level-instances end] -->
+
+<!-- [wave3/ai-queries begin] -->
+## 11g. `.oceqs` — environment query (text, wave 3 #21)
+
+Line based; first non-comment line is `OCEQS 1`. `#` starts a comment (whole line or trailing outside quotes); CRLF, a BOM, tabs and blank lines are fine; keywords are case-insensitive. Every problem is refused with `path:line: message` and the file loads nothing. `EqsAsset.hpp` (`parseEqsQuery` / `writeEqsQuery`); the user guide is `docs/AI_QUERIES_SMARTOBJECTS_STATETREE.md`.
+
+```
+OCEQS 1
+DESC "Cover spots the player cannot see"
+OUTPUT pos=CoverPos entity=CoverEntity score=CoverScore count=CoverCount
+RESULT best                  # all (default) | best | top <n> | percent <p> | randompercent <p>
+RUN firstvalid               # firstvalid (default) | all
+CONTEXT target key=Target    # <name> key=<BbKey>; <= 8 per file, [a-z][a-z0-9]*
+OPTION                       # 1..8 options
+  GENERATOR ring centre=querier inner=300 outer=1500 rings=3 count=16 project=nav
+  TEST trace from=target fromz=160 toz=60 want=0 purpose=filter
+  TEST distance to=querier curve=inverse weight=2
+```
+
+- Top-level records (`DESC`, `OUTPUT`, `RESULT`, `RUN`, `CONTEXT`) precede the first `OPTION`. An option has exactly one `GENERATOR`, before its `TEST`s (at most 16).
+- Built-in contexts: `querier`, `target`, `seen`, `point`.
+- Generators: `grid`, `ring`, `around`, `nav`, `actors`, `slots`, `points`. Common keys `centre`, `project=none|nav|ground`, `zoffset`, `max` (default 2048, 1..16384).
+- Tests: `distance`, `dot`, `trace`, `path`, `tag`, `random`, `custom`. Common keys `purpose=filter|score|both`, `weight`, `curve=linear|inverse|square|invsquare|sqrt|step`, `lo`, `hi`, `min`, `max`, `want`, `name`.
+- Refused: an unknown keyword, key or enum value, a duplicate record, an option without a generator, a number outside its range, an undeclared context, a grid larger than its `max`, and `RUN all` with `RESULT best` on more than one option.
+- The writer emits a canonical order (`DESC`, `OUTPUT`, `RESULT`, `RUN`, `CONTEXT`s, then options with keys in a fixed order, defaults omitted), so a parse/write round trip is stable.
+
+## 11h. `.ocso` — smart object definition (text, wave 3 #21)
+
+First non-comment line `OCSO 1`; same lexical rules as 11g. `SmartObjectAsset.hpp` (`parseSmartObject` / `writeSmartObject`).
+
+```
+OCSO 1
+DESC "Park bench"
+TAGS Furniture.Seat Furniture.Outdoor      # before the first SLOT: object tags; inside a SLOT: slot tags
+SLOT sit_left                              # names unique, [A-Za-z_][A-Za-z0-9_]*, at most 32
+  POS -40 0 45                             # local to the owner (cm; +X forward, +Y right, +Z up)
+  YAW 0                                    # degrees, relative to the owner's +X
+  ENTRY 80 0 0 180                         # approach point x y z [yaw]; defaults to POS / YAW
+  REQUIRES User.Humanoid                   # the user's tags must satisfy ALL (hierarchical)
+  BLOCKEDBY User.Injured                   # and NONE
+  COOLDOWN 3                               # seconds unavailable after release
+  CLAIMTTL 20                              # a Claimed slot not Used within N s is released (0 = never)
+  USE statetree Content/AI/Sit.ocst        # none | event <Name> | bt <path> | statetree <path>
+  RELEASE auto                             # auto | manual
+END
+```
+
+Sub-records appear once per slot. Refused: an unknown record, a duplicate slot name, a bad number, a negative cooldown or TTL, a `USE` with a missing argument, a tag that fails the tag-name rule (1 to 8 dot-separated `[A-Za-z][A-Za-z0-9_]*` segments), more than 32 slots.
+
+## 11i. `.ocst` — StateTree (text, wave 3 #21)
+
+First non-comment line `OCST 1`; same lexical rules as 11g. `StateTreeAsset.hpp` (`parseStateTree` / `writeStateTree` / `validateStateTree`).
+
+```
+OCST 1
+DESC "Guard brain"
+ONFINISH restart                          # restart (default) | stop
+KEY Alert bool agent false                # KEY <name> <bool|int|float|vec3|string|entity> <agent|shared> [default]
+EVAL UpdateThreat p0=1500                 # evaluator: an Action leaf run every update before the tasks
+STATE Patrol
+  ENTER
+    IF bb !Alert                          # enter conditions: every IF must pass
+  TASK PatrolStep p0=3                    # TASK <Leaf> [p0..p3=<f32>] [s="string"]
+  ON event:Alarm TO Combat                # ON <tick|completed|failed|event:<Name>> TO <target>
+END
+STATE Combat
+  COMPLETE none                           # all | any | none
+  STATE Chase
+    ENTER
+      IF cond CanSeeTarget                # IF [not] cond <Leaf> [k=v...]
+    TASK MoveTo p0=0 p1=0 p2=0
+    ON tick TO Combat.Search
+      IF bb !CanSeeTarget
+  END
+END
+```
+
+- `STATE` ... `END` nests (indent is cosmetic); every state needs its own `END`. Inside a state, in any order: `GROUP`, `DISABLED`, `COMPLETE`, `COMMENT "text"`, `ENTER`, `TASK`, `ON`, nested `STATE`. An `IF` attaches to the nearest preceding `ENTER` or `ON`.
+- `IF bb <expr>` uses the blackboard expression text (`key`, `!key`, `key op value`, ops `== != < <= > >=`).
+- Targets: a dot path from the roots (`Combat.Search`), `NEXT`, `SUCCEEDED`, `FAILED`. State names `[A-Za-z_][A-Za-z0-9_]*`, unique among siblings, and not one of those three words.
+- Limits: 256 states, depth 16, 16 tasks and 16 transitions per state. Refused with `path:line:`: a missing header, an unknown record, an `END` without `STATE`, an unclosed `STATE`, a duplicate state or key, an unresolvable `TO` path, a bad expression, an unknown `COMPLETE` / `ONFINISH` / trigger, a `p` index outside 0..3, an `IF` with no preceding `ENTER` / `ON`.
+- Leaf names are not checked at parse (the registry is a runtime fact); `validateStateTree` returns warnings for unknown leaves, unreachable states and keys used but not declared.
+<!-- [wave3/ai-queries end] -->
 
 ## 12. Versioning & compatibility
 

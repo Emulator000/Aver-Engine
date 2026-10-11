@@ -21,6 +21,10 @@ aver_add_module(Aver.Formats
     src/OcGraph.cpp
     # .ocprefab and the prefab-instance records of .ocworld: text, by-name components, no Aver.Scene.
     src/OcPrefab.cpp
+    # [wave3/level-instances begin] LEVELINST/EXTENT records and the .ocpack level-pack sidecar: text, no Aver.Scene.
+    src/OcLevelInst.cpp
+    src/OcPack.cpp
+    # [wave3/level-instances end]
     # .ocinput -- named input actions and default key/mouse bindings (see OcInput.hpp for the format
     # and why it needs no engine dependency). Beside the other AVR1-adjacent text readers for the same
     # reason .ocparticle states for itself minus the module split: this one has no type from outside

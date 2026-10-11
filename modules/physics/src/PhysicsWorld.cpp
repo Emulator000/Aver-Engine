@@ -81,7 +81,7 @@ class EventListener final : public JPH::ContactListener {
 public:
     // Appends a contact, or a sensor-enter overlap when either body is a sensor.
     void OnContactAdded(const JPH::Body& a, const JPH::Body& b,
-                        const JPH::ContactManifold& manifold, JPH::ContactSettings&) override {
+                        const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings) override {
         if (!g_world) return;
         const int32_t ha = handleOf(a.GetID()), hb = handleOf(b.GetID());
         if (!ha || !hb) return;
@@ -92,12 +92,20 @@ public:
             g_world->overlaps.push_back(OverlapEvent{aIsSensor ? ha : hb, aIsSensor ? hb : ha, 1});
             return;
         }
+        applySurfaceFriction(a, b, manifold, ioSettings);
         ContactEvent e;
         e.a = ha; e.b = hb;
         e.point  = fromJolt(manifold.GetWorldSpaceContactPointOn1(0));
         // fromJoltUnit, not fromJoltDir: a unit normal must not be scaled.
         e.normal = fromJoltUnit(manifold.mWorldSpaceNormal);
         g_world->contacts.push_back(e);
+    }
+
+    // wave3: a persisting contact keeps the sampled friction too (ContactSettings is rebuilt each step).
+    void OnContactPersisted(const JPH::Body& a, const JPH::Body& b,
+                            const JPH::ContactManifold& manifold, JPH::ContactSettings& ioSettings) override {
+        if (!g_world || a.IsSensor() || b.IsSensor()) return;
+        applySurfaceFriction(a, b, manifold, ioSettings);
     }
 
     // Appends a sensor-exit overlap. Two solid bodies ceasing to touch is not reported.
@@ -114,6 +122,28 @@ public:
     }
 
 private:
+    // ---- wave3 surface friction (physics_water_abi.h) ----
+    // When exactly one of the pair is a surface-sampled body (the terrain), the other body's friction
+    // is combined with the host's value at the contact point -- sqrt of the product, Jolt's default
+    // rule -- and its restitution with the larger of the two. Runs on worker threads and reads only
+    // the flagged set and the host's pure sampler.
+    static void applySurfaceFriction(const JPH::Body& a, const JPH::Body& b, const JPH::ContactManifold& manifold,
+                                     JPH::ContactSettings& io) {
+        if (g_world->surfaceSampled.empty()) return;
+        const bool aS = g_world->surfaceSampled.count(a.GetID()) != 0;
+        const bool bS = g_world->surfaceSampled.count(b.GetID()) != 0;
+        if (aS == bS) return;
+        phys::water::SurfaceSamplerSlot& slot = phys::water::surfaceSampler();
+        const aver_phys_surface_sampler_fn fn = slot.fn.load();
+        if (!fn) return;
+        const JPH::Body& other = aS ? b : a;
+        const Vec3 p = fromJolt(manifold.GetWorldSpaceContactPointOn1(0));
+        float friction = 0.0f, restitution = 0.0f;
+        if (fn(p.x, p.y, &friction, &restitution, slot.user.load()) != 1) return;
+        io.mCombinedFriction = std::sqrt(other.GetFriction() * friction);
+        io.mCombinedRestitution = std::max(other.GetRestitution(), restitution);
+    }
+
     // Our handle for a Jolt body id, or 0.
     static int32_t handleOf(const JPH::BodyID& id) {
         const auto it = g_world->byId.find(id);
@@ -311,12 +341,26 @@ void aver_phys_shutdown(void) {
     // back BIT-IDENTICAL while the weaker assertion it had at the time reported green.
     phys::water::waterVolumes().clearAll();
     phys::water::waterVolumes().clearPlane();
+    // wave3: the host's samplers belong to the host's world objects, which are gone with this one.
+    phys::water::waterSampler().fn.store(nullptr);
+    phys::water::surfaceSampler().fn.store(nullptr);
+    g_world->surfaceSampled.clear();
     g_world.reset();
     AVER_INFO("[Physics] stopped");
 }
 
 // 1 while a world exists.
 int32_t aver_phys_ready(void) { return g_world ? 1 : 0; }
+
+// wave3 (physics_water_abi.h): flags a body so its contacts take the host's surface friction. 0 for a
+// dead handle. Call between steps -- the contact listener reads the flag on worker threads.
+int32_t aver_phys_body_set_surface_sampled(int32_t body, int32_t on) {
+    const JPH::BodyID* id = findBody(body);
+    if (!id) return 0;
+    if (on) g_world->surfaceSampled.insert(*id);
+    else    g_world->surfaceSampled.erase(*id);
+    return 1;
+}
 
 // Sets gravity in cm/s^2 on engine axes.
 void aver_phys_set_gravity(float x, float y, float z) {

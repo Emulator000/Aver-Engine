@@ -4,6 +4,8 @@
 #include "aver/game/GameSystemsWiring.hpp"
 #include "aver/game/GameUiInput.hpp"
 #include "aver/game/LevelDecals.hpp"
+#include "aver/game/LevelLights.hpp"   // [wave3/level-instances]
+#include "aver/game/LevelInstancesFramework.hpp"   // [wave3/level-instances]
 
 #include <filesystem>
 
@@ -740,6 +742,7 @@ void GameApp::attachVoxi(Engine& e) {
         // Keep adjacent: factory and resolver installed together
         content_.setTextureFactory(dev->resources());
         voxiRenderer_.materials().setTextureResolver(&GameContent::resolveMaterialTexture, &content_);
+        voxiRenderer_.materials().setTerrainResolver(&GameContent::resolveTerrainAtlas, &content_);   // wave3 terrain layers
 #endif
         // Depth proxy for LOD-based shadow/voxel optimization
         voxiRenderer_.setDepthProxy(&GameApp::depthProxyLookup, this);
@@ -1001,6 +1004,8 @@ void GameApp::installLevelHooks(Engine& e) {
         // Records the placement loop does not know: bare CDecal entities, and prefab instances rebuilt from
         // their assets with their overrides on top.
         game::spawnLevelDecals(scene::World::instance(), loaded.world.decals);
+        // [wave3/level-instances] LIGHT records: the packaged game spawned none before this.
+        game::spawnLevelLights(scene::World::instance(), loaded.world.lights);
         postVolumes_ = loaded.world.postVolumes;
         if (rhi::IDevice* dev = e.device()) postLuts_.preload(*dev, project_.contentDir(), postVolumes_);
         if (prefabSys_) prefabSys_->instantiateLevelInstances(loaded.world.prefabInstances);
@@ -1033,6 +1038,45 @@ void GameApp::installLevelHooks(Engine& e) {
     };
     level_.setLoadHooks(std::move(hooks));
     level_.setDevice(e.device());
+    // [wave3/level-instances begin] LEVELINST records (docs/LEVEL_INSTANCES.md): the prefab system, the framework and
+    // the foliage path are the host's; LevelInstances itself depends on none of them.
+    {
+        LevelInstances::Hooks ih;
+        ih.spawnPrefab = [this](const fmt::OcPrefabInstance& pr, const Transform& local, scene::Entity parent) -> scene::Entity {
+            if (!prefabSys_) return scene::kInvalidEntity;
+            return prefabSys_->instantiate(pr.prefab, local, parent, pr.overrides, pr.name);
+        };
+#  if AVER_MODULE_FRAMEWORK
+        ih.spawnClass = [](const fmt::OcWorldPlacement& p, const Transform& world, scene::Entity) {
+            return spawnInstanceClass(p, world);
+        };
+        ih.destroyClass = [](scene::Entity ce) { destroyInstanceClass(ce); };
+#  endif
+        level_.setInstanceHooks(std::move(ih));
+#  if AVER_MODULE_VOXI
+        LevelInstances::PackedSink ps;
+        ps.set = [this](u64 owner, fmt::OcInstanceData rows, std::vector<std::string> mats) {
+            if (voxiAttached_) levelFoliage_.setExtraTable(owner, std::move(rows), std::move(mats));
+        };
+        ps.clear = [this](u64 owner) { if (voxiAttached_) levelFoliage_.clearExtraTable(owner); };
+        level_.setPackedSink(std::move(ps));
+#  endif
+#  if AVER_MODULE_FRAMEWORK
+        level_.instances().onResidency = [](scene::Entity root, bool loaded, u32 count) {
+            relayInstanceResidency(root, loaded, count);
+        };
+#  endif
+        // The content index resolves a child level exactly as it resolves a prefab.
+        level_.setInstanceLoader([this](const std::string& path, fmt::OcWorldData& out, std::string* why) {
+            const std::string full = content_.pathFor(fnv1a64(std::string_view(path)));
+            if (full.empty()) {
+                if (why) *why = "'" + path + "' is not in the project content";
+                return false;
+            }
+            return fmt::loadOcworld(full, out, why);
+        });
+    }
+    // [wave3/level-instances end]
 #  if AVER_MODULE_LANDSCAPE
     // Restart streaming on terrain change
     landscape_.setTerrainChangedHook([this] {
@@ -1189,6 +1233,7 @@ void GameApp::initScripting() {
     if (scriptsReady_) {
         AVER_INFO("[Game] scripting host ready: bridge='{}' scripts='{}' ({} legacy behaviour(s) live)",
                   hd.bridgeDir, hd.scriptsDir, scripts_.behaviourCount());
+        game::setAiContentRoot(project_.contentDir());   // AI: wave 3 #21 -- where .oceqs / .ocso / .ocst paths resolve
         // Graph-as-class: declare framework classes before discoverProjectGraphs (which skips claimed files)
         const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
         if (graphClasses > 0)
@@ -1248,6 +1293,9 @@ void GameApp::initScripting() {
             synapse::perceptionSystem().setNotifySink(&GameApp::animNotify, this);
             // "FireEvent" BT action also fires through animNotify
             synapse::btSystem().setNotifySink(&GameApp::animNotify, this);
+#  if AVER_WITH_SYNAPSE_AI
+            game::installAiNotify(&GameApp::animNotify, this);   // AI: wave 3 #21 -- EqsFinished, SmartObject* ...
+#  endif
 #endif
             AVER_INFO("[Anim] animation notifies will be raised as graph events");
         } else {
@@ -1749,6 +1797,13 @@ void GameApp::onInit(Engine& e) {
 #if AVER_MODULE_FLUIDS
     // Before Voxi: its acceleration-structure build reads the fluid's prePass vertex buffer.
     if (rhi::IDevice* dev = e.device()) water_.init(*dev);
+#if AVER_MODULE_LANDSCAPE
+    // wave3: river / lake depth reads the ground; C# and graphs read the landscape layers.
+    water_.setGroundHeightSource([this](f64 x, f64 y, f64& z) { return landscape_.groundHeightAt(x, y, z); });
+#endif
+#endif
+#if AVER_MODULE_LANDSCAPE
+    landscape_.installProviders();
 #endif
     attachVoxi(e);
 #if AVER_WITH_UI_ABI
@@ -1806,6 +1861,11 @@ void GameApp::onInit(Engine& e) {
     prefabSys_ = std::make_unique<prefab::PrefabSystem>(scene::World::instance(), prefabLib_);
     prefabHost_ = prefab::makeAbiHost(*prefabSys_);
     aver_prefab_set_host(&prefabHost_);
+#  ifdef AVER_WITH_LEVELINST_ABI
+    // [wave3/level-instances] Scripts place, stream and query level instances through this seam.
+    levelInstHost_ = game::makeAbiHost(level_.instances());
+    aver_levelinst_set_host(&levelInstHost_);
+#  endif
 #endif
     openProject(e);
 #if AVER_MODULE_VOXI
@@ -2057,6 +2117,12 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     level_.tickStreaming({camPos_});
 #  if AVER_MODULE_VOXI
     if (voxiAttached_) levelFoliage_.update(camPos_, t.dt);
+    // [wave3/level-instances] Packed instance rows are ray-traced geometry: they show only under ray-driven primary
+    // visibility (rtRenderMode effective 1); otherwise those instances realise unpacked.
+    if (voxiAttached_) {
+        const voxi::Renderer& vxr = voxi::Renderer::get();
+        level_.setPackedRenderOk(voxi::resolve(vxr.settings(), vxr.deviceInfo()).rtRenderMode.effective == 1u);
+    }
 #  endif
 #endif
     // Retires deferred destroys, rebuilds topological order, recomposes stale world matrices.
@@ -2141,6 +2207,8 @@ void GameApp::onRender(Engine& e) {
 #if AVER_MODULE_VOXI
         // CDecal entities -> Voxi's projected-decal list. A decal's image id resolves through the project's
         // content index, like every other asset.
+        // [wave3/level-instances] CLight entities -> Voxi's lamp list (no reference path tracer in the game).
+        if (voxiAttached_) sceneLightFeed_.update(scene::World::instance(), voxiRenderer_, nullptr, project_.contentDir());
         if (voxiAttached_)
             sceneDecalFeed_.update(scene::World::instance(), voxiRenderer_,
                                    [this](u64 id, voxi::DecalImageKind, ImageData& out) {

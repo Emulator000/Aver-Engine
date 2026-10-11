@@ -34,6 +34,11 @@ struct OcMatExtras {
 
 // Parses a material from memory. Unknown records are skipped; false only for a missing or
 // wrong-version OCMAT header.
+//
+// A layered terrain material (wave 3) adds `TERRAIN tile 512 pad 8 blend 0.15` and one `LAYER <name>
+// tiling <cm> [heightbias] [baseColor|normal|metalRough|height {ref}] [surface] [friction]
+// [restitution] [foliage <path> density minweight]` per layer (file order = layer index, first = base)
+// -> MaterialDesc::terrain. More than 8 layers, a duplicate or a bad name refuses the block.
 bool parseOcmat(std::string_view text, pbr::MaterialDesc& out,
                 OcMatExtras* extras = nullptr, std::string* err = nullptr);
 

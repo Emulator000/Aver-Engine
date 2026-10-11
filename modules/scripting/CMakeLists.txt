@@ -124,7 +124,10 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   ${AVER_CSHARP_DIR}/Aver.Synapse/*.cs
   ${AVER_CSHARP_DIR}/Aver.Synapse/*.csproj
   ${AVER_CSHARP_DIR}/Aver.Prefab/*.cs
-  ${AVER_CSHARP_DIR}/Aver.Prefab/*.csproj)
+  ${AVER_CSHARP_DIR}/Aver.Prefab/*.csproj
+  # [wave3/level-instances] the level-instance binding, referenced the same way
+  ${AVER_CSHARP_DIR}/Aver.LevelInstance/*.cs
+  ${AVER_CSHARP_DIR}/Aver.LevelInstance/*.csproj)
 
 # EVERY ASSEMBLY THE COMMAND ACTUALLY EMITS, not just the ones somebody remembered. `dotnet build -o`
 # stages the named project's whole transitive ProjectReference closure into the output directory, so
@@ -158,6 +161,7 @@ set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.UI.dll
   ${AVER_BRIDGE_DIR}/Aver.Synapse.dll
   ${AVER_BRIDGE_DIR}/Aver.Prefab.dll
+  ${AVER_BRIDGE_DIR}/Aver.LevelInstance.dll   # [wave3/level-instances]
   ${AVER_BRIDGE_DIR}/Aver.Graph.dll)
 
 add_custom_command(

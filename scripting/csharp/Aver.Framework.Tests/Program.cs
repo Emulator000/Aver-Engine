@@ -25,6 +25,7 @@ static class Program
         failures += GameplayDefsParserTests.RunAll();
         failures += GasSaveTests.RunAll();
         failures += GasReplicationSeamTests.RunAll();
+        failures += AiManagedTests.RunAll();   // AI: wave 3 #21 -- the managed AI seam (ManagedAi, QueryGraph guards)
 
         Console.WriteLine(failures == 0 ? "\nAll tests passed." : $"\n{failures} test(s) failed.");
         return failures;

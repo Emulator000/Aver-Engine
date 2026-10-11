@@ -24,6 +24,9 @@ struct AiDebugOptions {
     bool steering = false;
     bool btState = false;
     bool cover = false;
+    bool eqs = false;            // AI: wave 3 #21 -- environment query items and the best pick
+    bool smartObjects = false;   // slot arrows, colour by state
+    bool stateTree = false;      // active leaf state and the last transition above each state-tree entity
     f32  labelMaxDistanceCm = 4000.0f;   // BT state text is dropped beyond this
 
     u32  mask() const;

@@ -19,14 +19,11 @@ position and a normal come out. That is what lets `tests/fluids/src/GerstnerWave
 surface against numbers it computes for itself, on a machine with no GPU — the same argument
 `Aver.Sound` and `Aver.Synapse` make for being pure.
 
-Nothing else calls it yet. `gerstnerHeightCm` and `gerstnerDisplaceCm` have exactly one real call
-site each, in `GerstnerWaveTest.cpp` — every other hit in the repo is a comment. Buoyancy in
-particular does not read the wave: `SandboxApp.cpp` hands `aver_phys_set_water_plane` a FLAT
-constant height (`waterRenderer_.waterLevelCm()`), and `Buoyancy.cpp` evaluates bodies against that
-plane, never against a per-point sample of the surface. A boat, a buoy, and a shoreline foam mask
-that read the wave height are all still hypothetical. The separation is worth keeping regardless —
-a formula wired into device state could not be unit-tested off-GPU at all — but the case for it is
-"this stays testable and reusable if a caller ever wants it", not "callers already depend on it".
+**Buoyancy now reads it** (wave 3). `gerstnerSurfaceCm(x, worldY, t)` solves the surface at a WORLD point (the wave displaces horizontally, so the rest point is found by fixed-point iteration) and returns the height and unit normal there. `game::GameWater` installs a physics water sampler (`aver_phys_set_water_sampler`, `physics_water_abi.h`) and the framework's `aver_fw_water_sample` over `sampleSurface`, which takes the highest of the ocean (this math, at the live surface's own wave clock `elapsedSeconds()`, so CPU and GPU agree), the lakes and the rivers. `GerstnerWaveTest` pins the solve. The shader still has its own hand-ported copy of the formula; the CPU and GPU agree by test and by sharing the clock, not by sharing source. The compute pass fades waves near the camera-following grid's rim and the CPU does not, an accepted difference far from the player.
+
+## Rivers and lakes (wave 3)
+
+`WaterBody.hpp` is the CPU half of spline water bodies: a `Spline` (centripetal Catmull-Rom in XY, monotone PCHIP for height, width and flow, so none overshoots), `buildRiverMesh` (three vertices per row, flow in `uv0` for the material graph's `VertexFlow` / `FlowNormal` nodes), `buildLakeMesh` (ear-clipped outline subdivided until every edge is short, watertight) and `WaterBodySet`, the point query (surface height, current, depth, kind; the highest surface wins). It takes no device: the meshes are plain `rhi::MeshVertex` arrays `game::GameWater` uploads and draws through the ordinary material path, which is why rays see them. Records: `RIVER` / `RIVERPT` / `LAKE` / `LAKEPT` (`docs/formats/FORMAT_SPECS.md` section 11.x). Tests: `WaterBodyTest`, `WaterBodyRecordTest`. Not done: vertex waves on rivers and lakes (their ripple is the material's), tributaries, swimming locomotion. See `docs/LANDSCAPE_LAYERS_WATER.md`.
 
 The real, current cost of the split is that the wave math exists in two copies. `WaterShaders.hpp`
 does not call `gerstnerDisplaceCm` — it hand-ports the same formula into HLSL, by its own admission

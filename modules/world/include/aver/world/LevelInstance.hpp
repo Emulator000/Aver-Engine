@@ -197,7 +197,33 @@ struct InstantiateOptions {
     // No callback (the default) costs nothing beyond the `done`/`total` increment already needed for
     // the modulo test.
     std::function<void(usize done, usize total)> progress;
+
+    // [wave3/level-instances begin]
+    // Hangs the level under an existing entity: every ROOT placement (parent < 0) is created as a child of
+    // `parent`, and its world transform starts from `parentWorld` exactly as a CHILD placement's starts from its
+    // parent's (physics bodies are placed in world space). A level instance realises its child level this way.
+    // `snap` on a root is ignored when this is set (ground height is a host-level quantity). nullptr = nothing
+    // changes, bit for bit.
+    struct Attach { scene::Entity parent = scene::kInvalidEntity; Transform parentWorld; };
+    const Attach* attach = nullptr;
+    // [wave3/level-instances end]
 };
+
+#  if AVER_MODULE_PHYSICS
+// [wave3/level-instances begin]
+// The static collision body for one mesh at `worldXf`, the path instantiate() takes for every colliding
+// placement: a body from the mesh's triangles (one physics shape per mesh id in `shapeCache`, wrapped at the
+// placement's transform) when opt.localTrianglesFor offers any, else a box fitted to opt.localBoundsFor (the unit
+// cube when unknown). Returns the body handle or 0; the CALLER has checked aver_phys_ready() and owns
+// aver_phys_set_entity. `shapeCache` maps mesh id -> shape handle (0 = Jolt refused) and the caller releases the
+// shapes it keeps. Optional outputs: triangles of the mesh used (0 for a box), whether triangles were offered,
+// how many NEW shapes this call built. `moving` builds the fallback box around the pivot (a body that will be
+// driven to its entity) and reports through `outFollowsEntity` whether that held.
+i32 addStaticPlacementBody(const InstantiateOptions& opt, std::unordered_map<u64, i32>& shapeCache, u64 meshId,
+                           const Transform& worldXf, u32* outTriangles = nullptr, bool* outUsedMesh = nullptr,
+                           bool moving = false, bool* outFollowsEntity = nullptr, u32* outNewShapes = nullptr);
+// [wave3/level-instances end]
+#  endif
 
 // A moving placement's body: `body` is the physics ABI handle of `entity`'s KINEMATIC body, whose
 // origin is the entity's own position (see addPivotBoxBody), for driveKinematicBodies. "Moving" is a

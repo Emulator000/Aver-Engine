@@ -119,6 +119,23 @@ float4 averRtSampleSlotGraph(uint slot, float2 uv) {
                             float4(1.0, 1.0, 1.0, 1.0));
 }
 
+#ifndef AVER_RT_TERRAIN_HITS
+#define AVER_RT_TERRAIN_HITS 0
+#endif
+// ---- wave3 terrain layers: the ray back-end of the shared averTerrainMaps (material_prelude.hlsl) ----
+// The hit's material travels in a static the caller sets with gAverTerrainRt, as the graph adapter above does.
+static RtMaterial gAverTerrainMat;
+float4 averRtTerrainSample(uint slot, float2 uv, float2 gx, float2 gy) {
+    return averRtSampleSlot(gAverTerrainMat, slot, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
+}
+// The parameter texture is read with Load: it holds numbers, not colours. Unbound = zeros (zero layers).
+float averRtTerrainParam(uint x, uint y) {
+    const uint idx = gAverTerrainMat.texIndex[5];
+    if (idx == AVER_TEX_UNBOUND) return 0.0;
+    return gRtTextures[NonUniformResourceIndex(idx)].Load(int3(x, y, 0)).r;
+}
+// ---- end wave3 terrain layers ----
+
 // UV-space footprint of one pixel's primary ray for SampleGrad (not implicit ddx/ddy).
 // Uses rdRayDx/rdRayDy, neighbour pixels' rays at ray hit's hitT scale.
 void averRtUvGrad(RtMaterial mat, RtInstance inst, float3 N,
@@ -332,6 +349,17 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
     float2 uv = h.meshUV;
 #ifdef AVER_RT_BINDLESS
     uv = averRtSurfaceUV(m, h.inst, h.pos, h.N, h.meshUV);
+    // wave3 terrain layers: the shared body fills the maps (secondary bounces take the dominant layer only).
+    // OFF by default: inlined into PSRayDriven it hung the RX 7800 XT on the first frame (2026-10-11, register
+    // limit); ray-traced terrain shows its base layer until terrain resolve gets its own stage.
+    const bool terrain = AVER_RT_TERRAIN_HITS && (m.flags & AVER_MAT_TERRAIN) != 0u;
+    if (terrain) {
+        gAverTerrainMat = m;
+        gAverTerrainRt = true;
+        map = averTerrainMaps(m, h.pos, uv, gx, gy, detail == AVER_RT_HIT_LITE);
+        gAverTerrainRt = false;
+    }
+    if (!terrain) {   // the stock maps, below, are not used by a terrain material
     if (!rn) map.baseColor = averRtSampleSlot(m, 0, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
     const float4 mr = averRtSampleSlot(m, 1, uv, gx, gy, float4(1.0, 1.0, 1.0, 1.0));
     map.metalRough = float2(mr.g, mr.b);   // glTF: roughness G, metallic B
@@ -364,6 +392,7 @@ AverSurface rtHitSurface(RtHit h, float3 V, float3 L, float2 gx, float2 gy, uint
             }
         }
     }
+    }   // !terrain
 #endif
     AverAuthored a = averAuthoredFrom(m, map);
 

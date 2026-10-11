@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "name": "Aver.LevelInstance.Abi",
+  "dir": "levelinstance.abi",
+  "displayName": "Level Instances ABI",
+  "description": "Plain-C seam to place, stream and query level instances from scripts.",
+  "category": "Gameplay",
+  "option": null,
+  "required": false,
+  "default": true,
+  "dependsOn": ["Aver.Core", "Aver.Scene"],
+  "derivedFrom": ["Aver.Scene"],
+  "consequence": "Scripts cannot place, stream or query level instances."
+}

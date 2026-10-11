@@ -39,6 +39,8 @@ add_library(Aver.Render.PBR.Materials STATIC
   # bookkeeping that decides WHICH graphs exist and what id each holds.
   src/MaterialGraphRegistry.cpp
   src/MaterialSystem.cpp
+  # Layered terrain material: the parameter texels and atlas hash (wave 3, landscape layers).
+  src/TerrainLayers.cpp
   src/PbrShaders.cpp)
 
 target_include_directories(Aver.Render.PBR.Materials PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

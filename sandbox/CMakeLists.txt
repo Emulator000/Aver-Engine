@@ -34,6 +34,9 @@ add_executable(Sandbox WIN32
   src/AnimEditor.cpp
   src/SequenceEditor.cpp
   src/SandboxSequenceRun.cpp
+  # wave3: the Landscape mode's Paint tab (layers, brush, foliage scatter, terrain material editor) and Water tab (rivers, lakes).
+  src/LandscapePaintTool.cpp
+  src/WaterSplineTool.cpp
   # Movie Render Queue: the frame plan and PNG / EXR / MP4 output, and the Window > Render Queue panel.
   src/RenderQueueOutput.cpp
   src/RenderQueuePanel.cpp
@@ -66,6 +69,10 @@ add_executable(Sandbox WIN32
   src/AnimCurveGeometry.cpp
   src/BtEditor.cpp
   src/BtGraphEditor.cpp
+  # AI: wave 3 #21 -- state tree and environment query editors, and the parts they share with the BT editor
+  src/AiEditorParts.cpp
+  src/StateTreeEditor.cpp
+  src/EqsEditor.cpp
   src/AiDebugOverlay.cpp
   src/UiLayoutEditor.cpp
   src/BlendSpaceEditor.cpp
@@ -73,6 +80,11 @@ add_executable(Sandbox WIN32
   src/MontageEditor.cpp
   src/PrefabEditorModel.cpp
   src/PrefabEditorUi.cpp
+  # [wave3/level-instances begin] Level instances: the model and the ImGui half, and the SandboxApp members that wire them.
+  src/LevelInstanceEditorModel.cpp
+  src/LevelInstanceEditorUi.cpp
+  src/SandboxLevelInstances.cpp
+  # [wave3/level-instances end]
   src/SoundEditor.cpp
   src/ParticleEditor.cpp
   src/FoliageTypeEditor.cpp
@@ -314,6 +326,12 @@ endif()
 if(TARGET Aver.Prefab)
   target_link_libraries(Sandbox PRIVATE Aver.Prefab Aver.Prefab.Abi)
 endif()
+# [wave3/level-instances begin] The script seam onto level instances (Aver.Runtime.Game.Core links it PUBLIC and defines
+# AVER_WITH_LEVELINST_ABI; named here too, beside the prefab ABI, so the editor's own link line says what it ships).
+if(TARGET Aver.LevelInstance.Abi)
+  target_link_libraries(Sandbox PRIVATE Aver.LevelInstance.Abi)
+endif()
+# [wave3/level-instances end]
 if(TARGET Aver.Framework)
   # Gameplay (brings AVER_MODULE_FRAMEWORK=1). It carries Aver.Scene transitively, but the scene is
   # still named above on its own: the framework is optional and the world is not meant to become

@@ -40,6 +40,17 @@ AVER_FW_ABI int32_t aver_fw_blackboard_abi_version(void);
 #define AVER_FW_BB_OP_RESET    3
 #define AVER_FW_BB_OP_DEFINE   4
 #define AVER_FW_BB_OP_SETTEAM  5
+/* Brain operations (framework_brain_abi.h), same provider. `key` is an asset path / event name / state
+ * path, "" when unused. A provider that predates them returns 0, which the brain functions read as
+ * "no brain". AI: wave 3 #21. */
+#define AVER_FW_BB_OP_BRAIN_SET     6   /* key = asset path (.ocbt or .ocst) */
+#define AVER_FW_BB_OP_BRAIN_KIND    7   /* *i = kind */
+#define AVER_FW_BB_OP_BRAIN_EVENT   8   /* key = event name, *i payload int, f[0] payload float */
+#define AVER_FW_BB_OP_BRAIN_STATE   9   /* text = active leaf path; 0 when none */
+#define AVER_FW_BB_OP_BRAIN_INSTATE 10  /* key = state path; 1 when it is in the active chain */
+#define AVER_FW_BB_OP_BRAIN_STATUS  11  /* *i = status */
+#define AVER_FW_BB_OP_BRAIN_RESTART 12
+#define AVER_FW_BB_OP_BRAIN_STOP    13
 
 typedef int32_t (AVER_FW_CALL* aver_fw_blackboard_fn)(int32_t op, int32_t entity, const char* key,
                                                        int32_t type, int64_t* i, float* f, char* text,

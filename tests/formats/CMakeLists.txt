@@ -134,6 +134,12 @@ target_link_libraries(LandscapeTest PRIVATE Aver.Formats Aver.Core Aver.Platform
 set_target_properties(LandscapeTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcLandLayersTest -- the optional LLYR/LWGT paint chunks of `.ocland` (wave 3, landscape layers).
+add_executable(OcLandLayersTest src/OcLandLayersTest.cpp)
+target_link_libraries(OcLandLayersTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcLandLayersTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # TrifactorTest -- the cluster builder, the LOD DAG, and MLET persistence (see the file's own header
 # comment for why it is a separate executable from MeshTest). `if(TARGET Aver.Trifactor)`, not
 # `if(AVER_MODULE_TRIFACTOR)`, for MaterialTest's exact reason above: an unconditional Aver.Trifactor
@@ -171,6 +177,24 @@ if(TARGET Aver.Formats.Material)
   # the shader they mirror rather than describing it.
   target_compile_definitions(MaterialTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
   set_target_properties(MaterialTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# OcMatTerrainTest -- TERRAIN / LAYER records of a layered terrain material and what packMaterial does with
+# them (wave 3, landscape layers). Guarded on the target for MaterialTest's reason.
+if(TARGET Aver.Formats.Material)
+  add_executable(OcMatTerrainTest src/OcMatTerrainTest.cpp)
+  target_link_libraries(OcMatTerrainTest PRIVATE
+    Aver.Formats.Material Aver.Formats Aver.Render.PBR.Materials Aver.Core Aver.Platform)
+  set_target_properties(OcMatTerrainTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# TextureAtlasTest -- the terrain atlas builder's CPU half (cells, wrapped pad, mip alignment). No device.
+if(TARGET Aver.Assets.Gpu)
+  add_executable(TextureAtlasTest src/TextureAtlasTest.cpp)
+  target_link_libraries(TextureAtlasTest PRIVATE Aver.Assets.Gpu Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(TextureAtlasTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 

@@ -119,6 +119,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "ToolGlyphs.hpp"
 #include "EditorWidgets.hpp"
 #include "FoliageAlign.hpp"
+#include "LandscapePaintTool.hpp"   // wave3: the Landscape mode's Paint tab
+#include "WaterSplineTool.hpp"      // wave3: the Landscape mode's Water tab
+#include <functional>
 #include "PlayerStartRefresh.hpp"
 #include "LevelViewStore.hpp"
 #include "AssetEditor.hpp"
@@ -127,6 +130,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "GraphEditor.hpp"
 #include "BtEditor.hpp"
 #include "BtGraphEditor.hpp"
+#include "StateTreeEditor.hpp"   // AI: wave 3 #21
+#include "EqsEditor.hpp"
 #include "UiLayoutEditor.hpp"
 #include "BlendSpaceEditor.hpp"
 #include "AnimStateMachineEditor.hpp"
@@ -163,6 +168,15 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/synapse/CrowdGpu.hpp"
 #endif
 #include "aver/game/SceneDecalFeed.hpp"
+#endif
+#if AVER_MODULE_SCENE
+// [wave3/level-instances begin] Level instances in the editor (docs/LEVEL_INSTANCES.md).
+#include "LevelInstanceEditorUi.hpp"
+#include "aver/game/LevelInstancesAbiHost.hpp"
+#include "aver/game/LevelInstancesFramework.hpp"
+#include "aver/game/LevelLights.hpp"
+#include "aver/game/LevelPackBaker.hpp"
+// [wave3/level-instances end]
 #endif
 #include "EditorEuler.hpp"
 #include "SequenceEditor.hpp"
@@ -1423,6 +1437,7 @@ public:
     void setHudTest(int idx);   // --hud-preview <index>
     void setSaveProject(bool on);   // --save-project
     void setSaveLevelTo(std::string p);   // --save-level <out>
+    void setBakeLevelPack(std::string levelAsset);   // --bake-level-pack <content-relative level>  [wave3/level-instances]
     void setRayProbe(f32 x, f32 y);   // --ray-probe
     void setImportOnce(std::string src, std::string dst);
     bool* autoCompileFlag();
@@ -1803,6 +1818,8 @@ private:
     // Derived Data Cache write-behind budget, mirrored for slider binding.
     f32 ddcRamBudgetMb_ = 256.0f;
     std::string saveLevelTo_;         // --save-level <out>
+    std::string bakeLevelPackAsset_;  // --bake-level-pack <level>  [wave3/level-instances]
+    bool bakeLevelPackDone_ = false;
     bool saveLevelDone_ = false;
     bool rayProbe_ = false, rayProbeDone_ = false;   // --ray-probe <sx> <sy>
     f32  rayProbeX_ = 0.0f, rayProbeY_ = 0.0f;
@@ -1984,7 +2001,7 @@ private:
 
     // One undoable edit (transform, create/destroy). Components captured via EntitySnapshot.
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies };
         Kind kind = Kind::Transform;
         // Monotonic serial for save points; never reused so undo/redo cross saves correctly.
         u64 serial = 0;
@@ -2031,6 +2048,8 @@ private:
         // Prefab payload: the prefab state before and after one operation (create, place, apply, revert,
         // unpack, ...). Shared so copying a command around the undo stacks stays cheap.
         std::shared_ptr<editor::PrefabEdit> prefab;
+        // [wave3/level-instances] Level instance payload: the instance state before and after one operation.
+        std::shared_ptr<editor::LevelInstanceEdit> levelInst;
 #endif
 
 #if AVER_MODULE_SCENE
@@ -2041,6 +2060,13 @@ private:
         // LandscapeStroke: rect diff, not snapshot (512x512 section = 1 MB, touched rect = KB). One entry per stroke, unioned.
         u32 landX0 = 0, landY0 = 0, landX1 = 0, landY1 = 0;   // inclusive sample bounds
         std::vector<f32> landBefore, landAfter;
+
+        // wave3 LandscapeWeights: `landPlanes` stored paint planes over the same rect (landX0..landY1), plane-major, before / after.
+        u32 landPlanes = 0;
+        std::vector<u8> landWBefore, landWAfter;
+        // wave3 WaterBodies: the level's RIVER / LAKE records before and after one edit gesture (a few records, so whole copies).
+        std::vector<fmt::OcRiver> riversBefore, riversAfter;
+        std::vector<fmt::OcLake> lakesBefore, lakesAfter;
 
         // FoliageStroke: every entity one stroke created/erased as one entry (dozens/sec would cost many Ctrl+Z). recreateFrom() undoes erases.
 #if AVER_MODULE_SCENE
@@ -2689,6 +2715,9 @@ private:
     void cbCreateNodeGraph();
 
     void cbCreateBehaviourTree();
+    void cbCreateStateTree();      // AI: wave 3 #21
+    void cbCreateEqsQuery();
+    void cbCreateSmartObject();
     void cbCreateUiLayout();
     void cbCreateBlendSpace();
     void cbCreateStateMachine();
@@ -3179,6 +3208,56 @@ private:
     f32  foliageDensity_     = 6.0f;     // attempted placements per brush application
     bool foliageErase_       = false;    // Shift: remove instead of place
     u32  foliageSeed_        = 1u;       // one running RNG stream for the whole paint session
+
+    // ---- wave3 layers/rivers: the Paint and Water tabs of the Landscape mode panel (LandscapePaintTool.cpp, WaterSplineTool.cpp) ----
+    enum class LandscapeTab { Sculpt, Paint, Water };
+    LandscapeTab landscapeTab_ = LandscapeTab::Sculpt;
+    // Paint
+    f32  paintRadiusCm_ = 600.0f, paintStrength_ = 0.6f, paintFalloff_ = 1.0f, paintOpacity_ = 1.0f;
+    int  paintMode_ = 0;                  // 0 Paint, 1 Erase, 2 Smooth (landscape::PaintMode)
+    int  paintLayer_ = 0;                 // the selected MATERIAL layer
+    u32  paintSectionLayer_ = 0;          // that layer's index in the section's table, fixed for a stroke
+    bool painting_ = false;               // LMB down with the paint tool
+    f32  autoSlopeMinDeg_ = 25.0f, autoSlopeMaxDeg_ = 90.0f, autoFeatherDeg_ = 5.0f;
+    f32  autoZMinCm_ = -100000.0f, autoZMaxCm_ = 100000.0f;
+    // Water: bodies live in levelHeader_.rivers / lakes (rivers first in the selection index).
+    int  waterSel_ = -1;                  // selected body
+    int  waterPt_ = -1;                   // selected control point of it
+    bool waterDrag_ = false;              // dragging that point
+    bool waterGestureOpen_ = false;       // an edit gesture is in progress (the snapshot below is its "before")
+    std::vector<fmt::OcRiver> waterGestureRivers_;
+    std::vector<fmt::OcLake>  waterGestureLakes_;
+    bool waterBodiesStale_ = false;       // the records changed: rebuild meshes and the query next frame
+    rhi::LineHandle waterLines_ = 0;      // the selected body's centreline, bank edges and handles
+    u64  waterLinesKey_ = 0;
+#if AVER_WITH_IMGUI
+    void buildLandscapePaintTab(Engine& e);
+    void handlePaint(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my);
+    void endPaintStroke(const char* label = "Paint terrain");
+    void purgeWeightUndo();
+#if AVER_MODULE_FLUIDS
+    void buildLandscapeWaterTab(Engine& e);
+    void handleWaterSpline(Engine& e, const ImGuiIO& io, bool overScene, f32 mx, f32 my);
+    void waterSnapshotIfIdle();
+    void waterEdited();                   // opens a gesture, marks the level unsaved, schedules the rebuild
+    void waterGestureEnd(const char* label);
+    void carveSelectedBody(Engine& e);
+#endif
+#if AVER_MODULE_SCENE
+    void scatterFoliageFromLayer(Engine& e);
+    // One instance of `sp` at (x, y), scale / yaw drawn from `rng` (foliagePlaceOne's tail, so the brush and the
+    // layer scatter place identically).
+    void foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 y, u32& rng);
+#endif
+#if AVER_MODULE_PBR
+    bool buildTerrainLayersSection(pbr::MaterialDesc& d, const std::function<bool(bool)>& track);
+#endif
+#endif
+#if AVER_MODULE_FLUIDS
+    // Rebuilds stale bodies and draws the Water tab's chrome. Every frame, in any mode.
+    void drawWaterBodies(Engine& e);
+#endif
+    // ---- end wave3 layers/rivers ----
 #endif
 
     bool editorModeIsLandscape() const;
@@ -3832,6 +3911,30 @@ private:
     game::GameContent content_;
     // Loaded level: parsing, placements, environment, PCG (runtime GameLevel). Entities list is editor-local.
     game::GameLevel level_;
+#if AVER_MODULE_SCENE
+    // [wave3/level-instances begin] LEVEL INSTANCES (docs/LEVEL_INSTANCES.md): the model is the editor's operations on
+    // level_.instances(); the hooks keep levelEntities_, labels and bodies in step; entityPlaceId_ keeps each
+    // placement's stable id across saves (overrides are keyed by it).
+    editor::LevelInstanceEditorModel levelInstanceModel_{scene::World::instance(), level_.instances(), level_.assets()};
+    editor::LevelInstanceCreateDialog levelInstanceDlg_;
+    std::unordered_map<u32, u64> entityPlaceId_;
+    std::unordered_map<u32, std::string> entityAuthoredName_;   // an instance member's authored `name`, for a commit
+    bool capturingInstance_ = false;                             // fillPlacementFromEntity may read members (a commit)
+    scene::Entity instanceSelPinned_ = scene::kInvalidEntity;    // the selected instance stays loaded while it is selected
+    void installLevelInstanceHooks();
+    editor::LevelInstanceUiCallbacks levelInstanceUiCallbacks();
+    void pushLevelInstanceEdit(const editor::LevelInstanceEdit& edit);
+    bool captureEntityForInstance(scene::Entity e, fmt::OcWorldData& into, i32 parentIdx);
+    void openInstanceLevel(const std::string& assetRef);
+    void levelInstanceBack();
+    bool bakeInstancePack(scene::Entity root, std::string* why);
+    void keepPlacementIds(fmt::OcWorldData& w, const std::unordered_map<u32, i32>& slotOf);
+    void writeLevelExtent(fmt::OcWorldData& w);
+#  ifdef AVER_WITH_LEVELINST_ABI
+    AverLevelInstanceHost levelInstHost_{};   // the script seam onto level_.instances()
+#  endif
+    // [wave3/level-instances end]
+#endif
 #if AVER_MODULE_PBR
     // Mesh id -> cached outline line mesh (0 = no outline).
     std::unordered_map<u64, rhi::LineHandle> selOutlineLines_;

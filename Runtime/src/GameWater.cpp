@@ -10,6 +10,10 @@
 
 #if AVER_MODULE_PHYSICS
 #  include "aver/physics/physics_abi.h"
+#  include "aver/physics/physics_water_abi.h"
+#endif
+#if AVER_MODULE_FRAMEWORK
+#  include "aver/framework/framework_terrain_abi.h"
 #endif
 #if AVER_FLUIDS_SIMULATED
 #  if AVER_MODULE_FRAMEWORK
@@ -73,6 +77,61 @@ SurfaceLook bindSurfaceLook(rhi::IDevice& device, GameContent& content, pbr::Mat
     return look;
 }
 
+// ---- wave3 water bodies: the host's side of the physics and framework water queries ----
+#if AVER_MODULE_PHYSICS
+// aver_phys_set_water_sampler: the highest surface at the body wins; it never answers -1, so a level whose only water is
+// a bounded record no longer buoys bodies outside its bounds.
+int32_t physicsWaterThunk(float x, float y, float, AverPhysWaterSample* out, void* user) {
+    fluids::WaterQuery q;
+    if (!static_cast<const GameWater*>(user)->sampleSurface(x, y, q)) return 0;
+    out->surfaceZCm = q.surfaceZ;
+    for (int i = 0; i < 3; ++i) { out->normal[i] = q.normal[i]; out->currentCmS[i] = q.current[i]; }
+    out->buoyancy = 1.0f;
+    out->linearDrag = q.kind == fluids::WaterKind::River ? 0.8f : 0.5f;
+    out->angularDrag = 0.01f;
+    return 1;
+}
+#endif
+#if AVER_MODULE_FRAMEWORK
+int32_t frameworkWaterThunk(float x, float y, float, float* outSurfaceZ, float* outNormal3, float* outCurrent3,
+                            float* outDepth, int32_t* outKind, void* user) {
+    fluids::WaterQuery q;
+    if (!static_cast<const GameWater*>(user)->sampleSurface(x, y, q)) return 0;
+    if (outSurfaceZ) *outSurfaceZ = q.surfaceZ;
+    if (outNormal3) for (int i = 0; i < 3; ++i) outNormal3[i] = q.normal[i];
+    if (outCurrent3) for (int i = 0; i < 3; ++i) outCurrent3[i] = q.current[i];
+    if (outDepth) *outDepth = q.depthCm;
+    if (outKind) *outKind = static_cast<int32_t>(q.kind);
+    return 1;
+}
+#endif
+
+// A hash of everything the river / lake meshes and the query are built from.
+u64 hashBodies(const fmt::OcWorldData& w, u64 groundGen) {
+    u64 h = 1469598103934665603ull;
+    const auto mix = [&h](const void* p, usize n) {
+        const u8* b = static_cast<const u8*>(p);
+        for (usize i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    };
+    const auto str = [&](const std::string& s) { mix(s.data(), s.size()); const u8 z = 0; mix(&z, 1); };
+    mix(&groundGen, sizeof groundGen);
+    for (const fmt::OcRiver& r : w.rivers) {
+        str(r.name); str(r.material);
+        const f64 v[] = {r.depthCm, r.bankCm, r.bankSlow, r.flowScale};
+        mix(v, sizeof v);
+        for (const fmt::OcRiverPoint& p : r.points) mix(&p, sizeof p);
+    }
+    const u8 sep = 1;
+    mix(&sep, 1);
+    for (const fmt::OcLake& l : w.lakes) {
+        str(l.name); str(l.material);
+        const f64 v[] = {l.levelCm, l.depthCm, l.bankCm, l.maxEdgeCm};
+        mix(v, sizeof v);
+        for (const fmt::OcLakePoint& p : l.points) mix(&p, sizeof p);
+    }
+    return h;
+}
+
 // Whether two surface descriptions need the same grid (the level height is not part of it).
 bool sameGrid(const fluids::WaterSurfaceDesc& a, const fluids::WaterSurfaceDesc& b) {
     if (a.bounded != b.bounded || a.cellCm != b.cellCm) return false;
@@ -85,6 +144,8 @@ bool sameGrid(const fluids::WaterSurfaceDesc& a, const fluids::WaterSurfaceDesc&
 }  // namespace
 
 void GameWater::init(rhi::IDevice& device) {
+    dev_ = &device;
+    installHostSamplers();   // wave3: physics buoyancy and the framework's water query read rivers, lakes and waves
 #if AVER_FLUIDS_SIMULATED
     // Registered unconditionally, spawned only if a level or a script asks for one -- an idle
     // feature costs nothing.
@@ -103,6 +164,10 @@ void GameWater::init(rhi::IDevice& device) {
 }
 
 void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
+    // wave3: rivers and lakes come first and the ocean path below keeps returning early as before.
+    rebuildBodies(device, w);
+    ocean_.present = false;
+    installHostSamplers();
     if (w.waters.empty()) return;
     const fmt::OcWaterPlacement& wp = w.waters.front();
 
@@ -182,6 +247,13 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
             fluidWantPending_ = true;
             // The buoyancy plane still comes from the authored level: the solver exposes no query
             // for the deformed surface, and a flat plane at the authored height is closer than none.
+            ocean_.present = true;
+            ocean_.simulate = true;
+            ocean_.infinite = false;
+            ocean_.level = static_cast<f32>(wp.levelCm);
+            ocean_.boundsMin[0] = static_cast<f32>(wp.boundsMin[0]); ocean_.boundsMin[1] = static_cast<f32>(wp.boundsMin[1]);
+            ocean_.boundsMax[0] = static_cast<f32>(wp.boundsMax[0]); ocean_.boundsMax[1] = static_cast<f32>(wp.boundsMax[1]);
+            ocean_.waveCount = 0;
             const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
             const f32 current[3] = {0.0f, 0.0f, 0.0f};
             aver_phys_set_water_plane(static_cast<f32>(wp.levelCm), normal, 1.0f, 0.5f, 0.05f, current);
@@ -208,6 +280,16 @@ void GameWater::applyLevel(rhi::IDevice& device, const fmt::OcWorldData& w) {
     if (skipped)
         AVER_WARN("[Water] '{}' declares {} waves; the renderer takes {} and the rest are dropped",
                   wp.name.empty() ? "unnamed" : wp.name, n + skipped, fluids::kMaxGerstnerWaves);
+
+    // wave3: the CPU twin of what the shader draws -- the same waves, bounds and level -- for buoyancy and Water.Sample.
+    ocean_.present = true;
+    ocean_.simulate = false;
+    ocean_.infinite = wp.infinite;
+    ocean_.level = static_cast<f32>(wp.levelCm);
+    ocean_.boundsMin[0] = static_cast<f32>(wp.boundsMin[0]); ocean_.boundsMin[1] = static_cast<f32>(wp.boundsMin[1]);
+    ocean_.boundsMax[0] = static_cast<f32>(wp.boundsMax[0]); ocean_.boundsMax[1] = static_cast<f32>(wp.boundsMax[1]);
+    ocean_.waveCount = n;
+    for (size_t i = 0; i < n; ++i) ocean_.waves[i] = waves[i];
 
     // A record with a material and no `simulate` is the displaced mesh surface, which goes through
     // the ordinary material path and so is seen by rays; a record without one keeps the analytic
@@ -369,6 +451,10 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
     // the analytic surface exists in every fluids build; both hosts reach it from their frame tick.
     if (waterAttached_) waterRenderer_.tick(dt);
     if (surfaceActive_ && !frozen_) surface_.tick(dt);
+#if AVER_MODULE_PHYSICS
+    // aver_phys_shutdown clears the host sampler; a play session that restarts physics must get it back.
+    if (!aver_phys_has_water_sampler()) installHostSamplers();
+#endif
 
 #if AVER_FLUIDS_SIMULATED
     // The one place a fluid volume is ever spawned: applyLevel only latches what a level asked
@@ -460,7 +546,7 @@ void GameWater::update(rhi::IDevice& device, f32 dt) {
 }
 
 rhi::SkyAtmosphere GameWater::applyUnderwaterFog(const rhi::SkyAtmosphere& sky, f32 cameraZCm) const {
-    if (!attached()) return sky;
+    if (!(waterAttached_ || surfaceActive_)) return sky;   // the ocean only: a lake does not give the underwater look (yet)
     return fluids::applyUnderwaterFog(sky, cameraZCm, waterLevelCm(), waterFog_);
 }
 
@@ -522,6 +608,7 @@ void GameWater::drawDisplaced(rhi::IDevice& device, GameContent& content, pbr::M
 
 void GameWater::draw(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const {
     drawDisplaced(device, content, materials);
+    drawBodies(device, content, materials);
 #if AVER_FLUIDS_SIMULATED
     // Every live volume, drawn in handle order and not sorted here -- the device captures blended
     // draws and replays them sorted back-to-front itself.
@@ -533,6 +620,11 @@ void GameWater::draw(rhi::IDevice& device, GameContent& content, pbr::MaterialSy
 }
 
 void GameWater::unload() {
+    // wave3: the level's rivers and lakes (meshes and query) and its ocean description go with it.
+    destroyBodyMeshes();
+    bodies_.clear();
+    bodiesHash_ = 0;
+    ocean_ = OceanInfo{};
     // The displaced surface is per-level (it names the level's material), so it goes with it; the
     // feature stays registered and idle.
     retireDisplaced();
@@ -568,6 +660,9 @@ void GameWater::unload() {
 }
 
 void GameWater::shutdown(rhi::IDevice* device) {
+    destroyBodyMeshes();
+    bodies_.clear();
+    dev_ = nullptr;
 #if AVER_FLUIDS_SIMULATED
     // BEFORE physics shuts down: retiring a live volume calls into the solver.
     if (device) device->removeRenderFeature(&fluidScene_);
@@ -634,6 +729,123 @@ i32 GameWater::fluidSpawnMaterialProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy
 }
 #endif // AVER_MODULE_FRAMEWORK
 #endif // AVER_FLUIDS_SIMULATED
+
+// ---- wave3 water bodies ----
+void GameWater::setGroundHeightSource(std::function<bool(f64, f64, f64&)> fn) {
+    ground_ = std::move(fn);
+    ++groundGen_;   // depth in the query changed meaning: the next rebuildBodies rebuilds
+}
+
+void GameWater::installHostSamplers() {
+#if AVER_MODULE_PHYSICS
+    aver_phys_set_water_sampler(&physicsWaterThunk, this);
+#endif
+#if AVER_MODULE_FRAMEWORK
+    aver_fw_set_water_provider(&frameworkWaterThunk, this);
+#endif
+}
+
+void GameWater::destroyBodyMeshes() {
+    if (dev_)
+        for (const BodyDraw& d : bodyDraws_)
+            if (d.mesh) dev_->destroyMesh(d.mesh);
+    bodyDraws_.clear();
+}
+
+f32 GameWater::waveClock() const {
+    if (waterAttached_) return waterRenderer_.elapsedSeconds();
+    if (surfaceActive_) return surface_.elapsedSeconds();
+    return 0.0f;
+}
+
+void GameWater::rebuildBodies(rhi::IDevice& device, const fmt::OcWorldData& w) {
+    dev_ = &device;
+    const u64 hash = hashBodies(w, groundGen_);
+    if (hash == bodiesHash_ && (!bodyDraws_.empty() || (w.rivers.empty() && w.lakes.empty()))) return;
+    bodiesHash_ = hash;
+
+    destroyBodyMeshes();
+    bodies_.clear();
+    std::vector<rhi::MeshVertex> verts;
+    std::vector<u32> idx;
+    const auto upload = [&](const std::string& material, bool lake) {
+        if (verts.empty() || idx.empty()) return;
+        BodyDraw d;
+        d.mesh = device.createMesh(verts.data(), static_cast<u32>(verts.size()), idx.data(), static_cast<u32>(idx.size()));
+        d.material = material;
+        d.lake = lake;
+        if (d.mesh) bodyDraws_.push_back(std::move(d));
+    };
+
+    for (const fmt::OcRiver& r : w.rivers) {
+        if (r.points.size() < 2) continue;
+        fluids::RiverDesc rd;
+        rd.name = r.name; rd.material = r.material;
+        rd.depthCm = static_cast<f32>(r.depthCm); rd.bankCm = static_cast<f32>(r.bankCm);
+        rd.bankSlow = static_cast<f32>(r.bankSlow); rd.flowScale = static_cast<f32>(r.flowScale);
+        std::vector<fluids::SplinePoint> pts;
+        for (const fmt::OcRiverPoint& p : r.points)
+            pts.push_back({static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(p.z), static_cast<f32>(p.widthCm), static_cast<f32>(p.flowCmS)});
+        rd.spline.set(std::move(pts), false);
+        fluids::buildRiverMesh(rd, 250.0f, verts, idx);
+        upload(r.material, false);
+        bodies_.addRiver(std::move(rd));
+    }
+    for (const fmt::OcLake& l : w.lakes) {
+        if (l.points.size() < 3) continue;
+        fluids::LakeDesc ld;
+        ld.name = l.name; ld.material = l.material;
+        ld.levelCm = static_cast<f32>(l.levelCm); ld.depthCm = static_cast<f32>(l.depthCm);
+        ld.bankCm = static_cast<f32>(l.bankCm); ld.maxEdgeCm = static_cast<f32>(l.maxEdgeCm);
+        std::vector<fluids::SplinePoint> pts;
+        for (const fmt::OcLakePoint& p : l.points) pts.push_back({static_cast<f32>(p.x), static_cast<f32>(p.y), 0.0f, 0.0f, 0.0f});
+        ld.outline.set(std::move(pts), true);
+        fluids::buildLakeMesh(ld, verts, idx);
+        upload(l.material, true);
+        bodies_.addLake(std::move(ld));
+    }
+    bodies_.finalize();
+    bodies_.ground = [this](f32 x, f32 y, f32& z) {
+        f64 gz = 0.0;
+        if (!ground_ || !ground_(x, y, gz)) return false;
+        z = static_cast<f32>(gz);
+        return true;
+    };
+    if (!bodyDraws_.empty())
+        AVER_INFO("[Water] {} river/lake mesh(es) built ({} river(s), {} lake(s))", bodyDraws_.size(), w.rivers.size(), w.lakes.size());
+}
+
+bool GameWater::sampleSurface(f32 x, f32 y, fluids::WaterQuery& out) const {
+    out = fluids::WaterQuery{};
+    bool have = bodies_.sample(x, y, out);
+    if (!ocean_.present) return have;
+    if (!ocean_.infinite && !(x >= ocean_.boundsMin[0] && x <= ocean_.boundsMax[0] &&
+                              y >= ocean_.boundsMin[1] && y <= ocean_.boundsMax[1]))
+        return have;
+    f32 h = 0.0f, n[3] = {0.0f, 0.0f, 1.0f};
+    if (!ocean_.simulate && ocean_.waveCount > 0) fluids::gerstnerSurfaceCm(ocean_.waves, ocean_.waveCount, x, y, waveClock(), h, n);
+    const f32 z = ocean_.level + h;
+    if (have && z <= out.surfaceZ) return true;   // the highest surface wins where bodies overlap
+    out = fluids::WaterQuery{};
+    out.over = true;
+    out.surfaceZ = z;
+    for (int i = 0; i < 3; ++i) out.normal[i] = n[i];
+    out.kind = fluids::WaterKind::Ocean;
+    f64 gz = 0.0;
+    if (ground_ && ground_(x, y, gz)) out.depthCm = std::max(z - static_cast<f32>(gz), 0.0f);
+    return true;
+}
+
+void GameWater::drawBodies(rhi::IDevice& device, GameContent& content, pbr::MaterialSystem* materials) const {
+    if (bodyDraws_.empty()) return;
+    // Identity: the meshes carry world positions. Blended exactly as the displaced ocean is (bindSurfaceLook).
+    const Mat4 world = Mat4::identity();
+    for (const BodyDraw& d : bodyDraws_) {
+        const SurfaceLook look = bindSurfaceLook(device, content, materials, d.material, d.lake ? "a lake" : "a river");
+        device.drawMesh(d.mesh, &world.m[0][0], look.col, look.metallic, look.roughness);
+    }
+}
+// ---- end wave3 water bodies ----
 
 } // namespace aver::game
 

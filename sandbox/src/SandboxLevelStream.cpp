@@ -9,6 +9,9 @@
 #  include "aver/formats/OcStream.hpp"
 #  include "aver/scene/scene_abi.h"
 #  include "aver/world/LevelTransform.hpp"
+#  if AVER_MODULE_VOXI
+#    include "aver/voxi/RenderSettingsResolver.hpp"   // [wave3/level-instances]
+#  endif
 #  if AVER_MODULE_PHYSICS
 #    include "aver/physics/physics_abi.h"
 #  endif
@@ -146,7 +149,9 @@ void SandboxApp::adoptNewLevelEntities() {
     scene::World& world = scene::World::instance();
     const std::vector<scene::Entity> live = levelEntities_;
     for (const scene::Entity e : live) {
-        if (!world.valid(e) || ls.owns(e) || !streamAdopted_.insert(static_cast<u32>(e)).second) continue;
+        if (!world.valid(e) || ls.owns(e)) continue;
+        if (level_.instances().isMember(e)) continue;   // [wave3/level-instances] the child level's, not a new placement
+        if (!streamAdopted_.insert(static_cast<u32>(e)).second) continue;
         fmt::OcWorldPlacement p;
         bool keepParent = false;
         if (!streamRecordFromEntity(e, nullptr, p, keepParent)) continue;   // a light, decal or prefab part
@@ -160,6 +165,24 @@ void SandboxApp::adoptNewLevelEntities() {
 
 void SandboxApp::tickLevelStreaming(f32 dt) {
     std::vector<Vec3> viewers{camPos_};
+    // [wave3/level-instances begin] The selected instance stays loaded while it is selected; packed rows show only under
+    // ray-driven primary visibility (otherwise those instances realise unpacked).
+    {
+        const scene::Entity want = (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity)
+                                       ? level_.instances().topRootOf(selEntity_) : scene::kInvalidEntity;
+        if (want != instanceSelPinned_) {
+            if (instanceSelPinned_ != scene::kInvalidEntity) level_.instances().pin(instanceSelPinned_, false);
+            if (want != scene::kInvalidEntity) level_.instances().pin(want, true);
+            instanceSelPinned_ = want;
+        }
+#  if AVER_MODULE_VOXI
+        if (voxiAttached_) {
+            const voxi::Renderer& vx = voxi::Renderer::get();
+            level_.setPackedRenderOk(voxi::resolve(vx.settings(), vx.deviceInfo()).rtRenderMode.effective == 1u);
+        }
+#  endif
+    }
+    // [wave3/level-instances end]
     game::LevelStreaming& ls = level_.streaming();
     if (ls.active()) {
         adoptNewLevelEntities();

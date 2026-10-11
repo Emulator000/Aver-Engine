@@ -177,6 +177,31 @@ inline void gerstnerDisplaceCm(const GerstnerWave* waves, size_t count, f32 xCm,
     outNormal[2] = ny * invLen;
 }
 
+// The surface at a WORLD (xCm, zCm) rather than at a rest coordinate: gerstnerHeightCm/DisplaceCm are
+// evaluated at the UNDISPLACED point, but a floating body sits at a displaced world position. Solves
+// rest = world - horizontalDisplacement(rest) by fixed-point iteration (it contracts because the
+// clamped steepness sums to <= 1; early-outs below 1e-3 cm, at most 8 steps) and returns the height and
+// unit normal at the solved rest point. Zero waves -> height 0, normal (0, 0, 1). Same axis note as
+// gerstnerDisplaceCm: the second horizontal axis is the engine's Y, the normal is {x, y, up}.
+inline void gerstnerSurfaceCm(const GerstnerWave* waves, size_t count, f32 worldXCm, f32 worldZCm,
+                              f32 tSeconds, f32& outHeightCm, f32 outNormal[3]) {
+    outHeightCm = 0.0f;
+    outNormal[0] = 0.0f; outNormal[1] = 0.0f; outNormal[2] = 1.0f;
+    if (count == 0) return;
+    f32 rx = worldXCm, rz = worldZCm;
+    f32 pos[3], n[3];
+    for (int it = 0; it < 8; ++it) {
+        gerstnerDisplaceCm(waves, count, rx, rz, tSeconds, pos, n);
+        const f32 ex = pos[0] - worldXCm, ez = pos[1] - worldZCm;
+        if (std::fabs(ex) < 1e-3f && std::fabs(ez) < 1e-3f) break;
+        rx -= ex;
+        rz -= ez;
+    }
+    gerstnerDisplaceCm(waves, count, rx, rz, tSeconds, pos, n);
+    outHeightCm = pos[2];
+    outNormal[0] = n[0]; outNormal[1] = n[1]; outNormal[2] = n[2];
+}
+
 // Floors `worldCm` to the nearest multiple of `cellSizeCm` at or below it -- the ocean grid's own
 // vertices never move (see WaterRenderer.hpp's top-of-class comment for why), so what keeps the
 // grid from shimmering as the camera moves is recentring its ORIGIN on a cell boundary rather than

@@ -1,6 +1,7 @@
 #pragma once
 #include "aver/pbr/Material.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
+#include "aver/pbr/TerrainLayers.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 
@@ -54,6 +55,26 @@ public:
     bool ready() const { return res_ != nullptr; }
 
     void setTextureResolver(TextureResolver fn, void* user) { resolve_ = fn; resolveUser_ = user; }
+
+    // ---- wave3 terrain layers ----
+    // Fills the three atlas textures of a layered terrain material (slots 0..2 under
+    // MaterialFlag_TerrainLayers) and their per-layer averages; false leaves the slots on their fallbacks.
+    // The handles become this system's: cached per set of layer references (so sections of one material
+    // share an atlas) and refcounted like any resolved texture.
+    using TerrainResolver = bool (*)(const MaterialDesc& d, TerrainTextures& out, void* user);
+    void setTerrainResolver(TerrainResolver fn, void* user) { terrainResolve_ = fn; terrainUser_ = user; }
+
+    // A TextureRef whose path starts "@rt:" resolves here, before the host resolver. NOT OWNED: never
+    // refcounted or destroyed by this system -- the caller retires a replaced handle after the next
+    // update(), when no binding set can still point at it. After replacing one, MaterialLibrary::touch()
+    // the materials that name it so their sets are rewritten.
+    rhi::TextureHandle setRuntimeTexture(const std::string& name, rhi::TextureHandle h);   // returns the replaced handle (0 if none)
+    rhi::TextureHandle clearRuntimeTexture(const std::string& name);                      // returns the removed handle
+    rhi::TextureHandle runtimeTexture(const std::string& name) const;
+    // The atlas layout and per-layer averages the terrain resolver produced for `d`'s layer references, once a binding set
+    // for a material with those references has been built (bindingSet() builds it). False before that or if it declined.
+    bool terrainTextures(const MaterialDesc& d, TerrainTextures& out) const;
+    // ---- end wave3 terrain layers ----
 
     // Drains MaterialLibrary::consumeDirty() and re-uploads whatever changed, once per frame.
     void update();
@@ -226,6 +247,7 @@ private:
 
     // 1x1, created before any material. The metal-rough one is (0,255,255,255): glTF packs
     // occlusion in R, roughness in G and metallic in B.
+    rhi::TextureHandle zero_ = 0;        // wave3 terrain: an all-zero RGBA8 (no weight on any layer but the base)
     rhi::TextureHandle white_ = 0;       // base colour, occlusion and emissive
     rhi::TextureHandle flatNormal_ = 0;  // (128,128,255) — +Z in tangent space
     rhi::TextureHandle metalRough_ = 0;
@@ -281,6 +303,19 @@ private:
 
     TextureResolver resolve_ = nullptr;
     void*           resolveUser_ = nullptr;
+
+    // ---- wave3 terrain layers ----
+    TerrainResolver terrainResolve_ = nullptr;
+    void*           terrainUser_ = nullptr;
+    std::unordered_map<std::string, rhi::TextureHandle> rtTextures_;   // "@rt:<name>" -> handle (not owned)
+    std::unordered_set<rhi::TextureHandle> rtHandles_;                 // the same handles, for retain/release to skip
+    std::unordered_map<std::string, TerrainTextures> terrainInfo_;     // atlas key -> layout and averages
+    // The terrain slots (0..2 atlas, 5 parameters) of `d`, resolved and cached; false when the material
+    // has no atlas (no resolver, or it declined), in which case the slots keep their fallbacks.
+    struct TerrainBound { rhi::TextureHandle atlas[3] = {}; rhi::TextureHandle params = 0; f32 avg[3] = {1, 1, 1}; bool ok = false; };
+    TerrainBound resolveTerrain(const MaterialDesc& d, bool retryFailed, bool needParams);
+    bool isRuntimeTexture(rhi::TextureHandle h) const { return rtHandles_.count(h) != 0; }
+    // ---- end wave3 terrain layers ----
 
     // ---- M2(a)/M2(b): update() cost, and how much of it is building an Entry from scratch ----
     // (rather than merely re-uploading one that already exists). Self-reported timing only -- see

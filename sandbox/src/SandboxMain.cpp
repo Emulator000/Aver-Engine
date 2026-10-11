@@ -218,6 +218,10 @@ Application* createApplication(int argc, char** argv) {
     std::string saveLevelArg;
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--save-level")) saveLevelArg = argv[i + 1];
+    // [wave3/level-instances] --bake-level-pack <content-relative level>: bake that level's pack headlessly, then carry on.
+    std::string bakeLevelPackArg;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--bake-level-pack")) bakeLevelPackArg = argv[i + 1];
     bool rayProbeArg = false; f32 rayProbeXArg = 0.0f, rayProbeYArg = 0.0f;
     for (int i = 1; i + 2 < argc; ++i)
         if (!std::strcmp(argv[i], "--ray-probe")) {
@@ -1042,6 +1046,7 @@ Application* createApplication(int argc, char** argv) {
     app->setUnlitMode(unlitArg);
     if (!viewModeArg.empty()) app->setViewMode(viewModeArg);
     app->setSaveLevelTo(saveLevelArg);
+    app->setBakeLevelPack(bakeLevelPackArg);   // [wave3/level-instances]
     if (rayProbeArg) app->setRayProbe(rayProbeXArg, rayProbeYArg);
     app->setProjectPath(project);
     // Show start screen: interactive with no project, or --start-screen; never in capture runs.

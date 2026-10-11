@@ -25,11 +25,15 @@
 #include "aver/landscape/TerrainTile.hpp"
 #include "aver/landscape/TerrainNoise.hpp"
 #include "aver/landscape/Sculpt.hpp"
+#include "aver/landscape/Paint.hpp"
+#include "aver/landscape/Carve.hpp"
 
 #if AVER_MODULE_PBR
 #include "aver/pbr/MaterialSystem.hpp"
 #endif
 
+#include <array>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -233,6 +237,94 @@ public:
     void applySurfaceToAll(rhi::IDevice* device, GameContent& content, pbr::MaterialSystem& materials);
 #endif
 
+    // ---- wave3 layers ----
+    // Weightmap paint on the resident section, the terrain material's layer table, physical-surface queries and the
+    // GPU weight textures (docs/LANDSCAPE_LAYERS_WATER.md). Paint is stored in the .ocland by layer NAME; the material's
+    // layers are matched to it by name, so reordering the material never scrambles paint. Everything but the GPU upload
+    // (flushWeights) is CPU only and works headless.
+
+    // One paint layer of the terrain material as plain data, so this header needs no PBR include.
+    struct LayerInfo {
+        std::string name, surface, foliage;
+        f32 friction = 0.6f, restitution = 0.0f;
+        f32 tilingCm = 400.0f, foliageDensity = 0.0f, foliageMinWeight = 0.5f;
+        const std::string& surfaceName() const { return surface.empty() ? name : surface; }
+    };
+    // What sampleGround answers. weights are in MATERIAL layer order and sum to 1.
+    struct GroundInfo {
+        f32 z = 0.0f;
+        f32 normal[3] = {0.0f, 0.0f, 1.0f};
+        f32 weights[8] = {};
+        u32 dominant = 0;
+        f32 friction = 0.6f, restitution = 0.0f;
+        std::string surface;
+    };
+
+    // The material's layers (up to 8, the first is the base). A host without the PBR module, or a test, sets the table
+    // directly; with PBR it follows the LANDSCAPE material automatically.
+    void setLayerTable(std::vector<LayerInfo> layers);
+    u32 materialLayerCount() const { return static_cast<u32>(layerTable_.size()); }
+    const std::string& materialLayerName(u32 i) const;
+    const LayerInfo* materialLayer(u32 i) const { return i < layerTable_.size() ? &layerTable_[i] : nullptr; }
+    // True while the LANDSCAPE material is a layered terrain material (its layer table is live).
+    bool terrainMaterialActive() const { return !layerTable_.empty(); }
+
+    // Finds or adds the section layer called `name` (the first one added to an unpainted section is preceded by the
+    // material's base layer, so layer 0 is always the base). Call BEFORE a stroke: a stroke records a fixed plane count.
+    // False with no table, at 8 layers, or while a weight stroke is active. Marks dirty.
+    bool ensureLayer(const std::string& name, u32& outIndex);
+    // Drops section layer `index` (>= 1), folding its paint into the base. False during a weight stroke.
+    bool removeLayer(u32 index);
+    // Whole-section edits. Run them inside beginWeightStroke / endWeightStroke to get one undo entry.
+    void fillLayer(u32 layer);
+    void autoFillBySlope(u32 layer, f32 minSlopeDeg, f32 maxSlopeDeg, f32 minZCm, f32 maxZCm, f32 featherDeg, f32 amount);
+
+    // One brush tick: grows the weight stroke first, applies it, marks the weights dirty. Heights, the quadtree and
+    // collision are untouched. Returns the touched rect (empty if nothing was).
+    landscape::BrushRect paint(rhi::IDevice* device, const landscape::PaintParams& p, f32 amount);
+
+    // The weight stroke mirrors the height stroke: before-planes captured lazily over the unioned rect, one undo entry per
+    // drag. endWeightStroke returns false (nothing to undo) when nothing changed. `planes` = stored layers at stroke time.
+    void beginWeightStroke();
+    void growWeightStroke(const landscape::BrushRect& r);
+    bool weightStrokeActive() const { return wStrokeActive_; }
+    bool endWeightStroke(std::vector<u8>& before, std::vector<u8>& after, u32& x0, u32& y0, u32& x1, u32& y1, u32& planes);
+    // Undo/redo: writes `planes` stored planes of a rect back. False for no section, a bad rect or more planes than exist.
+    bool applyWeightRect(u32 x0, u32 y0, u32 x1, u32 y1, u32 planes, const std::vector<u8>& src);
+    bool weightsDirty() const { return weightsDirty_; }
+
+    // Height, slope, paint weights and physical surface at a world XY (CPU, headless). False outside the section.
+    bool sampleGround(f32 xCm, f32 yCm, GroundInfo& out) const;
+    // Weight-averaged friction and restitution only; allocation-free and a pure read, because the physics surface sampler
+    // calls it on worker threads (paint is not edited while a Play session or Simulate runs).
+    bool surfaceFrictionAt(f32 xCm, f32 yCm, f32& outFriction, f32& outRestitution) const;
+
+    // Rebuilds the weight textures and the section's parameter texture and swaps them into the section material, at most
+    // every 100 ms while a stroke is down and at once when it ends. Call every frame before drawing (draw() does).
+    // A no-op without a device, the PBR module or a layered terrain material.
+    void flushWeights(rhi::IDevice* device, pbr::MaterialSystem* materials);
+
+    // One-shot carve commands (a normal height stroke for undo): lower the heights along a river centreline or inside a lake
+    // outline. Same tail as sculpt(): grows the stroke, rebuilds the tree, drops overlapping GPU meshes, marks collision stale.
+    landscape::BrushRect carveRiver(rhi::IDevice* device, const landscape::CarvePoint* pts, u32 n, const landscape::CarveParams& p);
+    landscape::BrushRect carveBasin(rhi::IDevice* device, const f32* polyXY, u32 count, f32 levelCm, const landscape::CarveParams& p);
+
+#if AVER_MODULE_PBR
+    // The two materials a layered terrain draws through, derived from the authored one: the section's copy names the
+    // runtime weightmaps ("@rt:land.w0" / "land.w1") and parameter texture ("@rt:land.params") in slots 3..5; the ring
+    // tiles' copy has no "@rt:" refs at all, so every pixel of a ring tile is the base layer.
+    static void makeTerrainSectionDescs(const pbr::MaterialDesc& base, pbr::MaterialDesc& section, pbr::MaterialDesc& ring);
+#endif
+
+    // Changes the LANDSCAPE material by name (the editor's material picker); the next draw rebinds. The caller records the name
+    // in the level's LANDSCAPE record.
+    void setSurfaceMaterial(const std::string& name);
+
+    // Installs the framework's terrain provider (aver_fw_set_terrain_provider) so C# and graphs can query layers. One call
+    // per host beside GameWater::init. A no-op without the framework module.
+    void installProviders();
+    // ---- end wave3 layers ----
+
 private:
     // Loads one .ocland section and builds its quadtree over it. Pure CPU. Calls unload() first, so
     // `device` frees whatever section is currently resident before this one replaces it (null is only
@@ -256,7 +348,13 @@ private:
     // own readiness and the level load race each other with no guaranteed order; the tiling has to be
     // re-asked for with pbr::MaterialLibrary::get().valid(h) rather than trusted on the first
     // constants() call, since constants() itself returns a fallback for any handle not yet valid.
-    void applySurface(landscape::LandscapeRenderer& r, GameContent& content, pbr::MaterialSystem& materials);
+    void applySurface(landscape::LandscapeRenderer& r, GameContent& content, pbr::MaterialSystem& materials, bool ring = false);
+    // wave3 layers: finds the LANDSCAPE material, and for a layered terrain material keeps its derived section / ring
+    // materials, layer table and remap current. True when anything changed (the renderers must rebind).
+    bool syncTerrain(GameContent& content, pbr::MaterialSystem& materials);
+    // Gives the derived materials and runtime textures back (textures are destroyed now when `device` is given, else
+    // retired and destroyed by a later flushWeights).
+    void releaseTerrain(rhi::IDevice* device);
 #endif
 
     // The material name the level's LANDSCAPE record named, held as TEXT rather than a resolved
@@ -317,6 +415,35 @@ private:
     static constexpr u32 kMaxResidentNodesPerTile = 512u / kMaxSectionsResident;
     landscape::TileCoord lastCameraTile_{};
     bool lastCameraTileValid_ = false;
+
+    // ---- wave3 layers ----
+    void rebuildRemap();
+    void updateSurfaceSampler();
+    // The tail of a height edit that is not a brush tick (carve): tree rebuild, GPU meshes, collision, dirty.
+    void heightsEdited(rhi::IDevice* device, const landscape::BrushRect& touched);
+    static i32 surfaceThunk(f32 x, f32 y, f32* outFriction, f32* outRestitution, void* user);
+
+    std::vector<LayerInfo> layerTable_;                // the material's layers (empty = no layered terrain)
+    std::array<i32, 8> sectionToMaterial_{};           // section layer i -> material layer (-1 = folds into the base)
+    bool weightsDirty_ = false;
+    bool wStrokeActive_ = false, wStrokeEmpty_ = true;
+    u32  wStrokeX0_ = 0, wStrokeY0_ = 0, wStrokeX1_ = 0, wStrokeY1_ = 0, wStrokePlanes_ = 0;
+    std::vector<u8> wStrokeBefore_;
+#if AVER_MODULE_PBR
+    // Derived materials: the base terrain material copied with the section's weightmaps ("@rt:land.*") and a plain copy
+    // for the ring tiles (no weightmaps: every pixel is the base layer). Handles are pbr::MaterialHandle.
+    u32 baseMat_ = 0, secMat_ = 0, ringMat_ = 0;
+    u64 baseSig_ = 0;
+    bool terrainActive_ = false;
+    bool paramsDirty_ = true;                          // the section's parameter texture must be rebuilt (layers or section changed)
+    pbr::MaterialSystem* lastMaterials_ = nullptr;
+    u32 texA_ = 0, texB_ = 0, texParams_ = 0;          // rhi::TextureHandle of the live runtime textures (0 = none)
+    struct Retired { u32 texture; u64 frame; };
+    std::vector<Retired> retired_;                     // replaced textures, destroyed a few frames after the swap
+    u64 flushFrame_ = 0;
+    std::chrono::steady_clock::time_point lastUpload_{};
+#endif
+    // ---- end wave3 layers ----
 };
 
 } // namespace aver::game

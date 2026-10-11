@@ -8,6 +8,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"
 #include "aver/formats/OcPrefab.hpp"
+#include "aver/formats/OcLevelInst.hpp"   // [wave3/level-instances]
 
 #include <limits>
 #include <string>
@@ -288,6 +289,23 @@ struct OcGerstnerWave {
     f64 amplitudeCm  = 25.0;
     f64 steepness    = 0.6;
 };
+
+// ---- wave3 water bodies ----
+// Spline rivers and closed-outline lakes, drawn as ordinary meshes by game::GameWater (the single
+// WATER above stays the ocean). Each *PT line names its body; an unknown name is skipped.
+struct OcRiverPoint { f64 x = 0, y = 0, z = 0, widthCm = 800, flowCmS = 150; };
+struct OcRiver {
+    std::string name, material;
+    f64 depthCm = 200, bankCm = 300, bankSlow = 0.35, flowScale = 1.0;
+    std::vector<OcRiverPoint> points;   // file order = downstream
+};
+struct OcLakePoint { f64 x = 0, y = 0; };
+struct OcLake {
+    std::string name, material;
+    f64 levelCm = 0, depthCm = 300, bankCm = 400, maxEdgeCm = 2500;
+    std::vector<OcLakePoint> points;    // >= 3, implicitly closed, any winding
+};
+// ---- end wave3 water bodies ----
 
 // One WATER surface a level authors. Replaces what sandbox/src/SandboxApp.cpp hardcoded at render
 // registration -- a --water CLI flag for the height, and four fixed-heading Gerstner waves for the
@@ -729,6 +747,10 @@ struct OcWorldData : OcWorldEnv {
     // scatterSpecies is cross-referenced to pcgVolumes above. Order is the file's order.
     std::vector<OcGerstnerWave> waves;
 
+    // wave3 water bodies: RIVER/RIVERPT and LAKE/LAKEPT records, in file order.
+    std::vector<OcRiver> rivers;
+    std::vector<OcLake> lakes;
+
     // LIGHT records, in file order. Empty is the ordinary case: a level with no LIGHT record is lit
     // exactly as before (the sun, the sky, emissive lamps).
     std::vector<OcLight> lights;
@@ -743,6 +765,16 @@ struct OcWorldData : OcWorldEnv {
 
     // PREFABINST records: prefab instances kept as a link plus overrides, not expanded into placements.
     std::vector<OcPrefabInstance> prefabInstances;
+
+    // [wave3/level-instances begin]
+    // LEVELINST records: other .ocworld files placed in this one, kept as a link plus overrides (OcLevelInst.hpp).
+    std::vector<OcLevelInstance> levelInstances;
+    // EXTENT: the union of the placements' world AABBs, so another level can bound an instance of this one
+    // without loading its meshes. Absent = unknown.
+    bool hasExtent = false;
+    f64 extentMin[3] = {0, 0, 0};
+    f64 extentMax[3] = {0, 0, 0};
+    // [wave3/level-instances end]
 
     // Baked instanced foliage: one content-relative path per `FOLIAGE <path>` record, each naming an
     // `.ocinst` file (OcInstances.hpp) -- a flat, potentially multi-million-row transform table, kept

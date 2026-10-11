@@ -51,6 +51,9 @@ public:
     // nullptr on a miss, silently; tickBt logs.
     const ConditionEntry* findCondition(const std::string& name) const;
     const ActionEntry*    findAction(const std::string& name) const;
+    // Every registered name, sorted (editors offer them as choices). AI: wave 3 #21.
+    std::vector<std::string> conditionNames() const;
+    std::vector<std::string> actionNames() const;
 
     void setBoardResolver(BtBoardResolverFn fn, void* user) { resolver_ = fn; resolverUser_ = user; }
     Blackboard* boardFor(i32 subject) const { return resolver_ ? resolver_(subject, resolverUser_) : nullptr; }
@@ -151,6 +154,10 @@ struct BtRunningState {
 // Failure for an empty tree.
 BtStatus tickBt(const fmt::OcBtData& tree, const BtRegistry& registry, i32 subject, f32 dt,
                 BtRunningState& state, const BtBlackboardCtx* bb = nullptr);
+
+// Tells every Running Action of `state` it was aborted (its onAbort), then forgets the run. For a tree that
+// is dropped mid-run (its subject went away, a nested tree was aborted). AI: wave 3 #21.
+void abortBt(const fmt::OcBtData& tree, const BtRegistry& registry, i32 subject, BtRunningState& state);
 
 // children[i] = indexes of node i's children, in execution order.
 std::vector<std::vector<i32>> btBuildChildren(const fmt::OcBtData& tree);

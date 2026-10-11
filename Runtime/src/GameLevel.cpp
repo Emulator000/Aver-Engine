@@ -94,6 +94,30 @@ bool loadLaneSidecar(const std::string& levelPath, fmt::OcLanesData& out) {
 }
 #endif
 
+// [wave3/level-instances begin]
+// A mesh's own slot materials, bound the way LevelStreaming::bindMeshMaterials binds them for a streamed placement.
+void bindInstanceMeshMaterials(GameContent& content, u64 meshId) {
+#if AVER_MODULE_PBR
+    const i32 slot0Token = content.meshDefaultMaterial(meshId);
+    if (slot0Token) {
+        const std::string& name = content.meshSlot0Name(meshId);
+        if (!name.empty())
+            if (const pbr::MaterialHandle h = content.materialForSurface(name)) content.bindSurfaceMaterial(slot0Token, h);
+    }
+    if (const std::vector<GameContent::MeshPart>* parts = content.partsFor(meshId)) {
+        for (const GameContent::MeshPart& part : *parts) {
+            if (!part.material) continue;
+            const char* partName = aver_scene_material_name(part.material);
+            if (!partName || !*partName) continue;
+            if (const pbr::MaterialHandle h = content.materialForSurface(partName)) content.bindSurfaceMaterial(part.material, h);
+        }
+    }
+#else
+    (void)content; (void)meshId;
+#endif
+}
+// [wave3/level-instances end]
+
 } // namespace
 
 void GameLevel::load(const std::string& path, GameContent& content) {
@@ -399,6 +423,22 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // level that alone made the fitted volume 5196cm where the real content is 4243cm -- a 22%
     // over-estimate of the thing that decides voxel density, bought for nothing, since the eight
     // corners cost eight rotations per placement, once, at load.
+    // [wave3/level-instances begin] The library every instance parses its child level through, installed before
+    // anything needs a child's EXTENT: the level's bounds (and with them the GI volume fit) cover its instances.
+    assets_.clear();
+    if (!legacy && !w.levelInstances.empty()) {
+        if (!instancesInit_) { instances_.init(assets_, scene::World::instance()); instancesInit_ = true; }
+        assets_.setLoader(instanceLoader_ ? instanceLoader_ : world::LevelAssetLibrary::diskLoader(content.project().contentDir()));
+        for (const fmt::OcLevelInstance& rec : w.levelInstances) {
+            AABB ib;
+            if (!assets_.instanceBounds(rec, ib)) continue;
+            if (!hasBounds_) { boundsLo_ = ib.min; boundsHi_ = ib.max; hasBounds_ = true; continue; }
+            boundsLo_.x = std::fmin(boundsLo_.x, ib.min.x); boundsHi_.x = std::fmax(boundsHi_.x, ib.max.x);
+            boundsLo_.y = std::fmin(boundsLo_.y, ib.min.y); boundsHi_.y = std::fmax(boundsHi_.y, ib.max.y);
+            boundsLo_.z = std::fmin(boundsLo_.z, ib.min.z); boundsHi_.z = std::fmax(boundsHi_.z, ib.max.z);
+        }
+    }
+    // [wave3/level-instances end]
     const Vec3 kCorner[8] = {{-1,-1,-1},{1,-1,-1},{-1,1,-1},{1,1,-1},
                              {-1,-1, 1},{1,-1, 1},{-1,1, 1},{1,1, 1}};
     for (const fmt::OcWorldPlacement& p : w.placements) {
@@ -476,6 +516,31 @@ void GameLevel::load(const std::string& path, GameContent& content) {
 #endif
     if (hooks_.afterInstantiate)
         hooks_.afterInstantiate(LoadedLevel{path, w, inst, legacy ? &legacyMap : nullptr});
+
+    // [wave3/level-instances begin] LEVELINST records, after the host's afterInstantiate has taken the level's own
+    // entities (the editor assigns its tables from `inst` there; instance members reach it through the hooks).
+    if (!legacy && !w.levelInstances.empty()) {
+        ContentPort port;
+        port.contentDir = content.project().contentDir();
+        port.projectDir = content.project().dir;
+        port.acquire = [this](u64 mesh) {
+            if (!content_ || !device_) return false;
+            content_->acquireTag = "level instance";
+            const bool got = content_->acquireMesh(*device_, mesh);
+            content_->acquireTag = nullptr;
+            if (got && instanceMaterialsBound_.insert(mesh).second) bindInstanceMeshMaterials(*content_, mesh);
+            return got;
+        };
+        port.release = [this](u64 mesh) { if (content_ && device_) content_->releaseMesh(*device_, mesh); };
+        port.prefetch = [this](u64 mesh) { if (content_ && device_) content_->prefetchMesh(mesh, 0.0f); };
+        port.ready = [this](u64 mesh) { return !content_ || !device_ || content_->meshReady(mesh); };
+        world::PlacementStreamSettings ss;
+        ss.cellCm = w.stream.cellCm;
+        ss.loadCm = w.stream.loadCm;
+        ss.evictCm = std::max(w.stream.evictCm, w.stream.loadCm + 100.0f);
+        instances_.begin(w, port, opt, w.stream.enabled && device_ ? &ss : nullptr, instanceHooks_, packedSink_);
+    }
+    // [wave3/level-instances end]
 }
 
 void GameLevel::loadStartMap(const fmt::ProjectDesc& project, GameContent& content,
@@ -511,6 +576,7 @@ void GameLevel::spawnClassPlacements() {
     //
     // A `snap` class placement asks the same ground query load() hands world::instantiate, as the
     // editor's spawnClassPlacements does.
+    instances_.spawnPendingClasses();   // [wave3/level-instances] classes inside level instances, now that scripting is up
     for (const fmt::OcWorldPlacement& p : classPlacements_) {
         const int32_t c = aver_fw_class_find(p.className.c_str());
         if (c == 0) {
@@ -649,14 +715,20 @@ const GameLevel::PcgField* GameLevel::pcgField(const std::string& name) const {
 }
 
 bool GameLevel::placementBounds(Vec3& lo, Vec3& hi, f32& radius) const {
-    if (!hasBounds_) return false;
-    lo = boundsLo_;
-    hi = boundsHi_;
-    // Half the diagonal, floored at 1cm. The editor's own floor, and it matters: a level of one
-    // zero-scaled placement would otherwise ask Voxi for a volume with no extent at all.
-    const f32 dx = boundsHi_.x - boundsLo_.x, dy = boundsHi_.y - boundsLo_.y, dz = boundsHi_.z - boundsLo_.z;
+    // [wave3/level-instances begin] level instances widen the box, so the GI volume fit covers them
+    Vec3 ilo, ihi;
+    const bool inst = instances_.extentBounds(ilo, ihi);
+    if (!hasBounds_ && !inst) return false;
+    if (hasBounds_) { lo = boundsLo_; hi = boundsHi_; } else { lo = ilo; hi = ihi; }
+    if (inst) {
+        lo = Vec3{std::fmin(lo.x, ilo.x), std::fmin(lo.y, ilo.y), std::fmin(lo.z, ilo.z)};
+        hi = Vec3{std::fmax(hi.x, ihi.x), std::fmax(hi.y, ihi.y), std::fmax(hi.z, ihi.z)};
+    }
+    // Half the diagonal, floored at 1cm: a zero-sized box must not ask Voxi for a volume with no extent.
+    const f32 dx = hi.x - lo.x, dy = hi.y - lo.y, dz = hi.z - lo.z;
     radius = std::fmax(1.0f, 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz));
     return true;
+    // [wave3/level-instances end]
 }
 
 std::vector<std::string> GameLevel::foliageTablePaths(const std::vector<std::string>& foliageFiles) const {
@@ -673,11 +745,19 @@ void GameLevel::tickStreaming(const std::vector<Vec3>& viewers) {
     HitchMarks hm("level stream", 0.25);
     if (streaming_.active()) streaming_.tick(scene::World::instance(), viewers);
     hm.mark("tick");
+    // [wave3/level-instances begin] instance units; the mesh-read queue ages once a frame, by whichever streamer ticks first
+    if (instances_.count() > 0) {
+        if (!streaming_.active() && content_) content_->prefetchTick();
+        instances_.tick(viewers);
+        hm.mark("instances");
+    }
+    // [wave3/level-instances end]
     if (content_ && device_) content_->flushMeshReleases(*device_, ++streamFrame_);
     hm.mark("meshReleases");
 }
 
 void GameLevel::unload() {
+    instances_.end();   // [wave3/level-instances] before anything its members or classes stand on goes
 #if AVER_MODULE_FRAMEWORK
     // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy(): a
     // class instance needs its managed-dispatch unbind hook to actually fire (HostBridge.cs's

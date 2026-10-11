@@ -1018,7 +1018,14 @@ bool SandboxApp::onCloseGuard() {
 }
 
 // Does the level differ from its file (uses per-edit serial, not undo stack depth)?
-bool SandboxApp::levelHasUnsavedEdits() const { return currentEditMark() != savedEditMark_; }
+bool SandboxApp::levelHasUnsavedEdits() const {
+    // [wave3/level-instances] An instance being edited in place is unsaved work: commit or discard it first.
+    return currentEditMark() != savedEditMark_
+#if AVER_MODULE_SCENE
+        || level_.instances().anyDirtyEdit()
+#endif
+        ;
+}
 
 // Mark document as saved (after save, load, or new).
 void SandboxApp::markLevelSaved() { savedEditMark_ = currentEditMark(); }
@@ -2151,6 +2158,9 @@ void SandboxApp::buildUI(Engine& e) {
                 ImGui::MenuItem("Steering", nullptr, &aiDebug_.steering);
                 ImGui::MenuItem("Behaviour Tree State", nullptr, &aiDebug_.btState);
                 ImGui::MenuItem("Cover", nullptr, &aiDebug_.cover);
+                ImGui::MenuItem("Queries (EQS)", nullptr, &aiDebug_.eqs);                 // AI: wave 3 #21
+                ImGui::MenuItem("Smart Object Slots", nullptr, &aiDebug_.smartObjects);
+                ImGui::MenuItem("State Tree", nullptr, &aiDebug_.stateTree);
                 ImGui::EndMenu();
             }
             uiReg_.track("view.showAi");
@@ -2415,6 +2425,12 @@ void SandboxApp::buildUI(Engine& e) {
     if (!runClean) drawNotifications();
 #if AVER_MODULE_SCENE
     editor::prefabCreateDialogDraw(prefabDlg_, prefabModel_, prefabUiCallbacks());
+    // [wave3/level-instances] the Create Level Instance dialog (the outliner's context menu opens it)
+    editor::levelInstanceCreateDialogDraw(levelInstanceDlg_, levelInstanceModel_,
+                                          [this](scene::Entity e, fmt::OcWorldData& into, i32 parentIdx) {
+                                              return captureEntityForInstance(e, into, parentIdx);
+                                          },
+                                          levelInstanceUiCallbacks());
 #endif
     buildEditorPrefs();
     buildProjectSettings();

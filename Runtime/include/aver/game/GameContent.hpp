@@ -56,6 +56,11 @@ public:
     static pbr::MaterialSystem::ResolvedTexture resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
                                                      void* user);
 
+    // wave3 terrain layers: the host resolver for a layered terrain material (pbr::MaterialSystem::setTerrainResolver).
+    // Packs the layers' albedo (+ height in alpha), normal and ORM maps into three atlases and uploads them. `user` is a
+    // GameContent*. False (slots keep their fallbacks) with no texture factory or no layers.
+    static bool resolveTerrainAtlas(const pbr::MaterialDesc& d, pbr::TerrainTextures& out, void* user);
+
     // Where an asset reference points on this machine, or empty.
     std::string resolveAssetPath(const pbr::TextureRef& ref) const;
 

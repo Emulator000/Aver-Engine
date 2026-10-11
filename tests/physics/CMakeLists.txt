@@ -116,3 +116,11 @@ set_target_properties(JointBreakTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(CharacterExtTest src/CharacterExtTest.cpp)
 target_link_libraries(CharacterExtTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(CharacterExtTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# WaterSamplerTest / SurfaceFrictionTest -- the host water sampler and the per-surface friction sampler
+# (physics_water_abi.h, wave 3 landscape layers). ABI only: Aver.Physics and Aver.Core, like BuoyancyTest.
+foreach(_t WaterSamplerTest SurfaceFrictionTest)
+  add_executable(${_t} src/${_t}.cpp)
+  target_link_libraries(${_t} PRIVATE Aver.Physics Aver.Core)
+  set_target_properties(${_t} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endforeach()

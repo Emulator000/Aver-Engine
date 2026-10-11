@@ -2,6 +2,7 @@
 // See framework_blackboard_abi.h and docs/BLACKBOARD_BT.md.
 
 #include "aver/framework/framework_blackboard_abi.h"
+#include "aver/framework/framework_brain_abi.h"   // AI: wave 3 #21
 
 namespace {
 
@@ -119,3 +120,45 @@ int32_t aver_fw_bb_define(int32_t e, const char* key, int32_t type, int32_t scop
 int32_t aver_fw_bb_set_team(int32_t e, const char* team) {
     return call(AVER_FW_BB_OP_SETTEAM, e, team ? team : "", 0, nullptr, nullptr, nullptr, 0);
 }
+
+// ---- brains (AI: wave 3 #21) ------------------------------------------------------------------------
+// The same provider; ops 6..13 (framework_blackboard_abi.h). Declared in framework_brain_abi.h.
+
+int32_t aver_fw_brain_abi_version(void) { return AVER_FW_BRAIN_ABI_VERSION; }
+
+int32_t aver_fw_brain_set_asset(int32_t entity, const char* path) {
+    if (!path || !*path) return 0;
+    return call(AVER_FW_BB_OP_BRAIN_SET, entity, path, 0, nullptr, nullptr, nullptr, 0);
+}
+
+int32_t aver_fw_brain_kind(int32_t entity) {
+    int64_t v = 0;
+    return call(AVER_FW_BB_OP_BRAIN_KIND, entity, "", 0, &v, nullptr, nullptr, 0) ? static_cast<int32_t>(v) : AVER_FW_BRAIN_NONE;
+}
+
+int32_t aver_fw_brain_status(int32_t entity) {
+    int64_t v = 0;
+    return call(AVER_FW_BB_OP_BRAIN_STATUS, entity, "", 0, &v, nullptr, nullptr, 0) ? static_cast<int32_t>(v) : AVER_FW_BRAIN_IDLE;
+}
+
+int32_t aver_fw_brain_send_event(int32_t entity, const char* name, int32_t payloadInt, float payloadFloat) {
+    if (!name || !*name) return 0;
+    int64_t i = payloadInt;
+    float f[3] = {payloadFloat, 0.0f, 0.0f};
+    return call(AVER_FW_BB_OP_BRAIN_EVENT, entity, name, 0, &i, f, nullptr, 0);
+}
+
+int32_t aver_fw_brain_state(int32_t entity, char* buf, int32_t cap) {
+    if (!buf || cap <= 0) return 0;
+    buf[0] = '\0';
+    return call(AVER_FW_BB_OP_BRAIN_STATE, entity, "", 0, nullptr, nullptr, buf, cap);
+}
+
+int32_t aver_fw_brain_in_state(int32_t entity, const char* path) {
+    if (!path || !*path) return 0;
+    return call(AVER_FW_BB_OP_BRAIN_INSTATE, entity, path, 0, nullptr, nullptr, nullptr, 0);
+}
+
+int32_t aver_fw_brain_restart(int32_t entity) { return call(AVER_FW_BB_OP_BRAIN_RESTART, entity, "", 0, nullptr, nullptr, nullptr, 0); }
+
+int32_t aver_fw_brain_stop(int32_t entity) { return call(AVER_FW_BB_OP_BRAIN_STOP, entity, "", 0, nullptr, nullptr, nullptr, 0); }

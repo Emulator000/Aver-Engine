@@ -72,6 +72,25 @@ TexRefParse parseTexRef(std::string_view afterSlot) {
     return r;
 }
 
+// ---- wave3 terrain layers ----
+bool terrainLayerNameValid(std::string_view n) {
+    if (n.empty() || n.size() > 31) return false;
+    for (const char c : n)
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return false;
+    return true;
+}
+
+// One `{path:..}` / `{guid:0x..}` reference written for a LAYER key.
+std::string terrainRefText(const pbr::TextureRef& r) {
+    if (r.id) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "{guid:0x%016llX}", static_cast<unsigned long long>(r.id));
+        return buf;
+    }
+    return "{path:" + r.path + "}";
+}
+// ---- end wave3 terrain layers ----
+
 } // namespace
 
 // The colour space a texture slot is always read in.
@@ -95,6 +114,9 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
 
     bool sawHeader = false;
     int graphDepth = 0;
+    // wave3 terrain layers: collected as the file is read, committed after it (LAYER lines may precede TERRAIN).
+    pbr::TerrainDesc terrain;
+    bool sawTerrain = false, terrainBad = false;
 
     usize pos = 0;
     while (pos <= text.size()) {
@@ -169,6 +191,70 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
         } else if (equalsCI(key, "PARENT")) {
             const TexRefParse p = parseTexRef(after(key));
             if (p.ok) { ex.parentId = p.ref.id; ex.parentPath = p.ref.path; }
+        } else if (equalsCI(key, "TERRAIN")) {
+            // ---- wave3 terrain layers ----
+            sawTerrain = true;
+            for (usize i = 1; i + 1 < t.size(); ++i) {
+                if (equalsCI(t[i], "tile")) {
+                    const i32 v = parseI32(t[++i], 512);
+                    terrain.tileTexels = v == 256 ? 256u : (v == 1024 ? 1024u : 512u);
+                } else if (equalsCI(t[i], "pad")) {
+                    const i32 v = parseI32(t[++i], 8);
+                    terrain.padTexels = static_cast<u32>(v < 4 ? 4 : (v > 16 ? 16 : v)) & ~1u;
+                } else if (equalsCI(t[i], "blend")) {
+                    const f32 v = tokF(t, ++i, terrain.blendDepth);
+                    terrain.blendDepth = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                }
+            }
+        } else if (equalsCI(key, "LAYER")) {
+            if (t.size() < 2) continue;
+            pbr::TerrainLayerDesc l;
+            l.name = std::string(t[1]);
+            if (!terrainLayerNameValid(l.name)) terrainBad = true;
+            for (const pbr::TerrainLayerDesc& o : terrain.layers)
+                if (o.name == l.name) terrainBad = true;
+            // A braced texture reference may hold spaces: take it from the line, then skip the tokens it covered.
+            const auto takeRef = [&](usize& i, pbr::TextureRef& dst) {
+                const TexRefParse r = parseTexRef(after(t[i]));
+                if (r.ok) dst = r.ref;
+                const std::string_view tail = r.trailing;
+                if (!tail.empty() || r.ok) {
+                    const char* resume = tail.data();
+                    while (i + 1 < t.size() && t[i + 1].data() < resume) ++i;
+                }
+            };
+            for (usize i = 2; i < t.size(); ++i) {
+                const std::string_view k = t[i];
+                if      (equalsCI(k, "baseColor"))  takeRef(i, l.baseColor);
+                else if (equalsCI(k, "normal"))     takeRef(i, l.normal);
+                else if (equalsCI(k, "metalRough")) takeRef(i, l.metalRough);
+                else if (equalsCI(k, "height"))     takeRef(i, l.height);
+                else if (equalsCI(k, "tiling") && i + 1 < t.size()) {
+                    const f32 v = tokF(t, ++i, l.tilingCm);
+                    if (v > 1.0f) l.tilingCm = v;
+                }
+                else if (equalsCI(k, "heightbias") && i + 1 < t.size()) l.heightBias = tokF(t, ++i, l.heightBias);
+                else if (equalsCI(k, "surface") && i + 1 < t.size())    l.surface = std::string(t[++i]);
+                else if (equalsCI(k, "friction") && i + 1 < t.size()) {
+                    const f32 v = tokF(t, ++i, l.friction);
+                    l.friction = v < 0.0f ? 0.0f : v;
+                }
+                else if (equalsCI(k, "restitution") && i + 1 < t.size()) {
+                    const f32 v = tokF(t, ++i, l.restitution);
+                    l.restitution = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                }
+                else if (equalsCI(k, "foliage") && i + 1 < t.size())    l.foliage = std::string(t[++i]);
+                else if (equalsCI(k, "density") && i + 1 < t.size()) {
+                    const f32 v = tokF(t, ++i, l.foliageDensity);
+                    l.foliageDensity = v < 0.0f ? 0.0f : v;
+                }
+                else if (equalsCI(k, "minweight") && i + 1 < t.size()) {
+                    const f32 v = tokF(t, ++i, l.foliageMinWeight);
+                    l.foliageMinWeight = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                }
+            }
+            terrain.layers.push_back(std::move(l));
+            // ---- end wave3 terrain layers ----
         } else if (equalsCI(key, "GRAPHREF")) {
             // Rest-of-line, trimmed -- NOT t[1] -- the same choice NAME makes a few branches up and
             // DESCRIPTION makes in OcGraph.cpp, because a content path may contain spaces and a
@@ -360,6 +446,17 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
         if (err) *err = "not an .ocmat file: no OCMAT version line";
         return false;
     }
+    // wave3 terrain layers: more than 8 layers, a duplicate or a bad name refuses the whole block, and
+    // the material loads as a plain one.
+    if (sawTerrain && !terrain.layers.empty()) {
+        if (terrain.layers.size() > pbr::kMaxTerrainLayers) terrainBad = true;
+        if (terrainBad) {
+            AVER_WARN("[ocmat] '{}': TERRAIN block refused (more than {} layers, a duplicate or an invalid layer name); "
+                      "loading as a plain material", out.name, pbr::kMaxTerrainLayers);
+        } else {
+            out.terrain = std::move(terrain);
+        }
+    }
     if (ex.hasGraph) {
         AVER_WARN("[ocmat] '{}' carries a GRAPH block; no material compiler consumes it yet, so the "
                   "PARAM factors and TEX bindings alone are in effect", out.name);
@@ -500,6 +597,33 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
         s += " "; s += ocmatColorSpace(slot);
         s += "\n";
     }
+
+    // ---- wave3 terrain layers ----
+    // Written only for an enabled terrain; optional LAYER tokens are omitted at their defaults so a
+    // parsed block writes back byte for byte.
+    if (d.terrain.enabled()) {
+        const pbr::TerrainLayerDesc ld;
+        s += "\nTERRAIN tile " + std::to_string(d.terrain.tileTexels) + " pad " + std::to_string(d.terrain.padTexels) +
+             " blend " + num(d.terrain.blendDepth) + "\n";
+        for (const pbr::TerrainLayerDesc& l : d.terrain.layers) {
+            s += "LAYER " + l.name + " tiling " + num(l.tilingCm);
+            if (l.heightBias != ld.heightBias) s += " heightbias " + num(l.heightBias);
+            if (!l.baseColor.empty())  s += " baseColor "  + terrainRefText(l.baseColor);
+            if (!l.normal.empty())     s += " normal "     + terrainRefText(l.normal);
+            if (!l.metalRough.empty()) s += " metalRough " + terrainRefText(l.metalRough);
+            if (!l.height.empty())     s += " height "     + terrainRefText(l.height);
+            if (!l.surface.empty())    s += " surface " + l.surface;
+            if (l.friction != ld.friction)         s += " friction " + num(l.friction);
+            if (l.restitution != ld.restitution)   s += " restitution " + num(l.restitution);
+            if (!l.foliage.empty()) {
+                s += " foliage " + l.foliage;
+                if (l.foliageDensity != ld.foliageDensity)     s += " density " + num(l.foliageDensity);
+                if (l.foliageMinWeight != ld.foliageMinWeight) s += " minweight " + num(l.foliageMinWeight);
+            }
+            s += "\n";
+        }
+    }
+    // ---- end wave3 terrain layers ----
 
     if (ex.parentId || !ex.parentPath.empty()) {
         s += "\n# PARENT is recorded but not yet applied — this material's own PARAMs are in effect.\n";

@@ -130,3 +130,7 @@ error, and gives zero). Entity-typed keys use `int` pins (handles are ints).
 - Shared keys of one name must have one type per team; a clashing definition is refused.
 - Team boards are never destroyed while agents use them; `BtSystem::clearBlackboards()` drops boards
   before teams.
+
+## 8. StateTree and the brain relay
+
+An entity's brain may be an `.ocst` StateTree instead of an `.ocbt`; the tree reads and writes the same blackboard and calls the same registered Condition and Action leaves. The host-side `BtSystem` runs it, and managed code reaches it through blackboard relay ops 6 to 13 (`AVER_FW_BB_OP_BRAIN_*`, `framework_brain_abi.h`). `RunBehaviorTree` and `RunStateTree` nest one brain inside the other (depth 8). See [AI_QUERIES_SMARTOBJECTS_STATETREE.md](AI_QUERIES_SMARTOBJECTS_STATETREE.md).

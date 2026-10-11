@@ -2,6 +2,7 @@
 #include "aver/core/Types.hpp"
 
 #include <string>
+#include <vector>
 
 // Aver.Render.PBR — what a surface IS: its factors, its texture references, how it blends, and the
 // process-wide library holding them. Core-only; no `aver/rhi/*` include may ever appear here.
@@ -70,6 +71,35 @@ struct TextureRef {
 
     bool empty() const { return id == 0 && path.empty(); }
 };
+
+// ---- wave3 terrain layers ----
+// A LAYERED TERRAIN MATERIAL: up to 8 named layers blended per pixel by a section's weightmaps and a
+// height-based mix (docs/MATERIALS.md). A material feature for the reason the slope layer above is one:
+// it rides the scene PSO, so the landscape keeps GI, shadows and ray hits. Paint data in `.ocland`
+// names layers by NAME, so reordering or editing the layers here never scrambles paint.
+inline constexpr u32 kMaxTerrainLayers = 8;
+
+struct TerrainLayerDesc {
+    std::string name, surface, foliage;   // surface: physical-surface name, empty = the layer's name
+    TextureRef baseColor, normal, metalRough, height;
+    f32 tilingCm = 400.0f;                // world cm per texture tile
+    f32 heightBias = 0.0f;
+    f32 friction = 0.6f, restitution = 0.0f;
+    f32 foliageDensity = 0.0f;            // instances per 100 m^2
+    f32 foliageMinWeight = 0.5f;
+
+    const std::string& surfaceName() const { return surface.empty() ? name : surface; }
+};
+
+struct TerrainDesc {
+    u32 tileTexels = 512;                 // 256 | 512 | 1024
+    u32 padTexels = 8;                    // 4..16, even: wrapped texels around each tile in the atlas
+    f32 blendDepth = 0.15f;               // 0..1 height-blend depth; large = plain linear weights
+    std::vector<TerrainLayerDesc> layers; // file order = layer index; the first is the base
+
+    bool enabled() const { return !layers.empty(); }
+};
+// ---- end wave3 terrain layers ----
 
 // The authored surface. Defaults are glTF's.
 struct MaterialDesc {
@@ -241,6 +271,10 @@ struct MaterialDesc {
     // it means nothing in another one. So a loader fills this in after parsing, and nothing ever
     // writes it back out to a file.
     u32 graphId = 0;
+
+    // wave3 terrain layers: non-empty `terrain.layers` makes this a layered terrain material (the
+    // texture slots are then reinterpreted, see MaterialFlag_TerrainLayers).
+    TerrainDesc terrain;
 };
 
 // ------------------------------------------------------- the one translucency test, and its answer

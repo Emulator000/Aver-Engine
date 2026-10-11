@@ -122,6 +122,7 @@ void SandboxApp::setHudTest(int idx) { hudTest_ = idx; }
 void SandboxApp::setSaveProject(bool on) { saveProject_ = on; }
 
 void SandboxApp::setSaveLevelTo(std::string p) { saveLevelTo_ = std::move(p); }
+void SandboxApp::setBakeLevelPack(std::string levelAsset) { bakeLevelPackAsset_ = std::move(levelAsset); }   // [wave3/level-instances]
 
 void SandboxApp::setRayProbe(f32 x, f32 y) { rayProbe_ = true; rayProbeX_ = x; rayProbeY_ = y; }
 

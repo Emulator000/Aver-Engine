@@ -10,7 +10,7 @@
 
 This document describes a feasibility survey (2026-08-08) for an interactive landscape editor, scoped against a headless CPU model (`modules/landscape`). Much of it has since shipped: rendering is live, collision is integrated, sculpting tools work, and undo/redo for strokes was added.
 
-**What remains open:** incremental rebuild (currently full tree rebuild per stroke), incremental collision update (currently destroy/recreate the heightfield), multi-section budget sharing, and texture painting.
+**What remains open:** incremental rebuild (currently full tree rebuild per stroke), incremental collision update (currently destroy/recreate the heightfield), and multi-section budget sharing. **Texture painting landed in wave 3** (Paint tab, layered terrain material, weightmaps in the `.ocland`): see [`LANDSCAPE_LAYERS_WATER.md`](LANDSCAPE_LAYERS_WATER.md), which also covers rivers, lakes and carving.
 
 The design reasoning below — the blockers analysis, re-guard decisions, slice breakdown — is current and worth reading, even though specific line-number citations in `SandboxApp.cpp` were made against a 29,952-line file that was split across `SandboxViewport.cpp`, `SandboxShell.cpp` and siblings on 2026-09-16 (it is now ~2,500 lines); the editor-precedent arguments (gesture-bracket pattern, `EditId ↔ scene::Entity` undo keying, the focus gate) are design observations a file move does not invalidate — re-derive the coordinate before quoting one. Landscape is also now loaded by the shared runtime library (`Runtime/`'s `GameLandscape`), which both hosts call, so any sentence contrasting the editor with a game host should be re-checked.
 

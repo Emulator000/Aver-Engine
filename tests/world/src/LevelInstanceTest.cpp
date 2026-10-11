@@ -24,7 +24,12 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+#if AVER_MODULE_PHYSICS
+#  include "aver/physics/physics_abi.h"   // [wave3/level-instances]
+#endif
 
 using namespace aver;
 
@@ -66,6 +71,114 @@ PLACEG Meshes/cube.ocmesh 100 200 300 10 20 30 1 2 3 M_Floor
 PLACEG Meshes/cube.ocmesh 5 5 5 0 0 0 2 2 2 M_Accent nocollide hidden
 PLACEG Meshes/cube.ocmesh 7 8 9 0 0 0 1 1 1
 )";
+
+// [wave3/level-instances begin] Attach, and the extracted static-body path.
+static void testAttachAndBodies() {
+    scene::World& world = scene::World::instance();
+    fmt::OcWorldData w;
+    std::string why;
+    check(fmt::parseOcworld("OCWORLD 1\n"
+                            "PLACE Meshes/cube.ocmesh 10 0 0 0 0 0 1\n"
+                            "BEGIN\n"
+                            "  CHILD Meshes/cube.ocmesh 0 5 0 0 0 0 1\n"
+                            "END\n"
+                            "PLACE Meshes/cube.ocmesh 0 0 40 90 0 0 1\n", w, &why),
+          "the attach world parses: " + why);
+
+    // Without attach: roots have no parent and the authored local transform, as always.
+    {
+        const world::LevelInstance li = world::instantiate(w, world::InstantiateOptions{});
+        check(li.entities.size() == 3, "attach == nullptr: three entities");
+        check(world.parent(li.entities[0]) == scene::kInvalidEntity && world.parent(li.entities[2]) == scene::kInvalidEntity,
+              "attach == nullptr: roots have no parent");
+        check(world.parent(li.entities[1]) == li.entities[0], "attach == nullptr: the child keeps its parent");
+        checkNear(world.localTransform(li.entities[0]).position.x, 10.0f, 0.0f, "attach == nullptr: the root keeps its authored x");
+    }
+
+    // With attach: roots are created under the parent entity; the child stays under its own parent.
+    Transform pw;
+    pw.position = Vec3{1000.0f, 0.0f, 0.0f};
+    pw.rotation = world::quatFromEulerDeg(Vec3{0.0f, 0.0f, 90.0f});   // yaw 90
+    pw.scale = Vec3{2.0f, 2.0f, 2.0f};
+    const scene::Entity parent = world.create("AttachParent", scene::kInvalidEntity, pw);
+    check(parent != scene::kInvalidEntity, "the attach parent exists");
+
+    world::InstantiateOptions opt;
+    const world::InstantiateOptions::Attach attach{parent, pw};
+    opt.attach = &attach;
+#if AVER_MODULE_PHYSICS
+    const bool phys = aver_phys_init() != 0;
+    const i32 before = phys ? aver_phys_body_count() : 0;
+#endif
+    const world::LevelInstance li = world::instantiate(w, opt);
+    check(li.entities.size() == 3, "attach: three entities");
+    if (li.entities.size() == 3) {
+        check(world.parent(li.entities[0]) == parent && world.parent(li.entities[2]) == parent, "attach: roots hang under the attach entity");
+        check(world.parent(li.entities[1]) == li.entities[0], "attach: the child still hangs under its own parent");
+        checkNear(world.localTransform(li.entities[0]).position.x, 10.0f, 0.0f, "attach: the root's LOCAL position is the authored one");
+        world.flush();
+        const Transform w0 = transformFromMatrix(world.worldMatrix(li.entities[0]));
+        // Root: parent T(1000,0,0) R(yaw 90) S(2) applied to local (10,0,0) -> (1000, 20, 0).
+        checkNear(w0.position.x, 1000.0f, 1e-2f, "attach: the root's world x composes under the attach pose");
+        checkNear(w0.position.y, 20.0f, 1e-2f, "attach: the root's world y composes under the attach pose");
+        const Transform w1 = transformFromMatrix(world.worldMatrix(li.entities[1]));
+        // Child: local (0,5,0) under the root (scale 1, same rotation as the attach) -> root + R * (0, 5*2, 0).
+        checkNear(w1.position.x, 1000.0f - 10.0f, 1e-2f, "attach: a child composes through both parents (x)");
+        checkNear(w1.position.y, 20.0f, 1e-2f, "attach: a child composes through both parents (y)");
+#if AVER_MODULE_PHYSICS
+        if (phys) {
+            check(li.entityBody.size() == 3 && li.entityBody[0] > 0, "attach: the root got a static body");
+            if (li.entityBody.size() == 3 && li.entityBody[0] > 0) {
+                float pos[3] = {0, 0, 0};
+                aver_phys_body_position(li.entityBody[0], pos);
+                checkNear(pos[0], 1000.0f, 1e-2f, "attach: the root's body x is the composed world position");
+                checkNear(pos[1], 20.0f, 1e-2f, "attach: the root's body y is the composed world position");
+                float q[4] = {0, 0, 0, 1};
+                aver_phys_body_rotation(li.entityBody[0], q);
+                const Quat want = pw.rotation;
+                checkNear(std::fabs(q[0] * want.x + q[1] * want.y + q[2] * want.z + q[3] * want.w), 1.0f, 1e-4f,
+                          "attach: the root's body rotation is the parent's");
+            }
+        }
+#endif
+    }
+#if AVER_MODULE_PHYSICS
+    if (phys) {
+        for (const i32 b : li.bodies) if (b > 0) aver_phys_remove_body(b);
+        check(aver_phys_body_count() == before, "attach: removing the bodies returns the count to where it was");
+    }
+#endif
+
+#if AVER_MODULE_PHYSICS
+    // addStaticPlacementBody: one physics shape per mesh id, however many placements name it.
+    if (phys) {
+        static const f32 kQuad[] = {-50, -50, 0, 50, -50, 0, 50, 50, 0, -50, 50, 0};
+        static const u32 kIdx[] = {0, 1, 2, 0, 2, 3};
+        world::InstantiateOptions o2;
+        o2.localTrianglesFor = [](u64, const f32*& pos, u32& vc, const u32*& idx, u32& ic) {
+            pos = kQuad; vc = 4; idx = kIdx; ic = 6;
+            return true;
+        };
+        std::unordered_map<u64, i32> shapes;
+        u32 tris = 0, fresh = 0;
+        bool usedMesh = false;
+        Transform a, b;
+        b.position = Vec3{500.0f, 0.0f, 0.0f};
+        const i32 ba = world::addStaticPlacementBody(o2, shapes, 77, a, &tris, &usedMesh, false, nullptr, &fresh);
+        check(ba > 0 && usedMesh && tris == 2 && fresh == 1 && shapes.size() == 1, "addStaticPlacementBody: the first row builds the shape");
+        const i32 bb = world::addStaticPlacementBody(o2, shapes, 77, b, &tris, &usedMesh, false, nullptr, &fresh);
+        check(bb > 0 && bb != ba && fresh == 0 && shapes.size() == 1, "addStaticPlacementBody: the second row shares it");
+        // No triangles on offer: a box fitted to the unit-cube placeholder.
+        world::InstantiateOptions o3;
+        const i32 bc = world::addStaticPlacementBody(o3, shapes, 78, a, &tris, &usedMesh);
+        check(bc > 0 && !usedMesh && tris == 0, "addStaticPlacementBody: without triangles it falls back to a box");
+        aver_phys_remove_body(ba); aver_phys_remove_body(bb); aver_phys_remove_body(bc);
+        for (const auto& [id, h] : shapes) { (void)id; if (h) aver_phys_release_mesh_shape(h); }
+    }
+    if (phys) aver_phys_shutdown();
+#endif
+}
+// [wave3/level-instances end]
 
 int main() {
     fmt::OcWorldData w;
@@ -400,6 +513,8 @@ int main() {
         check(a && b && a->material == b->material,
               "an already-interned surface reuses its token rather than minting a new one");
     }
+
+    testAttachAndBodies();   // [wave3/level-instances]
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);

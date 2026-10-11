@@ -3,6 +3,7 @@
 #include "aver/core/Assert.hpp"
 #include "aver/core/Hash.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/synapse/AiPaths.hpp"
 #include "aver/synapse/SynapseAgent.hpp"
 
 #include <algorithm>
@@ -108,6 +109,108 @@ BtStatus fireEventAction(i32 subject, const fmt::OcBtNode& node, f32, f32&, void
     return BtStatus::Success;
 }
 
+// ---- RunBehaviorTree / RunStateTree (AI: wave 3 #21) ---------------------------------------------------
+// A tree that runs another: stringParam is the nested asset. State lives in the owning BtSystem keyed by
+// (subject, node), so the same leaf node can run for many subjects. Nesting deeper than 8 fails the leaf.
+
+thread_local int g_nestDepth = 0;
+constexpr int kMaxNestDepth = 8;
+
+struct NestGuard {
+    NestGuard() { ++g_nestDepth; }
+    ~NestGuard() { --g_nestDepth; }
+};
+
+struct BusyGuard {
+    explicit BusyGuard(BtSystem::NestedRun& r) : run(r) { run.busy = true; }
+    ~BusyGuard() { run.busy = false; }
+    BtSystem::NestedRun& run;
+};
+
+BtStatus runBehaviorTreeAction(i32 subject, const fmt::OcBtNode& node, f32 dt, f32&, void* user) {
+    BtSystem& sys = *static_cast<BtSystem*>(user);
+    if (g_nestDepth >= kMaxNestDepth) {
+        AVER_WARN("[Synapse] RunBehaviorTree '{}': trees nested deeper than {}", node.stringParam, kMaxNestDepth);
+        sys.eraseNested(subject, &node);
+        return BtStatus::Failure;
+    }
+    const u64 id = sys.loadBrain(node.stringParam);
+    const BtRuntimeTree* tree = id ? sys.findTree(id) : nullptr;
+    if (!tree) {
+        sys.eraseNested(subject, &node);
+        return BtStatus::Failure;
+    }
+    BtSystem::NestedRun& run = sys.nested(subject, &node);
+    if (run.busy) {
+        AVER_WARN("[Synapse] RunBehaviorTree '{}': a tree is running itself", node.stringParam);
+        return BtStatus::Failure;
+    }
+    Blackboard* board = sys.blackboard(static_cast<scene::Entity>(subject), true);
+    if (!run.started) {
+        if (board) board->applySchema(tree->schema);
+        run.bt.reset();
+        run.started = true;
+    }
+    const BtBlackboardCtx ctx{&tree->decorators, board, &tree->children};
+    BusyGuard busy(run);
+    NestGuard guard;
+    const BtStatus s = tickBt(tree->tree, sys.registry(), subject, dt, run.bt, &ctx);
+    if (s != BtStatus::Running) sys.eraseNested(subject, &node);
+    return s;
+}
+
+void runBehaviorTreeAbort(i32 subject, const fmt::OcBtNode& node, void* user) {
+    BtSystem& sys = *static_cast<BtSystem*>(user);
+    const u64 id = sys.loadBrain(node.stringParam);
+    const BtRuntimeTree* tree = id ? sys.findTree(id) : nullptr;
+    if (tree) abortBt(tree->tree, sys.registry(), subject, sys.nested(subject, &node).bt);
+    sys.eraseNested(subject, &node);
+}
+
+BtStatus runStateTreeAction(i32 subject, const fmt::OcBtNode& node, f32 dt, f32&, void* user) {
+    BtSystem& sys = *static_cast<BtSystem*>(user);
+    if (g_nestDepth >= kMaxNestDepth) {
+        AVER_WARN("[Synapse] RunStateTree '{}': trees nested deeper than {}", node.stringParam, kMaxNestDepth);
+        sys.eraseNested(subject, &node);
+        return BtStatus::Failure;
+    }
+    const u64 id = sys.loadBrain(node.stringParam);
+    const StateTreeRuntime* tree = id ? sys.findStateTree(id) : nullptr;
+    if (!tree) {
+        sys.eraseNested(subject, &node);
+        return BtStatus::Failure;
+    }
+    BtSystem::NestedRun& run = sys.nested(subject, &node);
+    if (run.busy) {
+        AVER_WARN("[Synapse] RunStateTree '{}': a tree is running itself", node.stringParam);
+        return BtStatus::Failure;
+    }
+    Blackboard* board = sys.blackboard(static_cast<scene::Entity>(subject), true);
+    if (!run.started) {
+        if (board) board->applySchema(tree->asset.schema);
+        run.started = true;
+    }
+    BusyGuard busy(run);
+    NestGuard guard;
+    const StStatus s = tickStateTree(tree->asset, sys.registry(), subject, dt, run.st, board);
+    if (s == StStatus::Running) return BtStatus::Running;
+    sys.eraseNested(subject, &node);
+    return s == StStatus::Succeeded ? BtStatus::Success : BtStatus::Failure;
+}
+
+void runStateTreeAbort(i32 subject, const fmt::OcBtNode& node, void* user) {
+    BtSystem& sys = *static_cast<BtSystem*>(user);
+    const u64 id = sys.loadBrain(node.stringParam);
+    const StateTreeRuntime* tree = id ? sys.findStateTree(id) : nullptr;
+    if (tree) abortStateTree(tree->asset, sys.registry(), subject, sys.nested(subject, &node).st);
+    sys.eraseNested(subject, &node);
+}
+
+bool endsWith(const std::string& s, const char* suffix) {
+    const std::string x(suffix);
+    return s.size() >= x.size() && s.compare(s.size() - x.size(), x.size(), x) == 0;
+}
+
 } // namespace
 
 u32 BtSystem::registerComponents(scene::World& world) {
@@ -137,7 +240,7 @@ u64 BtSystem::loadTree(const std::string& path) {
 
     BtAsset asset;
     std::string why;
-    if (!loadBtAsset(path, asset, &why)) {
+    if (!loadBtAsset(resolveAiAsset(path), asset, &why)) {
         AVER_WARN("[Synapse] could not load behaviour tree '{}': {}", path, why);
         return 0;
     }
@@ -145,6 +248,43 @@ u64 BtSystem::loadTree(const std::string& path) {
     rt.path = path;
     trees_[id] = std::move(rt);
     return id;
+}
+
+u64 BtSystem::loadBrain(const std::string& path) {
+    if (endsWith(path, ".ocbt")) return loadTree(path);
+    if (endsWith(path, ".ocst")) return loadStateTree(path);
+    return 0;
+}
+
+u64 BtSystem::loadStateTree(const std::string& path) {
+    const u64 id = fnv1a64(path);
+    if (stateTrees_.find(id) != stateTrees_.end()) return id;
+    StateTreeRuntime rt;
+    std::string why;
+    if (!aver::synapse::loadStateTree(resolveAiAsset(path), rt.asset, &why)) {
+        AVER_WARN("[Synapse] could not load state tree '{}': {}", path, why);
+        return 0;
+    }
+    rt.path = path;
+    rt.asset.path = path;
+    for (const std::string& w : validateStateTree(rt.asset, &registry_)) AVER_WARN("[Synapse] state tree '{}': {}", path, w);
+    stateTrees_[id] = std::move(rt);
+    return id;
+}
+
+u64 BtSystem::registerStateTree(const std::string& name, const StateTreeAsset& asset) {
+    const u64 id = fnv1a64(name);
+    StateTreeRuntime rt;
+    rt.asset = asset;
+    rt.asset.path = name;
+    rt.path = name;
+    stateTrees_[id] = std::move(rt);
+    return id;
+}
+
+const StateTreeRuntime* BtSystem::findStateTree(u64 id) const {
+    const auto it = stateTrees_.find(id);
+    return it == stateTrees_.end() ? nullptr : &it->second;
 }
 
 u64 BtSystem::registerTree(const std::string& name, const BtAsset& asset) {
@@ -158,15 +298,42 @@ u64 BtSystem::registerTree(const std::string& name, const BtAsset& asset) {
 
 bool BtSystem::reloadTree(const std::string& path) {
     const u64 id = fnv1a64(path);
+    if (endsWith(path, ".ocst")) {
+        StateTreeRuntime rt;
+        std::string swhy;
+        if (!aver::synapse::loadStateTree(resolveAiAsset(path), rt.asset, &swhy)) {
+            AVER_WARN("[Synapse] could not reload state tree '{}': {}", path, swhy);
+            return false;
+        }
+        rt.path = path;
+        rt.asset.path = path;
+        for (const std::string& w : validateStateTree(rt.asset, &registry_)) AVER_WARN("[Synapse] state tree '{}': {}", path, w);
+        scene::World& world = scene::World::instance();
+        // Running instances leave their states through the OLD asset, then start again on the new one.
+        for (auto& [e, rec] : stInst_) {
+            const auto* b = world.component<CSynapseBehavior>(e, type_);
+            if (!b || b->treeAssetId != id || rec.treeId != id) continue;
+            if (const auto old = stateTrees_.find(id); old != stateTrees_.end())
+                abortStateTree(old->second.asset, registry_, static_cast<i32>(e), rec.inst);
+        }
+        nested_.clear();
+        stateTrees_[id] = std::move(rt);
+        for (auto& [e, brec] : boards_) {
+            const auto* b = world.component<CSynapseBehavior>(e, type_);
+            if (b && b->treeAssetId == id) brec->boundTree = 0;
+        }
+        return true;
+    }
     BtAsset asset;
     std::string why;
-    if (!loadBtAsset(path, asset, &why)) {
+    if (!loadBtAsset(resolveAiAsset(path), asset, &why)) {
         AVER_WARN("[Synapse] could not reload behaviour tree '{}': {}", path, why);
         return false;
     }
     BtRuntimeTree rt = compileBtAsset(asset);
     rt.path = path;
     trees_[id] = std::move(rt);
+    nested_.clear();
 
     scene::World& world = scene::World::instance();
     for (auto& [e, state] : running_) {
@@ -197,14 +364,14 @@ Blackboard* BtSystem::blackboard(scene::Entity e, bool create) {
     return &boardRec(e).board;
 }
 
-void BtSystem::bindBoard(scene::Entity e, BoardRec& rec, u64 team, u64 treeId, const BtRuntimeTree* tree) {
+void BtSystem::bindBoard(scene::Entity e, BoardRec& rec, u64 team, u64 treeId, const BbSchema* schema) {
     if (rec.team != team) {
         rec.board.setShared(&teams_.get(team));   // before the schema, so Shared keys land on the team board
         rec.team = team;
     }
-    if (tree && rec.boundTree != treeId) {
-        rec.board.applySchema(tree->schema);
-        running_[e].reset();
+    if (schema && rec.boundTree != treeId) {
+        rec.board.applySchema(*schema);
+        if (const auto it = running_.find(e); it != running_.end()) it->second.reset();
         rec.boundTree = treeId;
     }
 }
@@ -279,11 +446,36 @@ void BtSystem::tick(scene::World& world, f32 dt) {
         if (!b || b->treeAssetId == 0) continue;
 
         const auto treeIt = trees_.find(b->treeAssetId);
-        if (treeIt == trees_.end()) continue;   // the id does not resolve to a loaded tree
+        if (treeIt == trees_.end()) {
+            // A state tree (AI: wave 3 #21); an id that resolves to neither is silently skipped.
+            const auto stIt = stateTrees_.find(b->treeAssetId);
+            if (stIt == stateTrees_.end()) continue;
+            const StateTreeRuntime& srt = stIt->second;
+            BoardRec& srec = boardRec(e);
+            StRec& si = stInst_[e];
+            if (si.treeId != b->treeAssetId) {
+                if (si.treeId != 0)
+                    if (const auto old = stateTrees_.find(si.treeId); old != stateTrees_.end())
+                        abortStateTree(old->second.asset, registry_, static_cast<i32>(e), si.inst);
+                si.inst = StateTreeInstance{};
+                si.treeId = b->treeAssetId;
+            }
+            if (srec.boundTree != b->treeAssetId) {
+                abortStateTree(srt.asset, registry_, static_cast<i32>(e), si.inst);
+                si.inst = StateTreeInstance{};
+            }
+            bindBoard(e, srec, b->teamId, b->treeAssetId, &srt.asset.schema);
+            syncPerception(world, e, srec.board);
+            si.inst.trace = (e == watched_);
+            const StStatus st = tickStateTree(srt.asset, registry_, static_cast<i32>(e), dt, si.inst, &srec.board);
+            b->lastStatus = st == StStatus::Running ? 0 : st == StStatus::Succeeded ? 1 : 2;
+            continue;
+        }
         const BtRuntimeTree& rt = treeIt->second;
+        if (stoppedBt_.count(e)) continue;
 
         BoardRec& rec = boardRec(e);
-        bindBoard(e, rec, b->teamId, b->treeAssetId, &rt);
+        bindBoard(e, rec, b->teamId, b->treeAssetId, &rt.schema);
         syncPerception(world, e, rec.board);
 
         BtRunningState& state = running_[e];   // default-constructs on first use
@@ -309,11 +501,170 @@ void BtSystem::prune(scene::World& world) {
         else
             ++it;
     }
+    // State-tree instances: gone with their entity, or when the entity's brain changed.
+    for (auto it = stInst_.begin(); it != stInst_.end();) {
+        const scene::Entity e = it->first;
+        const auto* b = world.valid(e) ? world.component<CSynapseBehavior>(e, type_) : nullptr;
+        if (!b || b->treeAssetId == 0 || b->treeAssetId != it->second.treeId) {
+            if (const auto old = stateTrees_.find(it->second.treeId); old != stateTrees_.end())
+                abortStateTree(old->second.asset, registry_, static_cast<i32>(e), it->second.inst);
+            it = stInst_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = stoppedBt_.begin(); it != stoppedBt_.end();) {
+        if (!world.valid(*it)) it = stoppedBt_.erase(it);
+        else ++it;
+    }
+    // Nested runs of subjects that are gone.
+    for (auto it = nested_.begin(); it != nested_.end();) {
+        if (!world.valid(static_cast<scene::Entity>(it->first.first))) it = nested_.erase(it);
+        else ++it;
+    }
     // Boards live as long as their entity does (a board can pre-date the tree that fills it).
     for (auto it = boards_.begin(); it != boards_.end();) {
         if (!world.valid(it->first)) it = boards_.erase(it);
         else ++it;
     }
+}
+
+void BtSystem::dropRuntime(scene::Entity e) {
+    const auto* b = scene::World::instance().component<CSynapseBehavior>(e, type_);
+    if (const auto it = running_.find(e); it != running_.end()) {
+        if (b) {
+            if (const auto t = trees_.find(b->treeAssetId); t != trees_.end())
+                abortBt(t->second.tree, registry_, static_cast<i32>(e), it->second);
+        }
+        running_.erase(it);
+    }
+    if (const auto it = stInst_.find(e); it != stInst_.end()) {
+        if (const auto old = stateTrees_.find(it->second.treeId); old != stateTrees_.end())
+            abortStateTree(old->second.asset, registry_, static_cast<i32>(e), it->second.inst);
+        stInst_.erase(it);
+    }
+    stoppedBt_.erase(e);
+}
+
+bool BtSystem::setBrain(scene::World& world, scene::Entity e, const std::string& path) {
+    if (type_ == 0 || !world.valid(e)) return false;
+    const u64 id = loadBrain(path);
+    if (id == 0) return false;
+    CSynapseBehavior* b = world.component<CSynapseBehavior>(e, type_);
+    if (!b) b = attach(world, e);
+    if (!b) return false;
+    dropRuntime(e);
+    b->treeAssetId = id;
+    b->lastStatus = 0;
+    if (const auto it = boards_.find(e); it != boards_.end()) it->second->boundTree = 0;   // schema re-applied next tick
+    return true;
+}
+
+i32 BtSystem::brainKind(scene::Entity e) const {
+    const auto* b = type_ ? scene::World::instance().component<CSynapseBehavior>(e, type_) : nullptr;
+    if (!b || b->treeAssetId == 0) return 0;
+    if (trees_.count(b->treeAssetId)) return 1;
+    return stateTrees_.count(b->treeAssetId) ? 2 : 0;
+}
+
+i32 BtSystem::brainStatus(scene::Entity e) const {
+    const i32 kind = brainKind(e);
+    const auto* b = scene::World::instance().component<CSynapseBehavior>(e, type_);
+    if (kind == 1) {
+        if (stoppedBt_.count(e) || running_.find(e) == running_.end()) return 0;
+        return b->lastStatus == 0 ? 1 : b->lastStatus == 1 ? 2 : 3;
+    }
+    if (kind == 2) {
+        const auto it = stInst_.find(e);
+        if (it == stInst_.end()) return 0;
+        switch (it->second.inst.status) {
+            case StStatus::Running: return 1;
+            case StStatus::Succeeded: return 2;
+            case StStatus::Failed: return 3;
+            case StStatus::Stopped: return 0;
+        }
+    }
+    return 0;
+}
+
+bool BtSystem::stateTreeEvent(scene::Entity e, std::string_view name, i64 payloadInt, f32 payloadFloat) {
+    if (brainKind(e) != 2 || name.empty()) return false;
+    StRec& r = stInst_[e];
+    if (r.treeId == 0) r.treeId = scene::World::instance().component<CSynapseBehavior>(e, type_)->treeAssetId;
+    r.inst.sendEvent(std::string(name), payloadInt, payloadFloat);
+    return true;
+}
+
+bool BtSystem::brainRestart(scene::Entity e) {
+    const i32 kind = brainKind(e);
+    if (kind == 1) {
+        stoppedBt_.erase(e);
+        if (const auto it = running_.find(e); it != running_.end()) {
+            const auto* b = scene::World::instance().component<CSynapseBehavior>(e, type_);
+            if (const auto t = trees_.find(b->treeAssetId); t != trees_.end()) abortBt(t->second.tree, registry_, static_cast<i32>(e), it->second);
+        }
+        return true;
+    }
+    if (kind == 2) {
+        StRec& r = stInst_[e];
+        if (r.treeId == 0) r.treeId = scene::World::instance().component<CSynapseBehavior>(e, type_)->treeAssetId;
+        r.inst.restart();
+        return true;
+    }
+    return false;
+}
+
+bool BtSystem::brainStop(scene::Entity e) {
+    const i32 kind = brainKind(e);
+    if (kind == 1) {
+        if (const auto it = running_.find(e); it != running_.end()) {
+            const auto* b = scene::World::instance().component<CSynapseBehavior>(e, type_);
+            if (const auto t = trees_.find(b->treeAssetId); t != trees_.end()) abortBt(t->second.tree, registry_, static_cast<i32>(e), it->second);
+        }
+        stoppedBt_.insert(e);
+        return true;
+    }
+    if (kind == 2) {
+        StRec& r = stInst_[e];
+        if (r.treeId == 0) r.treeId = scene::World::instance().component<CSynapseBehavior>(e, type_)->treeAssetId;
+        r.inst.stop();
+        return true;
+    }
+    return false;
+}
+
+void BtSystem::clearStateTrees() {
+    for (auto& [e, rec] : stInst_)
+        if (const auto old = stateTrees_.find(rec.treeId); old != stateTrees_.end())
+            abortStateTree(old->second.asset, registry_, static_cast<i32>(e), rec.inst);
+    stInst_.clear();
+    stoppedBt_.clear();
+    nested_.clear();
+}
+
+bool BtSystem::stateTreeDebugView(scene::Entity e, StateTreeDebugView& out) const {
+    const auto* b = type_ ? scene::World::instance().component<CSynapseBehavior>(e, type_) : nullptr;
+    if (!b || b->treeAssetId == 0) return false;
+    out = StateTreeDebugView{};
+    out.treeId = b->treeAssetId;
+    out.tree = findStateTree(b->treeAssetId);
+    if (const auto it = stInst_.find(e); it != stInst_.end()) out.state = &it->second.inst;
+    if (const auto it = boards_.find(e); it != boards_.end()) out.board = &it->second->board;
+    return out.tree != nullptr;
+}
+
+std::string BtSystem::activeStatePath(scene::Entity e) const {
+    StateTreeDebugView v;
+    if (!stateTreeDebugView(e, v) || !v.state || v.state->active.empty()) return {};
+    return v.tree->asset.statePath(v.state->active.back());
+}
+
+bool BtSystem::inState(scene::Entity e, std::string_view path) const {
+    StateTreeDebugView v;
+    if (!stateTreeDebugView(e, v) || !v.state || path.empty()) return false;
+    for (const i32 s : v.state->active)
+        if (v.tree->asset.statePath(s) == path) return true;
+    return false;
 }
 
 BtSystem& btSystem() {
@@ -410,6 +761,34 @@ i32 blackboardRelay(i32 op, i32 entity, const char* key, i32 type, i64* i, f32* 
     }
     case kBbRelaySetTeam:
         return sys.setTeam(world, e, key) ? 1 : 0;
+    case kBbRelayBrainSet:
+        return sys.setBrain(world, e, key) ? 1 : 0;
+    case kBbRelayBrainKind:
+        if (!i) return 0;
+        *i = sys.brainKind(e);
+        return 1;
+    case kBbRelayBrainEvent:
+        return sys.stateTreeEvent(e, key, i ? *i : 0, f ? f[0] : 0.0f) ? 1 : 0;
+    case kBbRelayBrainState: {
+        const std::string path = sys.activeStatePath(e);
+        if (path.empty()) return 0;
+        if (text && textCap > 0) {
+            const usize n = std::min(path.size(), static_cast<usize>(textCap - 1));
+            std::memcpy(text, path.data(), n);
+            text[n] = 0;
+        }
+        return 1;
+    }
+    case kBbRelayBrainInState:
+        return sys.inState(e, key) ? 1 : 0;
+    case kBbRelayBrainStatus:
+        if (!i) return 0;
+        *i = sys.brainStatus(e);
+        return 1;
+    case kBbRelayBrainRestart:
+        return sys.brainRestart(e) ? 1 : 0;
+    case kBbRelayBrainStop:
+        return sys.brainStop(e) ? 1 : 0;
     }
     return 0;
 }
@@ -462,6 +841,8 @@ void registerBuiltinBehaviors(BtSystem& system) {
     reg.registerAction("Wait", &waitAction);
     reg.registerAction("LookAt", &lookAtAction);
     reg.registerAction("FireEvent", &fireEventAction);
+    reg.registerAction("RunBehaviorTree", &runBehaviorTreeAction, &system, &runBehaviorTreeAbort);   // AI: wave 3 #21
+    reg.registerAction("RunStateTree", &runStateTreeAction, &system, &runStateTreeAbort);
 }
 
 } // namespace aver::synapse

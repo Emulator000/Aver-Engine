@@ -187,12 +187,52 @@ static void testSnapToGridIsIdempotentAndMonotonic() {
     }
 }
 
+// gerstnerSurfaceCm (wave 3): the surface at a WORLD point. Displacing the solved rest point must land
+// back on the requested world point, and height/normal must be what gerstnerDisplaceCm gives there.
+static void testSurfaceAtWorldPoint() {
+    GerstnerWave waves[kMaxGerstnerWaves];
+    for (size_t i = 0; i < kMaxGerstnerWaves; ++i) {
+        waves[i].dirX = 1.0f - 0.4f * static_cast<f32>(i);
+        waves[i].dirZ = 0.3f + 0.5f * static_cast<f32>(i);
+        waves[i].wavelengthCm = 600.0f + 250.0f * static_cast<f32>(i);
+        waves[i].amplitudeCm = 30.0f - 4.0f * static_cast<f32>(i);
+        waves[i].steepness = 5.0f;   // far past the cap: the clamp holds the sum at 1
+    }
+    u32 rng = 12345u;
+    auto next = [&]() { rng = rng * 1664525u + 1013904223u; return static_cast<f32>(rng >> 8) / static_cast<f32>(1u << 24); };
+    f32 worstLand = 0.0f, worstHeight = 0.0f, worstNormal = 0.0f;
+    for (int i = 0; i < 200; ++i) {
+        const f32 x = (next() - 0.5f) * 20000.0f, z = (next() - 0.5f) * 20000.0f, t = next() * 40.0f;
+        f32 h, n[3];
+        gerstnerSurfaceCm(waves, kMaxGerstnerWaves, x, z, t, h, n);
+        // Recover the solved rest point by solving again independently, then displace it.
+        f32 rx = x, rz = z, pos[3], dn[3];
+        for (int k = 0; k < 40; ++k) {
+            gerstnerDisplaceCm(waves, kMaxGerstnerWaves, rx, rz, t, pos, dn);
+            rx -= pos[0] - x;
+            rz -= pos[1] - z;
+        }
+        gerstnerDisplaceCm(waves, kMaxGerstnerWaves, rx, rz, t, pos, dn);
+        worstLand = std::fmax(worstLand, std::fmax(std::fabs(pos[0] - x), std::fabs(pos[1] - z)));
+        worstHeight = std::fmax(worstHeight, std::fabs(pos[2] - h));
+        worstNormal = std::fmax(worstNormal, std::fabs(dn[0] - n[0]) + std::fabs(dn[1] - n[1]) + std::fabs(dn[2] - n[2]));
+    }
+    check(worstLand < 0.01f, "the solved rest point displaces back onto the requested world point (worst " + std::to_string(worstLand) + " cm)");
+    check(worstHeight < 0.05f, "height equals gerstnerDisplaceCm at the solved rest point (worst " + std::to_string(worstHeight) + ")");
+    check(worstNormal < 1e-3f, "normal equals gerstnerDisplaceCm's at the solved rest point");
+
+    f32 h = 99.0f, n[3];
+    gerstnerSurfaceCm(nullptr, 0, 10.0f, 20.0f, 1.0f, h, n);
+    check(h == 0.0f && n[0] == 0.0f && n[1] == 0.0f && n[2] == 1.0f, "zero waves -> height 0, normal +Z");
+}
+
 int main() {
     AVER_INFO("GerstnerWaveTest");
     testSinglePhaseAtOrigin();
     testZeroAmplitudeIsFlat();
     testSteepnessClampPreventsFolding();
     testSnapToGridIsIdempotentAndMonotonic();
+    testSurfaceAtWorldPoint();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

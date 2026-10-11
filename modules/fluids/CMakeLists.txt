@@ -25,6 +25,8 @@ set(_fluids_sources
   src/WaterSurface.cpp
   src/Underwater.cpp
   src/FluidVolume.cpp
+  # Spline rivers and closed-outline lakes: the CPU spline, their meshes and the water point query.
+  src/WaterBody.cpp
 )
 set(_fluids_deps Aver.Core Aver.RHI)
 

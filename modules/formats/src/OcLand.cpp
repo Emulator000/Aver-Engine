@@ -43,6 +43,41 @@ constexpr usize kLhdrBytes = sizeof(u32) + sizeof(f32) * 6;
 
 } // namespace
 
+bool ocLandLayerNameValid(const std::string& name) {
+    if (name.empty() || name.size() > 31) return false;
+    for (char ch : name) {
+        const bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool OcLandData::layersValid() const {
+    const usize L = layerNames.size();
+    if (L > kOcLandMaxLayers) return false;
+    for (usize i = 0; i < L; ++i) {
+        if (!ocLandLayerNameValid(layerNames[i])) return false;
+        for (usize j = 0; j < i; ++j)
+            if (layerNames[j] == layerNames[i]) return false;
+    }
+    const usize nn = static_cast<usize>(sampleCount) * sampleCount;
+    return weights.size() == (L == 0 ? 0 : (L - 1) * nn);
+}
+
+u8 OcLandData::weightAt(u32 layer, u32 ix, u32 iy) const {
+    if (ix >= sampleCount || iy >= sampleCount) return 0;
+    const usize L = layerNames.size();
+    if (L == 0) return layer == 0 ? 255 : 0;
+    if (layer >= L) return 0;
+    const usize nn = static_cast<usize>(sampleCount) * sampleCount;
+    const usize at = static_cast<usize>(iy) * sampleCount + ix;
+    if (weights.size() < (L - 1) * nn) return 0;
+    if (layer > 0) return weights[(layer - 1) * nn + at];
+    int sum = 0;
+    for (usize p = 0; p + 1 < L; ++p) sum += weights[p * nn + at];
+    return static_cast<u8>(sum >= 255 ? 0 : 255 - sum);
+}
+
 // Parses an .ocland from memory, dequantising the heights and recomputing the bounds.
 bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why) {
     Avr1File file;
@@ -123,6 +158,35 @@ bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why)
     out.quantMinCm = quantMin;
     out.quantMaxCm = quantMax;
     out.hasQuantRange = true;
+
+    // Optional paint layers: fail soft (heights stay, paint dropped, `warning` says why).
+    if (const AvrChunk* ly = file.find(kOcLandChunkLayers)) {
+        Cursor lc{ly->data.data(), ly->data.size()};
+        std::vector<std::string> names;
+        const u32 layers = lc.take<u8>();
+        const char* bad = nullptr;
+        if (!lc.ok || layers < 1 || layers > kOcLandMaxLayers) bad = "LLYR layer count is outside 1..8";
+        for (u32 i = 0; !bad && i < layers; ++i) {
+            const u32 len = lc.take<u8>();
+            if (!lc.ok || lc.left < len) { bad = "LLYR ended early"; break; }
+            std::string nm(reinterpret_cast<const char*>(lc.p), len);
+            lc.p += len;
+            lc.left -= len;
+            if (!ocLandLayerNameValid(nm)) { bad = "LLYR has an invalid layer name"; break; }
+            for (const std::string& o : names)
+                if (o == nm) bad = "LLYR has a duplicate layer name";
+            names.push_back(std::move(nm));
+        }
+        const AvrChunk* lw = file.find(kOcLandChunkWeights);
+        const usize need = bad ? 0 : static_cast<usize>(layers - 1) * count;
+        if (!bad && need > 0 && (!lw || lw->data.size() < need)) bad = "LWGT is shorter than the layer table needs";
+        if (bad) {
+            out.warning = bad;
+        } else {
+            out.layerNames = std::move(names);
+            if (need > 0) out.weights.assign(lw->data.begin(), lw->data.begin() + static_cast<std::ptrdiff_t>(need));
+        }
+    }
     return true;
 }
 
@@ -139,6 +203,16 @@ bool loadOcLand(const std::string& path, OcLandData& out, std::string* why) {
 bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
     if (!in.valid()) return fail(why, "OcLandData is not internally consistent");
     if (in.sampleCount > kOcLandMaxSamples) return fail(why, "sampleCount above the maximum of 4097");
+    if (in.hasLayers()) {
+        if (!in.layersValid()) return fail(why, "paint layers are invalid (count, names or weight size)");
+        const usize nn = in.heights.size();
+        const usize planes = in.layerNames.size() - 1;
+        for (usize i = 0; i < nn; ++i) {
+            u32 sum = 0;
+            for (usize p = 0; p < planes; ++p) sum += in.weights[p * nn + i];
+            if (sum > 255) return fail(why, "paint weights at a sample sum to more than 255");
+        }
+    }
 
     f32 liveLo = in.heights[0], liveHi = in.heights[0];
     for (f32 h : in.heights) {
@@ -227,6 +301,16 @@ bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
     file.add(kOcLandChunkHeader, std::move(hdr), kAvrChunkRequired);
     file.add(kOcLandChunkHeights, std::move(hgt), kAvrChunkGpuUploadable);
     file.add(kOcLandChunkRange, std::move(rng), 0);
+    if (in.hasLayers()) {
+        std::vector<u8> ly;
+        ly.push_back(static_cast<u8>(in.layerNames.size()));
+        for (const std::string& nm : in.layerNames) {
+            ly.push_back(static_cast<u8>(nm.size()));
+            ly.insert(ly.end(), nm.begin(), nm.end());
+        }
+        file.add(kOcLandChunkLayers, std::move(ly), 0);
+        if (in.layerNames.size() > 1) file.add(kOcLandChunkWeights, std::vector<u8>(in.weights), 0);
+    }
     return writeAvr1(file, out, why);
 }
 

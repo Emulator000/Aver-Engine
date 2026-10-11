@@ -68,41 +68,63 @@ float3 averViewRayDir(float2 ndc) {
 // (HLSL) used to duplicate the same wavelengths, so retuning one alone slid the caustics off the
 // ripples they light. Both now call these instead of owning their own copies.
 
-// One wave's phase at a world XY position, in radians.
-float averWavePhase(float4 w, float2 p) { return dot(w.xy, p) * w.z + gTime.x * w.w; }
+// One wave's phase at a world XY position and time, in radians. The T forms take the time as an
+// argument (wave 3: a river advects the field at a frozen time); the plain forms below are gTime.x.
+float averWavePhaseT(float4 w, float2 p, float t) { return dot(w.xy, p) * w.z + t * w.w; }
+float averWavePhase(float4 w, float2 p) { return averWavePhaseT(w, p, gTime.x); }
 
 // Surface height in centimetres, relative to the flat surface.
-float averWaveHeight(float2 p) {
+float averWaveHeightT(float2 p, float t) {
     const uint n = (uint)(gWaveParams.y + 0.5);
     float h = 0.0;
     [unroll] for (uint i = 0; i < 3; ++i)
-        if (i < n) h += sin(averWavePhase(gWave[i], p));
+        if (i < n) h += sin(averWavePhaseT(gWave[i], p, t));
     return h * gWaveParams.x;
 }
+float averWaveHeight(float2 p) { return averWaveHeightT(p, gTime.x); }
 
 // Tangent-space normal of the height field, ANALYTIC not finite-difference (derivative of a sum
 // of sines is a sum of cosines -- exact, same cost as the height). z = 1 keeps it a tilt.
-float3 averWaveNormal(float2 p) {
+float3 averWaveNormalT(float2 p, float t) {
     const uint n = (uint)(gWaveParams.y + 0.5);
     float2 d = float2(0.0, 0.0);
     [unroll] for (uint i = 0; i < 3; ++i)
-        if (i < n) d += gWave[i].xy * (gWave[i].z * cos(averWavePhase(gWave[i], p)));
+        if (i < n) d += gWave[i].xy * (gWave[i].z * cos(averWavePhaseT(gWave[i], p, t)));
     return normalize(float3(-d * gWaveParams.x, 1.0));
 }
+float3 averWaveNormal(float2 p) { return averWaveNormalT(p, gTime.x); }
 
 // How strongly the surface focuses light here: 0 spreading, 1 at tightest convergence. This is
 // the negated, normalised Laplacian of the height field -- for a sum of sines the 2nd derivative
 // is analytic (-k^2 sin(phase)), which is why caustics need no ray tracing, photon map or texture.
-float averWaveFocus(float2 p) {
+float averWaveFocusT(float2 p, float t) {
     const uint n = (uint)(gWaveParams.y + 0.5);
     float lap = 0.0, norm = 0.0;
     [unroll] for (uint i = 0; i < 3; ++i) {
         if (i >= n) continue;
         const float k2 = gWave[i].z * gWave[i].z;
-        lap  -= k2 * sin(averWavePhase(gWave[i], p));
+        lap  -= k2 * sin(averWavePhaseT(gWave[i], p, t));
         norm += k2;
     }
     return saturate(lap / max(norm, 1e-6));
+}
+float averWaveFocus(float2 p) { return averWaveFocusT(p, gTime.x); }
+
+// The wave normal on MOVING water (wave 3: rivers). `flow` is the water velocity in cm/s at p; the wave
+// field is advected along it with two copies half a cycle apart, cross-faded by a triangle weight so the
+// reset of each copy never shows. The advected pattern is the wave field frozen at t = 0, so it SCROLLS
+// downstream instead of also swimming in place; with a flow of 0 (a lake) the result is exactly the live
+// averWaveNormal(p). The blend toward the advected pattern grows with the flow speed and is full by
+// 20 cm/s, so slow water keeps the ripples' own motion.
+float3 averFlowNormal(float2 p, float2 flow, float cycle) {
+    const float c  = max(cycle, 0.05);
+    const float t  = gTime.x / c;
+    const float p0 = frac(t), p1 = frac(t + 0.5);
+    const float w0 = 1.0 - abs(2.0 * p0 - 1.0);
+    const float3 a = averWaveNormalT(p - flow * (p0 * c), 0.0);
+    const float3 b = averWaveNormalT(p - flow * (p1 * c), 0.0);
+    const float3 advected = normalize(w0 * a + (1.0 - w0) * b);
+    return normalize(lerp(averWaveNormal(p), advected, saturate(length(flow) / 20.0)));
 }
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
 cbuffer PerObject : register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) {

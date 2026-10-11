@@ -6,6 +6,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/core/Types.hpp"
+#include "aver/game/LevelLights.hpp"   // [wave3/level-instances]
 #include "aver/scene/Components.hpp"
 
 #include <algorithm>
@@ -23,55 +24,15 @@
 
 namespace aver::editor {
 
-// One pickable file: content-relative path (forward slashes) and the ObjectId a CLight stores for it.
-struct LightAssetChoice {
-    std::string label;
-    u64 id = 0;
-};
-
-// The id a CLight stores for a content-relative path: fnv1a64 of the forward-slash path, the same id
-// space CMeshRenderer::mesh and CParticleEmitter::effect use.
-inline u64 lightAssetId(std::string_view contentRelativePath) {
-    std::string p(contentRelativePath);
-    std::replace(p.begin(), p.end(), '\\', '/');
-    return fnv1a64(p);
-}
-
-inline bool lightHasExt(const std::filesystem::path& p, bool ies) {
-    std::string e = p.extension().string();
-    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (ies) return e == ".ies";
-    return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".tga" || e == ".bmp";
-}
-
-// Every .ies (or cookie-capable image) under `contentDir`, sorted by path. Capped so a huge texture
-// library cannot stall the editor; `truncated` says when the cap bit.
-inline std::vector<LightAssetChoice> listLightAssets(const std::string& contentDir, bool ies,
-                                                     bool* truncated = nullptr) {
-    constexpr usize kCap = 4000;
-    std::vector<LightAssetChoice> out;
-    if (truncated) *truncated = false;
-    std::error_code ec;
-    if (contentDir.empty() || !std::filesystem::is_directory(contentDir, ec)) return out;
-    for (std::filesystem::recursive_directory_iterator it(contentDir, std::filesystem::directory_options::skip_permission_denied, ec), end;
-         it != end && !ec; it.increment(ec)) {
-        if (!it->is_regular_file(ec) || !lightHasExt(it->path(), ies)) continue;
-        if (out.size() >= kCap) { if (truncated) *truncated = true; break; }
-        std::string rel = std::filesystem::relative(it->path(), contentDir, ec).generic_string();
-        if (ec || rel.empty()) continue;
-        out.push_back({rel, lightAssetId(rel)});
-    }
-    std::sort(out.begin(), out.end(), [](const LightAssetChoice& a, const LightAssetChoice& b) { return a.label < b.label; });
-    return out;
-}
-
-// Cone half-angles are stored as cosines; the panel edits degrees.
-inline f32 lightConeDegrees(f32 cosine) {
-    return std::acos(std::min(1.0f, std::max(-1.0f, cosine))) * kRadToDeg;
-}
-inline f32 lightConeCos(f32 degrees) {
-    return std::cos(std::min(89.9f, std::max(0.0f, degrees)) * kDegToRad);
-}
+// [wave3/level-instances begin] The pure half (asset ids, cone conversions, asset listing) moved to
+// aver/game/LevelLights.hpp so the packaged game can spawn LIGHT records too; the editor keeps its names.
+using game::LightAssetChoice;
+using game::lightAssetId;
+using game::lightHasExt;
+using game::listLightAssets;
+using game::lightConeDegrees;
+using game::lightConeCos;
+// [wave3/level-instances end]
 
 // A new light of `kind` with values that are sane for a room, not the sun-sized struct defaults.
 // (addComponent zero-fills, so every field a light needs is written.)

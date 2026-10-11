@@ -132,4 +132,12 @@ bool ocPrefabFieldEqual(const OcSaveField& a, const OcSaveField& b);
 // Same op, path, component and field name; used to replace an override rather than stack a second.
 bool ocPrefabSameTarget(const OcPrefabOverride& a, const OcPrefabOverride& b);
 
+// [wave3/level-instances begin]
+// The `<set|addcomp|rmcomp> <path|-> <component> [<field> <kind> <payload...>]` body shared by POVERRIDE
+// and LIOVERRIDE (OcLevelInst.hpp), starting at t[from]. False when the body is short or malformed.
+bool parseOcOverrideBody(const std::vector<std::string_view>& t, usize from, OcPrefabOverride& ov);
+// Appends the same body (no keyword, no newline).
+void appendOcOverrideBody(std::string& s, const OcPrefabOverride& ov);
+// [wave3/level-instances end]
+
 } // namespace aver::fmt

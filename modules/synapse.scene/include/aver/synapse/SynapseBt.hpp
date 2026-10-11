@@ -15,12 +15,15 @@
 #include "aver/synapse/Bt.hpp"
 #include "aver/synapse/BtAsset.hpp"
 #include "aver/synapse/Hearing.hpp"
+#include "aver/synapse/StateTree.hpp"            // AI: wave 3 #21
 #include "aver/synapse/SynapsePerception.hpp"   // reuses its NotifyFn -- see setNotifySink's own comment
 
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace aver::synapse {
@@ -51,6 +54,14 @@ struct BtDebugView {
 // (Vec3), HeardLevel (Float), HeardTag (Int), HeardSource (Entity), HeardConfidence (Float, at the
 // time it was heard). A forgotten memory that is the mirrored one clears HasHeard. Install with
 // hearingSystem().setMemorySink(&btSystem().hearingSink()).
+// What the editor's live debugger reads for one entity running a StateTree. Valid until the next tick.
+struct StateTreeDebugView {
+    u64                       treeId = 0;
+    const StateTreeRuntime*   tree = nullptr;
+    const StateTreeInstance*  state = nullptr;
+    const Blackboard*         board = nullptr;
+};
+
 class BtHearingSink final : public IHearingMemorySink {
 public:
     void onHeard(u32 listener, const HeardMemory& m) override;
@@ -77,6 +88,34 @@ public:
     // lifetime). Safe to call more than once for the same path; the second call returns the
     // already-cached id without touching disk again.
     u64 loadTree(const std::string& path);
+
+    // ---- brains: a .ocbt behaviour tree or a .ocst state tree (AI: wave 3 #21) ---------------------
+    // Both ids are fnv1a64(path as written, content-relative); the file is read through resolveAiAsset.
+    u64 loadBrain(const std::string& path);             // by extension; 0 for anything else or a failed load
+    u64 loadStateTree(const std::string& path);
+    u64 registerStateTree(const std::string& name, const StateTreeAsset& asset);
+    const StateTreeRuntime* findStateTree(u64 id) const;
+    // Gives `e` the brain at `path` (attaching CSynapseBehavior when missing). The assignment path that
+    // did not exist: editor, graph and C# all come through here.
+    bool setBrain(scene::World& world, scene::Entity e, const std::string& path);
+    i32 brainKind(scene::Entity e) const;               // 0 none, 1 behaviour tree, 2 state tree
+    i32 brainStatus(scene::Entity e) const;             // 0 idle / stopped, 1 running, 2 succeeded, 3 failed
+    bool stateTreeEvent(scene::Entity e, std::string_view name, i64 payloadInt, f32 payloadFloat);
+    bool brainRestart(scene::Entity e);
+    bool brainStop(scene::Entity e);
+    void clearStateTrees();                             // drops instances (level unload / Play stop); assets stay cached
+    bool stateTreeDebugView(scene::Entity e, StateTreeDebugView& out) const;
+    std::string activeStatePath(scene::Entity e) const; // the active leaf's dotted path, "" when none
+    bool inState(scene::Entity e, std::string_view path) const;   // `path` is in the active chain
+    // Runs a nested tree or state tree for a leaf (RunBehaviorTree / RunStateTree), keyed by (subject, node).
+    struct NestedRun {
+        BtRunningState bt;
+        StateTreeInstance st;
+        bool started = false;
+        bool busy = false;   // inside its own tick: a tree that (indirectly) runs itself fails instead of re-entering
+    };
+    NestedRun& nested(i32 subject, const void* node) { return nested_[{subject, node}]; }
+    void eraseNested(i32 subject, const void* node) { nested_.erase({subject, node}); }
 
     // Re-reads `path` after an edit and swaps it in; entities using it restart their tree and re-bind
     // their blackboard schema. The old tree stays if the file does not load. False on a failed load.
@@ -144,6 +183,14 @@ private:
     std::unordered_map<u64, std::string> teamNames_;
     scene::Entity watched_ = scene::kInvalidEntity;
     BtHearingSink hearingSink_;
+    struct StRec {
+        StateTreeInstance inst;
+        u64 treeId = 0;
+    };
+    std::unordered_map<u64, StateTreeRuntime> stateTrees_;
+    std::unordered_map<scene::Entity, StRec> stInst_;
+    std::unordered_set<scene::Entity> stoppedBt_;
+    std::map<std::pair<i32, const void*>, NestedRun> nested_;
     // KEYED BY THE FULL ENTITY HANDLE, pruned every tick -- AgentSystem::paths_'s own fix, applied
     // here for the identical reason.
     std::unordered_map<scene::Entity, BtRunningState> running_;
@@ -152,7 +199,8 @@ private:
 
     void prune(scene::World& world);
     BoardRec& boardRec(scene::Entity e);
-    void bindBoard(scene::Entity e, BoardRec& rec, u64 team, u64 treeId, const BtRuntimeTree* tree);
+    void bindBoard(scene::Entity e, BoardRec& rec, u64 team, u64 treeId, const BbSchema* schema);
+    void dropRuntime(scene::Entity e);   // aborts and forgets whatever `e` was running
     void syncPerception(scene::World& world, scene::Entity e, Blackboard& board);
 };
 
@@ -167,6 +215,15 @@ enum BbRelayOp : i32 {
     kBbRelayReset = 3,
     kBbRelayDefine = 4,   // `type` = key type, *i = scope (0 agent, 1 shared)
     kBbRelaySetTeam = 5,
+    // Brains (AI: wave 3 #21); `key` is a path / event / state name, "" when unused.
+    kBbRelayBrainSet = 6,       // key = asset path
+    kBbRelayBrainKind = 7,      // *i = 0 none, 1 behaviour tree, 2 state tree
+    kBbRelayBrainEvent = 8,     // key = event name, *i payload int, f[0] payload float
+    kBbRelayBrainState = 9,     // text = active leaf path; returns 0 when none
+    kBbRelayBrainInState = 10,  // key = state path; returns 1 when in the active chain
+    kBbRelayBrainStatus = 11,   // *i = 0 idle, 1 running, 2 succeeded, 3 failed
+    kBbRelayBrainRestart = 12,
+    kBbRelayBrainStop = 13,
 };
 i32 blackboardRelay(i32 op, i32 entity, const char* key, i32 type, i64* i, f32* f, char* text,
                     i32 textCap, void* user);
@@ -176,7 +233,8 @@ i32 blackboardRelay(i32 op, i32 entity, const char* key, i32 type, i64* i, f32* 
 BtSystem& btSystem();
 
 // Registers the built-in Conditions/Actions into `system`'s own registry() (plus the blackboard leaves
-// BbCompare / BbSet / BbClear, see BtRegistry::registerBlackboardLeaves) --
+// BbCompare / BbSet / BbClear, see BtRegistry::registerBlackboardLeaves, and the nesting actions
+// RunBehaviorTree / RunStateTree: stringParam = a .ocbt / .ocst, Running while the nested tree runs) --
 //   Conditions: HasTarget, CanSeeTarget, DistanceToTargetLess (params[0] = threshold, cm)
 //   Actions:    MoveTo (params[0..2] = world goal), Wait (params[0] = duration, sec), LookAt,
 //               FireEvent (stringParam = the event name to raise)

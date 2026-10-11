@@ -89,7 +89,18 @@ public:
               const std::function<void(f32 fraction)>& progress = {}, const Vec3& viewerCm = {},
               const std::vector<std::string>* tablePaths = nullptr);
     void update(const Vec3& viewerCm, f32 dt);
-    void clear();   // clears the renderer's foliage and releases held meshes
+    void clear();   // clears the renderer's foliage and releases held meshes (and drops extra tables)
+
+    // [wave3/level-instances begin] EXTRA TABLES: instance tables that belong to something other than the level's
+    // FOLIAGE records (a packed level instance's rows, a child level's foliage through the instance matrix).
+    // `rows` are already in world space; `owner` keys the table. They are cell-less (resident while set), emitted
+    // after the cell files so they share kMaxFoliageInstances (the renderer truncates the tail), and survive load().
+    // A non-empty groupMaterial[g] replaces the prototype's part materials for that group. Applied at the
+    // kCheckSeconds throttle, once the prototype meshes are read.
+    void setExtraTable(u64 owner, fmt::OcInstanceData rowsInWorldSpace, std::vector<std::string> groupMaterial);
+    void clearExtraTable(u64 owner);
+    u32 extraTables() const { return static_cast<u32>(extras_.size()); }
+    // [wave3/level-instances end]
 
     bool streamed() const { return streamed_; }
     // Load / unload distances changed in place; the next check applies them.
@@ -113,11 +124,25 @@ private:
         std::vector<u32> use;           // per group: resident cells referencing it
         std::vector<char> held;         // per group: mesh acquired
         std::vector<char> warned;       // per group: missing-mesh warning issued
+        bool extra = false;             // [wave3/level-instances] an extra table (always after the level's files)
+        std::vector<std::string> groupMaterial;   // extra tables: per-group material override ("" = the prototype's own)
+    };
+    struct Extra {                      // [wave3/level-instances]
+        u64 owner = 0;
+        fmt::OcInstanceData data;
+        std::vector<std::string> groupMaterial;
     };
     struct CellRef { u32 file, cell; };
 
     void rebuild();
     void applyResidency(const std::vector<char>& next);
+    // [wave3/level-instances begin]
+    void clearAll(bool dropExtras);
+    void syncExtraFiles();          // files_ gains/loses the extra tables' entries (always the tail)
+    bool extrasReady();             // every extra table's prototype meshes are read (and requested)
+    void applyExtras();             // push a changed extra set now (non-streamed path)
+    void releaseDroppedExtras();
+    // [wave3/level-instances end]
 
     GameContent* content_ = nullptr;
     rhi::IDevice* device_ = nullptr;
@@ -133,6 +158,11 @@ private:
     u32 rebuilds_ = 0;
     f32 lastRebuildMs_ = 0;
     FoliageLoadResult result_;
+    // [wave3/level-instances begin]
+    std::vector<Extra> extras_;
+    bool extrasDirty_ = false;
+    std::vector<u64> extraRelease_;   // meshes held by removed extra files, released after the rebuild
+    // [wave3/level-instances end]
 };
 
 } // namespace aver::game

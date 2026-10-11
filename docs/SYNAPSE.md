@@ -184,6 +184,9 @@ Only a composition root links both sides. Everything else stays testable in isol
 | `modules/synapse.scene/…/SynapseAgent.hpp` | `CSynapseAgent` + `AgentSystem` |
 | `modules/synapse.scene/…/SynapsePerception.hpp` | `CSynapsePerception` + `PerceptionSystem` |
 | `modules/synapse.scene/…/SynapseBt.hpp` | `CSynapseBehavior` + `BtSystem` + built-ins |
+| `modules/synapse/…/Eqs.hpp`, `SmartObject.hpp`, `StateTree.hpp` (+ `*Asset.hpp`, `TextRecords.hpp`, `Tags.hpp`) | environment queries, smart objects, StateTree: pure cores and `.oceqs` / `.ocso` / `.ocst` |
+| `modules/synapse.scene/…/SynapseEqs.hpp`, `SynapseSmartObject.hpp`, `SynapseManaged.hpp` | `EqsSystem`, `SmartObjectSystem` (members of `SynapseAi`) and the managed-leaf seam |
+| `sandbox/src/StateTreeEditor.*`, `EqsEditor.*`, `AiEditorParts.*` | `.ocst` and `.oceqs` tabs and the parts shared with the BT canvas |
 | `sandbox/src/NavBakeCommand.*` | editor bake command and overlay |
 | `sandbox/src/BtEditor.*` | `.ocbt` editor tab |
 | `tests/synapse/`, `tests/editor/src/BtEditorTest.cpp` | seven suites: `NavTest`, `BtTest`, `NavBakeTest` (pure `Aver.Synapse`, no `Aver.Scene`), `BtEditorTest` (links `Aver.Formats`/`Aver.Core`/`Aver.Platform` only), plus `AgentTest`, `PerceptionTest`, `BtSystemTest` (all link `Aver.Scene`) |
@@ -202,4 +205,5 @@ Components are registered dynamically at each composition root, so no edit to
 - **No runtime nav baking.** A level with no `.ocnav` beside it has no navigation.
 - **Hearing exists now**, as a separate system from sight: noise events with occlusion, a decaying last-known-position memory per listener, and its blackboard seam. See [AI_CROWDS_HEARING_COVER.md](AI_CROWDS_HEARING_COVER.md).
 - **The `.ocbt` editor has a node canvas now**, with decorators, a blackboard schema and live debugging; the old list editor remains registered as the fallback. See [BLACKBOARD_BT.md](BLACKBOARD_BT.md).
+- **Environment queries, smart objects and StateTree exist now.** See [AI_QUERIES_SMARTOBJECTS_STATETREE.md](AI_QUERIES_SMARTOBJECTS_STATETREE.md). Queries run on the baked grid, not a navmesh.
 - **One target, globally.** The resolver answers per tick, not per agent.

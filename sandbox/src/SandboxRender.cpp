@@ -1986,6 +1986,9 @@ void SandboxApp::onRender(Engine& e)  {
         if (colliderMoverMesh_) e.device()->drawLines(colliderMoverMesh_, &cm.m[0][0]);
     }
 #endif
+#if AVER_MODULE_LANDSCAPE && AVER_MODULE_FLUIDS
+    drawWaterBodies(e);   // wave3: rebuilds edited rivers / lakes (any mode), draws the Water tab's handles
+#endif
     // GIZMO AND SCULPT CURSOR are chrome too -- and the gizmo is the loudest of the lot, since
     // it draws on top of geometry by design.
     if (!noEditorChrome_) {

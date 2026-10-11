@@ -15,6 +15,11 @@
 #  include "aver/synapse/SynapseHearing.hpp"
 #  include "aver/synapse/SynapsePerception.hpp"
 #  define AVER_AI_DEBUG_SCENE 1
+#  if AVER_WITH_SYNAPSE_AI
+#    include "aver/synapse/SynapseAi.hpp"          // AI: wave 3 #21 -- queries and smart objects live in the DLL's instance
+#    include "aver/synapse/synapse_ai_abi.h"
+#    define AVER_AI_DEBUG_DLL 1
+#  endif
 #endif
 
 #if AVER_WITH_IMGUI
@@ -31,6 +36,9 @@ u32 AiDebugOptions::mask() const {
     if (steering) m |= synapse::kAiDebugSteering;
     if (btState)  m |= synapse::kAiDebugBtState;
     if (cover)    m |= synapse::kAiDebugCover;
+    if (eqs)          m |= synapse::kAiDebugEqs;
+    if (smartObjects) m |= synapse::kAiDebugSmartObjects;
+    if (stateTree)    m |= synapse::kAiDebugStateTree;
     return m;
 }
 
@@ -206,6 +214,108 @@ void feedBtState(AiDebugSink& sink, scene::World& w) {
     }
 }
 
+// ---- wave 3 #21: state trees, smart objects, environment queries ---------------------------------------
+
+void feedStateTree(AiDebugSink& sink, scene::World& w) {
+    BtSystem& sys = btSystem();
+    const u32 type = sys.componentType();
+    scene::ComponentPool* pool = type ? w.pool(type) : nullptr;
+    if (!pool) return;
+    for (usize i = 0; i < pool->size(); ++i) {
+        const scene::Entity e = pool->entityAt(i);
+        const auto* b = static_cast<const CSynapseBehavior*>(pool->dataAt(i));
+        if (!b || b->treeAssetId == 0 || !w.valid(e)) continue;
+        StateTreeDebugView v;
+        if (!sys.stateTreeDebugView(e, v) || !v.tree || !v.state) continue;
+        const StateTreeAsset& a = v.tree->asset;
+        std::string text = std::filesystem::path(v.tree->path).filename().string() + " | ";
+        text += v.state->active.empty() ? std::string("(no state)") : a.statePath(v.state->active.back());
+        if (v.state->status == StStatus::Succeeded) text += " | done";
+        else if (v.state->status == StStatus::Failed) text += " | failed";
+        else if (v.state->status == StStatus::Stopped) text += " | stopped";
+        // Task statuses of the active chain, when the editor is recording this entity.
+        for (const i32 s : v.state->active) {
+            if (s < 0 || static_cast<usize>(s) >= v.state->traceTasks.size()) continue;
+            const auto& tt = v.state->traceTasks[static_cast<usize>(s)];
+            const StState& st = a.states[static_cast<usize>(s)];
+            for (usize k = 0; k < tt.size() && k < st.tasks.size(); ++k)
+                text += std::string("\n") + (tt[k] == 0 ? "~ " : tt[k] == 1 ? "+ " : tt[k] == 2 ? "x " : "- ") + st.tasks[k].name;
+        }
+        // The last transition, for about two seconds.
+        if (v.state->tickCount - v.state->lastTransitionTick < 120 && v.state->lastTransitionTick != 0) {
+            const std::string from = v.state->lastFrom >= 0 ? a.statePath(v.state->lastFrom) : std::string("(start)");
+            const std::string to = v.state->lastTo >= 0 ? a.statePath(v.state->lastTo) : std::string("(end)");
+            text += "\n" + from + " -> " + to;
+        }
+        sink.text(worldPos(w, e) + Vec3{0.0f, 0.0f, 270.0f}, std::move(text), aiRgba(150, 205, 255), kAiDebugStateTree);
+    }
+}
+
+#if AVER_AI_DEBUG_DLL
+SynapseAi& dllAi() { return *static_cast<SynapseAi*>(aver_syn_ai_instance()); }
+
+void feedSmartObjects(AiDebugSink& sink, scene::World& w) {
+    const SmartObjectRegistry& reg = dllAi().smartObjects().registry();
+    for (const u32 obj : reg.objects()) {
+        const u32 n = reg.slotCount(obj);
+        for (u32 s = 0; s < n; ++s) {
+            SoSlotInfo info;
+            if (!reg.slotInfo(obj, s, info)) continue;
+            u32 col = aiRgba(90, 220, 110);                       // Free
+            switch (info.state) {
+                case SoSlotState::Claimed: col = aiRgba(250, 215, 70); break;
+                case SoSlotState::Occupied: col = aiRgba(235, 80, 80); break;
+                case SoSlotState::Cooldown:
+                case SoSlotState::Disabled: col = aiRgba(140, 140, 150); break;
+                case SoSlotState::Free: break;
+            }
+            const f32 yaw = info.world.yawDeg * (kPi / 180.0f);
+            const Vec3 tip = info.world.pos + Vec3{std::cos(yaw), std::sin(yaw), 0.0f} * 45.0f;
+            sink.arrow(info.world.pos, tip, col, kAiDebugSmartObjects, 14.0f);
+            sink.line(info.world.pos, info.world.entry, aiRgba(col >> 24, (col >> 16) & 0xFF, (col >> 8) & 0xFF, 110), kAiDebugSmartObjects);
+            sink.circle(info.world.entry, 20.0f, col, kAiDebugSmartObjects, 12);
+            std::string label = std::to_string(obj) + "." + std::to_string(s);
+            if (info.def) label += " " + info.def->name;
+            if (info.user != 0 && w.valid(static_cast<scene::Entity>(info.user))) label += std::string(" [") + w.name(static_cast<scene::Entity>(info.user)) + "]";
+            sink.text(info.world.pos + Vec3{0.0f, 0.0f, 30.0f}, std::move(label), col, kAiDebugSmartObjects);
+        }
+    }
+}
+
+void feedEqs(AiDebugSink& sink, scene::World& w) {
+    for (const EqsDebugRun& run : dllAi().eqs().debugRuns()) {
+        if (!run.pinned && run.age > 5.0f) continue;
+        Vec3 from = run.origin;
+        if (run.querier != 0 && w.valid(static_cast<scene::Entity>(run.querier))) from = worldPos(w, static_cast<scene::Entity>(run.querier));
+        if (run.failed) {
+            sink.circle(from, 60.0f, aiRgba(255, 70, 70), kAiDebugEqs, 16);
+            sink.text(from + Vec3{0.0f, 0.0f, 120.0f}, "EQS failed: " + run.reason, aiRgba(255, 120, 120), kAiDebugEqs);
+            continue;
+        }
+        if (run.items.empty()) continue;
+        f32 lo = run.items.front().score, hi = lo;
+        for (const EqsItem& it : run.items) { lo = std::min(lo, it.score); hi = std::max(hi, it.score); }
+        for (usize i = 0; i < run.items.size(); ++i) {
+            const EqsItem& it = run.items[i];
+            const f32 t = hi > lo ? (it.score - lo) / (hi - lo) : 1.0f;   // 1 = best
+            const u32 col = aiRgba(static_cast<u32>(255.0f * (1.0f - t)), static_cast<u32>(255.0f * t), 40);
+            sink.sphere(it.pos, i == 0 ? 28.0f : 12.0f, col, kAiDebugEqs, 10);
+        }
+        const EqsItem& best = run.items.front();
+        sink.line(from, best.pos, aiRgba(80, 230, 110), kAiDebugEqs);
+        char head[64];
+        std::snprintf(head, sizeof head, "%s  score %.2f", run.query.c_str(), static_cast<double>(best.score));
+        std::string text = head;
+        for (usize k = 0; k < run.bestValues.size() && k < run.testNames.size(); ++k) {
+            char row[64];
+            std::snprintf(row, sizeof row, "\n%s=%.2f", run.testNames[k].c_str(), static_cast<double>(run.bestValues[k]));
+            text += row;
+        }
+        sink.text(best.pos + Vec3{0.0f, 0.0f, 70.0f}, std::move(text), aiRgba(190, 255, 200), kAiDebugEqs);
+    }
+}
+#endif  // AVER_AI_DEBUG_DLL
+
 } // namespace
 #endif  // AVER_AI_DEBUG_SCENE
 
@@ -220,6 +330,11 @@ void aiDebugCollect(const AiDebugOptions& options, synapse::AiDebugSink& sink) {
     if (options.hearing) feedHearing(sink, w);
     if (options.steering) feedSteering(sink, w);
     if (options.btState) feedBtState(sink, w);
+    if (options.stateTree) feedStateTree(sink, w);   // AI: wave 3 #21
+#if AVER_AI_DEBUG_DLL
+    if (options.smartObjects) feedSmartObjects(sink, w);
+    if (options.eqs) feedEqs(sink, w);
+#endif
 #endif
     sink.runProviders();
 }

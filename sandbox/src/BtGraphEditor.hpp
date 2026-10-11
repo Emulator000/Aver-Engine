@@ -12,6 +12,7 @@
 //
 // Everything that is not drawing is plain C++ (layout, edit bookkeeping, undo, save/load), so the
 // headless test compiles this file with AVER_WITH_IMGUI undefined, like BtEditorTest.
+#include "AiEditorParts.hpp"   // AI: wave 3 #21 -- layout, schema panel, picker shared with the state-tree editor
 #include "AssetEditor.hpp"
 #include "EditorWidgets.hpp"
 #include "SnapshotUndo.hpp"
@@ -27,9 +28,7 @@ namespace aver::editor {
 
 // ---- layout (pure) ------------------------------------------------------------------------------
 
-struct BtNodeBox {
-    f32 x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;   // top-left, graph units
-};
+using BtNodeBox = TreeBox;   // top-left, graph units
 
 struct BtLayoutParams {
     f32 nodeW = 180.0f;
@@ -58,7 +57,7 @@ bool btGraphWriteStarter(const std::string& path, std::string* why = nullptr);
 
 // ---- the tab ------------------------------------------------------------------------------------
 
-class BtGraphEditor final : public AssetEditor {
+class BtGraphEditor final : public AssetEditor, public SchemaEditHost {
 public:
     explicit BtGraphEditor(std::string path);
     ~BtGraphEditor() override;
@@ -119,14 +118,11 @@ private:
     SplitPane split_;
 
     // canvas view
-    f32 panX_ = 24.0f, panY_ = 24.0f, zoom_ = 1.0f;
-    bool panning_ = false;
-    std::string newKeyName_;
-    int newKeyType_ = 0;
+    CanvasView view_;
+    SchemaPanelState schemaState_;
     // live debugging
     u32 debugEntity_ = 0;
-    std::unordered_map<std::string, u64> lastStamp_;   // key -> stamp seen last frame
-    std::unordered_map<std::string, f32> flash_;       // key -> seconds left to highlight
+    LiveBoard liveBoard_;   // key stamps seen last frame and the flash left on each
 
 #if AVER_WITH_IMGUI
     void drawToolbar();

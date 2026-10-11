@@ -8,7 +8,8 @@
 # Named apart from the managed assembly (Aver.Synapse), like Aver.UI.Abi / Aver.UI, so the default
 # DllImport probe finds the right file and no resolver is needed.
 add_library(Aver.Synapse.Abi SHARED
-  src/SynapseAiAbi.cpp)
+  src/SynapseAiAbi.cpp
+  src/SynapseQueryAbi.cpp)
 
 target_include_directories(Aver.Synapse.Abi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Synapse.Abi PUBLIC cxx_std_20)

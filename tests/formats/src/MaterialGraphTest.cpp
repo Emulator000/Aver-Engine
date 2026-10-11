@@ -670,6 +670,41 @@ static fmt::OcGraphData pannerGraph(bool wireTime = false, const char* speedDefa
     return g;
 }
 
+// wave 3 moving water: VertexFlow's two outputs into Roughness / a Length bridge, and FlowNormal into Normal, with each
+// of its three inputs wired or left to its default (position -> the pixel's world XY, flow -> VertexFlow.velocity).
+static fmt::OcGraphData flowGraph(bool wirePosition, bool wireFlow) {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Flow";
+    fmt::OcGraphNode vf = node("vf", "VertexFlow");
+    addPin(vf, "velocity", "float2", true);
+    addPin(vf, "speed", "float", true);
+    g.nodes.push_back(vf);
+    fmt::OcGraphNode fn = node("fn", "FlowNormal");
+    addPin(fn, "position", "float2", false);
+    addPin(fn, "flow", "float2", false);
+    addPin(fn, "cycle", "float", false, "1.5");
+    addPin(fn, "value", "float3", true);
+    g.nodes.push_back(fn);
+    fmt::OcGraphNode wp = node("wp", "WorldPosition");
+    addPin(wp, "result", "float3", true);
+    g.nodes.push_back(wp);
+    fmt::OcGraphNode sw = node("sw", "Swizzle");
+    addPin(sw, "x", "float3", false);
+    addPin(sw, "result", "float2", true);
+    attr(sw, "mask=xy");
+    g.nodes.push_back(sw);
+    g.nodes.push_back(materialOutput("out"));
+    if (wirePosition) {
+        link(g, "wp", "result", "sw", "x");
+        link(g, "sw", "result", "fn", "position");
+    }
+    if (wireFlow) link(g, "vf", "velocity", "fn", "flow");
+    link(g, "fn", "value", "out", "Normal");
+    link(g, "vf", "speed", "out", "Roughness");
+    return g;
+}
+
 // Compiles ONE node case: to compileMaterialGraph, then (dxc permitting) to dxc, with `label` --
 // the node TYPE, not the graph's node id -- in front of every check this makes, so a failure names
 // what it was that failed to compile without the reader having to open the graph literal above to
@@ -720,6 +755,8 @@ static const NodeCase kNewNodeCases[] = {
     {"Fresnel", []() -> fmt::OcGraphData { return fresnelGraph(); }},
     {"If", []() -> fmt::OcGraphData { return ifGraph(); }},
     {"Time", []() -> fmt::OcGraphData { return timeGraph(); }},
+    {"VertexFlow + FlowNormal (defaults)", []() -> fmt::OcGraphData { return flowGraph(false, false); }},
+    {"VertexFlow + FlowNormal (wired)", []() -> fmt::OcGraphData { return flowGraph(true, true); }},
 };
 
 static void testEveryNewNodeTypeCompiles(Dxc& dxc) {
@@ -801,6 +838,24 @@ static void testTimeRules() {
           "`raw` reads gTime.y, the unwrapped seconds: " + r.hlsl);
     check(r.hlsl.find("= gTime.z;") != std::string::npos,
           "`delta` reads gTime.z, the last frame's seconds: " + r.hlsl);
+}
+
+static void testFlowRules() {
+    AVER_INFO("=== VertexFlow / FlowNormal: raw uv0, and sensible defaults for the two unwired inputs ===");
+    {
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(flowGraph(false, false));
+        check(r.ok, "a FlowNormal with nothing wired compiles: " + r.error);
+        check(r.hlsl.find("length(v.uv)") != std::string::npos,
+              "VertexFlow.speed is the length of the RAW mesh uv, not averSurfaceUV's projection: " + r.hlsl);
+        check(r.hlsl.find("averFlowNormal(v.wpos.xy, v.uv, 1.5)") != std::string::npos,
+              "an unwired position is the pixel's world XY and an unwired flow is VertexFlow.velocity, cycle 1.5 s: " + r.hlsl);
+    }
+    {
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(flowGraph(true, true));
+        check(r.ok, "a FlowNormal with both inputs wired compiles: " + r.error);
+        check(r.hlsl.find("averFlowNormal(") != std::string::npos && r.hlsl.find("averFlowNormal(v.wpos.xy") == std::string::npos,
+              "and the wired position replaces the default: " + r.hlsl);
+    }
 }
 
 static void testPannerRules() {
@@ -1548,6 +1603,7 @@ int main() {
     testEveryNewNodeTypeCompiles(dxc);
     testSwizzleRules();
     testTimeRules();
+    testFlowRules();
     testPannerRules();
     testSampleTextureBadSlotFails();
     testSampleTextureUnlinkedUvUsesSurfaceUv();

@@ -11,6 +11,7 @@
 #include "aver/scene/DecalGather.hpp"
 #include "aver/scene/World.hpp"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -75,7 +76,9 @@ inline std::vector<scene::Entity> spawnDecalsFromRecords(scene::World& world, co
 }
 
 // Level save: every authored CDecal entity, as records. Pooled (gameplay) decals are skipped.
-inline std::vector<fmt::OcDecal> recordsFromDecalEntities(scene::World& world, const LightAssetPaths& assets) {
+// [wave3/level-instances] `skip` leaves out decals the level does not own (the members of a level instance).
+inline std::vector<fmt::OcDecal> recordsFromDecalEntities(scene::World& world, const LightAssetPaths& assets,
+                                                          const std::function<bool(scene::Entity)>& skip = {}) {
     std::vector<fmt::OcDecal> out;
     scene::ComponentPool* pool = world.pool(scene::kComponentDecal);
     if (!pool) return out;
@@ -84,6 +87,7 @@ inline std::vector<fmt::OcDecal> recordsFromDecalEntities(scene::World& world, c
         if (!world.valid(e) || world.destroyPending(e)) continue;
         const auto* c = static_cast<const scene::CDecal*>(pool->dataAt(i));
         if (c->flags & scene::kDecalPooled) continue;
+        if (skip && skip(e)) continue;
         out.push_back(recordFromDecal(*c, transformFromMatrix(world.worldMatrix(e)), world.name(e), assets));
     }
     return out;

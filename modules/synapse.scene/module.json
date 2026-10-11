@@ -11,5 +11,5 @@
   "dependsOn": ["Aver.Core", "Aver.Scene", "Aver.Synapse"],
   "optionalDependsOn": ["Aver.Physics"],
   "derivedFrom": ["Aver.Scene"],
-  "consequence": "No AI agents, perception or behaviour trees in a scene."
+  "consequence": "No AI agents, perception, behaviour trees, state trees, environment queries or smart objects in a scene."
 }

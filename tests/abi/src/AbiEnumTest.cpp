@@ -642,6 +642,8 @@ static const MemberWaiver kMemberWaivers[] = {
     {"framework key codes", "lshift", "leftshift"},
     {"framework key codes", "lctrl",  "leftctrl"},
     {"framework key codes", "lalt",   "leftalt"},
+    // wave 3 #21: the C constant is the short BT, the C# member spells the name out.
+    {"framework brain kinds", "bt", "behaviourtree"},
 };
 
 // SENTINELS ARE SKIPPED BY NAME, one per group at most. AVER_FW_TICK_COUNT and the two _COUNT
@@ -745,6 +747,28 @@ static const Group kGroups[] = {
     // has that copy now, so this row is what pins the third corner of the triangle.
     {"audio buses",           "modules/audio.abi/include/aver/audio/audio_abi.h",           "AVER_AUDIO_BUS_",
      "scripting/csharp/Aver.Framework/Audio.cs", "Bus",         ""},
+    // wave 3: what kind of water a Water.Sample answered with (framework_terrain_abi.h).
+    {"water kinds",           "modules/framework/include/aver/framework/framework_terrain_abi.h", "AVER_FW_WATER_KIND_",
+     "scripting/csharp/Aver.Framework/Water.cs", "WaterKind",   ""},
+    // wave 3 #21: environment queries, smart objects, the managed seam and the brain relay.
+    {"query run status",      "modules/synapse.abi/include/aver/synapse/synapse_query_abi.h", "AVER_SYN_EQS_",
+     "scripting/csharp/Aver.Synapse/Eqs.cs",     "EqsStatus",   ""},
+    // AVER_SYN_SO_ is the prefix of the other three smart-object groups too: they are excluded by name.
+    {"smart-object slot states", "modules/synapse.abi/include/aver/synapse/synapse_query_abi.h", "AVER_SYN_SO_",
+     "scripting/csharp/Aver.Synapse/SmartObjects.cs", "SlotState", "", "", "", "rel,refuse,find"},
+    {"smart-object release reasons", "modules/synapse.abi/include/aver/synapse/synapse_query_abi.h", "AVER_SYN_SO_REL_",
+     "scripting/csharp/Aver.Synapse/SmartObjects.cs", "ReleaseReason", ""},
+    {"smart-object claim refusals", "modules/synapse.abi/include/aver/synapse/synapse_query_abi.h", "AVER_SYN_SO_REFUSE_",
+     "scripting/csharp/Aver.Synapse/SmartObjects.cs", "ClaimRefusal", ""},
+    {"smart-object find flags", "modules/synapse.abi/include/aver/synapse/synapse_query_abi.h", "AVER_SYN_SO_FIND_",
+     "scripting/csharp/Aver.Synapse/SmartObjects.cs", "FindFlags", ""},
+    {"managed call kinds",    "modules/synapse.abi/include/aver/synapse/synapse_query_abi.h", "AVER_SYN_MANAGED_",
+     "scripting/csharp/Aver.Synapse/ManagedAi.cs", "ManagedKind", ""},
+    // AVER_FW_BRAIN_ holds two sets and the ABI version; each row drops the others by name.
+    {"framework brain kinds", "modules/framework/include/aver/framework/framework_brain_abi.h", "AVER_FW_BRAIN_",
+     "scripting/csharp/Aver.Framework/Ai/Brain.cs", "BrainKind", "", "", "", "idle,running,succeeded,failed,abiversion"},
+    {"framework brain status", "modules/framework/include/aver/framework/framework_brain_abi.h", "AVER_FW_BRAIN_",
+     "scripting/csharp/Aver.Framework/Ai/Brain.cs", "BrainStatus", "", "", "", "none,bt,statetree,abiversion"},
 };
 
 int main() {
@@ -764,9 +788,14 @@ int main() {
         std::map<std::string, long long> c =
             *g.cAnchor ? cEnumValues(hdr, g.cAnchor, g.prefix) : cDefines(hdr, g.prefix);
         if (*g.cExclude) {
-            const std::string ex = normalise(g.cExclude);
-            for (auto it = c.begin(); it != c.end();)
-                it = it->first.rfind(ex, 0) == 0 ? c.erase(it) : std::next(it);
+            // A comma-separated list: the smart-object state group shares its prefix with three other groups.
+            std::istringstream exs(g.cExclude);
+            std::string exTok;
+            while (std::getline(exs, exTok, ',')) {
+                const std::string ex = normalise(exTok);
+                for (auto it = c.begin(); it != c.end();)
+                    it = it->first.rfind(ex, 0) == 0 ? c.erase(it) : std::next(it);
+            }
         }
         std::map<std::string, long long> m = csMembers(cs, g.csType);
         if (*g.csStrip) {

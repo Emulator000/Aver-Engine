@@ -15,3 +15,12 @@ add_executable(CoatEnergyTest src/CoatEnergyTest.cpp)
 target_link_libraries(CoatEnergyTest PRIVATE Aver.Core)
 target_compile_definitions(CoatEnergyTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(CoatEnergyTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# TerrainLayoutTest -- the layered terrain material's CPU/GPU contract (wave 3, landscape layers): the
+# HLSL defines against TerrainLayers.hpp, and the parameter texels. Reads the shader like CoatEnergyTest.
+if(TARGET Aver.Render.PBR.Materials)
+  add_executable(TerrainLayoutTest src/TerrainLayoutTest.cpp)
+  target_link_libraries(TerrainLayoutTest PRIVATE Aver.Render.PBR.Materials Aver.Core)
+  target_compile_definitions(TerrainLayoutTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+  set_target_properties(TerrainLayoutTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

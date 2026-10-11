@@ -1,8 +1,14 @@
 // Buoyancy.cpp -- the whole of the physics is one call to Jolt's own ApplyBuoyancyImpulse; the rest
 // of this file is bookkeeping. See Buoyancy.hpp for the reasoning behind the shape of this class.
 #include "Buoyancy.hpp"
+#include "Convert.hpp"
 
 #include <Jolt/Physics/Body/BodyType.h>
+#include <Jolt/Physics/Body/MotionType.h>
+#include <Jolt/Physics/Collision/Shape/Shape.h>
+
+#include <algorithm>
+#include <cmath>
 
 namespace aver::phys::water {
 
@@ -22,7 +28,65 @@ bool buoyant(const JPH::BodyInterface& bi, const JPH::BodyID& id) {
     return bi.GetBodyType(id) == JPH::EBodyType::RigidBody;
 }
 
+// ---- wave3 water sampler ----
+// One rigid dynamic body against the host's sampler. 1 = `out` is the water at the body, 0 = no water
+// here (no buoyancy), -1 = no opinion. The centre of mass is sampled; a body wider than 300 cm also
+// samples the four corners of its bounds and averages what answers, so a long hull or a raft takes the
+// slope of the surface under it rather than the height under its middle.
+int sampleBody(JPH::BodyInterface& bi, const JPH::BodyID& id, aver_phys_water_sampler_fn fn, void* user,
+               aver::Vec3& surfacePoint, aver::Vec3& normal, aver::Vec3& current, float& buoyancy,
+               float& linDrag, float& angDrag) {
+    using namespace aver;
+    const Vec3 c = physics::fromJolt(JPH::Vec3(bi.GetCenterOfMassPosition(id)));
+    AverPhysWaterSample s{};
+    const int32_t r = fn(c.x, c.y, c.z, &s, user);
+    if (r != 1) return r == 0 ? 0 : -1;
+    f32 z = s.surfaceZCm;
+    Vec3 n{s.normal[0], s.normal[1], s.normal[2]};
+    Vec3 cur{s.currentCmS[0], s.currentCmS[1], s.currentCmS[2]};
+    buoyancy = s.buoyancy;
+    linDrag = s.linearDrag;
+    angDrag = s.angularDrag;
+
+    const JPH::AABox box = bi.GetTransformedShape(id).GetWorldSpaceBounds();
+    const JPH::Vec3 ext = box.GetExtent();
+    // Jolt (x right, z -forward) to engine (x forward, y right): engine X extent is Jolt Z, engine Y is Jolt X.
+    const f32 hx = ext.GetZ() * physics::kCmPerMetre, hy = ext.GetX() * physics::kCmPerMetre;
+    if (std::max(hx, hy) * 2.0f > 300.0f) {
+        int count = 1;
+        const f32 off[4][2] = {{hx, hy}, {hx, -hy}, {-hx, hy}, {-hx, -hy}};
+        for (const auto& o : off) {
+            AverPhysWaterSample cs{};
+            if (fn(c.x + o[0], c.y + o[1], c.z, &cs, user) != 1) continue;
+            z += cs.surfaceZCm;
+            n.x += cs.normal[0]; n.y += cs.normal[1]; n.z += cs.normal[2];
+            cur.x += cs.currentCmS[0]; cur.y += cs.currentCmS[1]; cur.z += cs.currentCmS[2];
+            ++count;
+        }
+        const f32 inv = 1.0f / static_cast<f32>(count);
+        z *= inv;
+        cur.x *= inv; cur.y *= inv; cur.z *= inv;
+        const f32 len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len > 1e-6f) { n.x /= len; n.y /= len; n.z /= len; } else { n = Vec3{0.0f, 0.0f, 1.0f}; }
+    }
+    surfacePoint = Vec3{c.x, c.y, z};
+    normal = n;
+    current = cur;
+    return 1;
+}
+// ---- end wave3 water sampler ----
+
 } // namespace
+
+WaterSamplerSlot& waterSampler() {
+    static WaterSamplerSlot slot;
+    return slot;
+}
+
+SurfaceSamplerSlot& surfaceSampler() {
+    static SurfaceSamplerSlot slot;
+    return slot;
+}
 
 void WaterVolumeTable::set(int32_t bodyHandle, const WaterVolume& volume) {
     volumes_[bodyHandle] = volume;
@@ -92,10 +156,32 @@ int32_t WaterVolumeTable::evaluate(
     // table this file has no other reason to keep. Buoyancy <= 0 is the documented way to disable the
     // plane without forgetting its height/normal/drag (see aver_phys_set_water_plane), checked once
     // here instead of by every caller of setPlane().
-    if (hasPlane_ && plane_.buoyancy > 0.0f && forEachBody) {
+    //
+    // wave3: a host sampler (aver_phys_set_water_sampler) answers per body first -- the surface, its
+    // slope and the current at the body -- and the plane is the fallback for a body it has no opinion on.
+    aver_phys_water_sampler_fn sampler = waterSampler().fn.load();
+    void* samplerUser = waterSampler().user.load();
+    const bool planeOn = hasPlane_ && plane_.buoyancy > 0.0f;
+    if ((planeOn || sampler) && forEachBody) {
         forEachBody([&](int32_t handle, const JPH::BodyID& id) {
             if (volumes_.count(handle) != 0) return;   // this body already has its own water
             if (!buoyant(bi, id)) return;
+            if (sampler) {
+                if (bi.GetMotionType(id) != JPH::EMotionType::Dynamic) return;
+                aver::Vec3 point, normal, current;
+                float buoy = 1.0f, lin = 0.5f, ang = 0.01f;
+                const int r = sampleBody(bi, id, sampler, samplerUser, point, normal, current, buoy, lin, ang);
+                if (r == 0) return;
+                if (r == 1) {
+                    if (buoy <= 0.0f) return;
+                    if (bi.ApplyBuoyancyImpulse(id, aver::physics::toJolt(point), aver::physics::toJoltUnit(normal), buoy,
+                                                 lin, ang, aver::physics::toJoltDir(current), gravity, dt))
+                        ++applied;
+                    return;
+                }
+                // -1: no opinion, fall through to the plane
+            }
+            if (!planeOn) return;
             if (bi.ApplyBuoyancyImpulse(id, plane_.surfacePosition, plane_.surfaceNormal,
                                          plane_.buoyancy, plane_.linearDrag, plane_.angularDrag,
                                          plane_.fluidVelocity, gravity, dt))

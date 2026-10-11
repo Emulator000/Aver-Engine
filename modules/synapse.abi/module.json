@@ -10,5 +10,5 @@
   "default": true,
   "dependsOn": ["Aver.Core", "Aver.Scene", "Aver.Synapse", "Aver.Synapse.Scene"],
   "derivedFrom": ["Aver.Scene"],
-  "consequence": "Scripts cannot reach steering, crowds, hearing, cover or squads."
+  "consequence": "Scripts cannot reach steering, crowds, hearing, cover, squads, queries or smart objects."
 }

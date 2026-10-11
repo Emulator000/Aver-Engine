@@ -102,7 +102,9 @@ constexpr usize kMaxFoliageParts = 16;
 // incremented by the caller for a part this drops.
 void buildFoliageParts(GameContent& content, u64 objectId, rhi::MeshHandle wholeMesh,
                         std::vector<voxi::VoxiRenderer::FoliagePart>& outParts, u32& droppedParts,
-                        const std::string& assetName) {
+                        const std::string& assetName, const std::string& materialOverride = std::string()) {
+    // [wave3/level-instances] An extra table group may name a material that replaces every part's own.
+    const i32 overrideToken = materialOverride.empty() ? 0 : aver_scene_material(0, materialOverride.c_str());
     if (const std::vector<GameContent::MeshPart>* parts = content.partsFor(objectId);
         parts && !parts->empty()) {
         if (parts->size() > kMaxFoliageParts)
@@ -113,7 +115,7 @@ void buildFoliageParts(GameContent& content, u64 objectId, rhi::MeshHandle whole
             if (!mp.mesh) continue;   // a slot that named nothing carries no geometry of its own
             voxi::VoxiRenderer::FoliagePart fp;
             fp.mesh = mp.mesh;
-            if (resolveFoliagePartLook(content, mp.material, fp)) outParts.push_back(fp);
+            if (resolveFoliagePartLook(content, overrideToken ? overrideToken : mp.material, fp)) outParts.push_back(fp);
             else ++droppedParts;
         }
     } else {
@@ -122,7 +124,7 @@ void buildFoliageParts(GameContent& content, u64 objectId, rhi::MeshHandle whole
         // unoverridden placement (see GameContent.hpp's own comment on that function).
         voxi::VoxiRenderer::FoliagePart fp;
         fp.mesh = wholeMesh;
-        const i32 token = content.meshDefaultMaterial(objectId);
+        const i32 token = overrideToken ? overrideToken : content.meshDefaultMaterial(objectId);
         if (resolveFoliagePartLook(content, token, fp)) outParts.push_back(fp);
         else ++droppedParts;
     }
@@ -134,14 +136,14 @@ bool LevelFoliage::load(const fmt::OcWorldData& w, GameContent& content, rhi::ID
                         voxi::VoxiRenderer* voxi, const std::string& contentDir,
                         const std::function<void(f32 fraction)>& progress, const Vec3& viewerCm,
                         const std::vector<std::string>* tablePaths) {
-    clear();
+    clearAll(false);   // [wave3/level-instances] extra tables outlive a load: a level instance sets them from inside the level's own load
     result_ = {};
     content_ = &content;
     device_ = device;
     voxi_ = voxi;
     if (!voxi) return true;
 
-    if (w.foliageFiles.empty()) {
+    if (w.foliageFiles.empty() && extras_.empty()) {
         voxi->clearFoliage();
         loaded_ = true;
         return true;
@@ -172,6 +174,9 @@ bool LevelFoliage::load(const fmt::OcWorldData& w, GameContent& content, rhi::ID
         if (progress) progress(static_cast<f32>(fi + 1) / static_cast<f32>(w.foliageFiles.size()));
     }
 
+    syncExtraFiles();   // [wave3/level-instances]
+    extrasDirty_ = false;
+
     loadCm_ = w.stream.loadCm;
     evictCm_ = std::max(w.stream.evictCm, w.stream.loadCm);
     streamed_ = w.stream.enabled && device && !cells_.empty();
@@ -195,10 +200,21 @@ bool LevelFoliage::load(const fmt::OcWorldData& w, GameContent& content, rhi::ID
 }
 
 void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
-    if (!loaded_ || !streamed_) return;
+    if (!loaded_) return;
+    // [wave3/level-instances begin] A changed extra-table set on a level that does not stream cells.
+    if (!streamed_) {
+        if (!extrasDirty_ || !voxi_) return;
+        accum_ += dt;
+        if (accum_ < kCheckSeconds) return;
+        accum_ = 0;
+        if (extrasReady()) applyExtras();
+        return;
+    }
+    // [wave3/level-instances end]
     accum_ += dt;
     if (accum_ < kCheckSeconds) return;
     accum_ = 0;
+    if (extrasDirty_) syncExtraFiles();   // [wave3/level-instances] the tail files follow the table set
 
     std::vector<char> next(cells_.size(), 0), soon(cells_.size(), 0);
     bool changed = false;
@@ -211,6 +227,7 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
         soon[i] = d <= loadCm_ * kPrefetchFactor ? 1 : 0;
         if (next[i] != resident_[i]) changed = true;
     }
+    if (extrasDirty_) changed = true;   // [wave3/level-instances]
     // Prototype meshes of cells about to load are read on GameContent's workers ahead of time, nearest
     // first; a residency change waits until every mesh it adds is read, so nothing loads on this thread.
     bool ready = true;
@@ -226,6 +243,7 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
             if (next[i] && !content_->meshReady(f.objectIds[g])) ready = false;
         }
     }
+    if (extrasDirty_ && !extrasReady()) ready = false;   // [wave3/level-instances]
     if (!changed && rebuilds_ > 0) return;
     if (!ready && rebuilds_ > 0) { accum_ = kCheckSeconds; return; }   // look again next frame
     // The meshes a change adds go to the GPU within kAcquireMs a frame (one frame for all was 45-75 ms);
@@ -279,6 +297,8 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
         if (!built) { accum_ = kCheckSeconds; return; }
     }
     applyResidency(next);
+    extrasDirty_ = false;   // [wave3/level-instances]
+    releaseDroppedExtras();
 }
 
 void LevelFoliage::applyResidency(const std::vector<char>& next) {
@@ -339,7 +359,8 @@ void LevelFoliage::rebuild() {
                 slot = -2;
             } else {
                 voxi::VoxiRenderer::FoliagePrototype proto;
-                buildFoliageParts(*content_, f.objectIds[group], wholeMesh, proto.parts, droppedParts, asset);
+                buildFoliageParts(*content_, f.objectIds[group], wholeMesh, proto.parts, droppedParts, asset,
+                                  group < f.groupMaterial.size() ? f.groupMaterial[group] : std::string());
                 slot = static_cast<i32>(prototypes.size());
                 prototypes.push_back(std::move(proto));
             }
@@ -392,7 +413,9 @@ void LevelFoliage::rebuild() {
               result_.instances, result_.droppedParts, lastRebuildMs_);
 }
 
-void LevelFoliage::clear() {
+void LevelFoliage::clear() { clearAll(true); }
+
+void LevelFoliage::clearAll(bool dropExtras) {
     if (device_ && content_)
         for (File& f : files_)
             for (usize g = 0; g < f.held.size(); ++g)
@@ -407,7 +430,85 @@ void LevelFoliage::clear() {
     accum_ = 0;
     rebuilds_ = 0;
     lastRebuildMs_ = 0;
+    // [wave3/level-instances begin]
+    if (dropExtras) { extras_.clear(); extrasDirty_ = false; }
+    extraRelease_.clear();
+    // [wave3/level-instances end]
 }
+
+// [wave3/level-instances begin]
+void LevelFoliage::setExtraTable(u64 owner, fmt::OcInstanceData rows, std::vector<std::string> groupMaterial) {
+    for (Extra& e : extras_)
+        if (e.owner == owner) {
+            e.data = std::move(rows);
+            e.groupMaterial = std::move(groupMaterial);
+            extrasDirty_ = true;
+            return;
+        }
+    Extra e;
+    e.owner = owner;
+    e.data = std::move(rows);
+    e.groupMaterial = std::move(groupMaterial);
+    extras_.push_back(std::move(e));
+    extrasDirty_ = true;
+}
+
+void LevelFoliage::clearExtraTable(u64 owner) {
+    const auto it = std::remove_if(extras_.begin(), extras_.end(), [owner](const Extra& e) { return e.owner == owner; });
+    if (it == extras_.end()) return;
+    extras_.erase(it, extras_.end());
+    extrasDirty_ = true;
+}
+
+void LevelFoliage::syncExtraFiles() {
+    // Extra files are always the tail of files_, so the cell references into the level's own files stay valid.
+    while (!files_.empty() && files_.back().extra) {
+        File& f = files_.back();
+        for (usize g = 0; g < f.held.size(); ++g)
+            if (f.held[g]) extraRelease_.push_back(f.objectIds[g]);
+        files_.pop_back();
+    }
+    for (const Extra& e : extras_) {
+        File f;
+        f.extra = true;
+        f.data = e.data;
+        f.groupMaterial = e.groupMaterial;
+        f.path = "(level instance table)";
+        const usize ng = f.data.groups.size();
+        f.objectIds.resize(ng);
+        for (usize g = 0; g < ng; ++g) f.objectIds[g] = fnv1a64(std::string_view(f.data.groups[g].asset));
+        f.use.assign(ng, 0);
+        f.held.assign(ng, 0);
+        f.warned.assign(ng, 0);
+        files_.push_back(std::move(f));
+    }
+}
+
+bool LevelFoliage::extrasReady() {
+    if (!content_ || !device_) return true;
+    bool ready = true;
+    for (const Extra& e : extras_)
+        for (const fmt::OcInstanceGroup& g : e.data.groups) {
+            const u64 id = fnv1a64(std::string_view(g.asset));
+            content_->prefetchMesh(id, 0.0f);
+            if (!content_->meshReady(id)) ready = false;
+        }
+    return ready;
+}
+
+void LevelFoliage::releaseDroppedExtras() {
+    if (device_ && content_) for (const u64 id : extraRelease_) content_->releaseMesh(*device_, id);
+    extraRelease_.clear();
+}
+
+void LevelFoliage::applyExtras() {
+    syncExtraFiles();
+    extrasDirty_ = false;
+    if (device_) applyResidency(std::vector<char>(cells_.size(), 1));   // acquires the new tables' meshes, then rebuilds
+    else rebuild();
+    releaseDroppedExtras();
+}
+// [wave3/level-instances end]
 
 FoliageLoadResult loadLevelFoliage(const fmt::OcWorldData& w, GameContent& content,
                                     voxi::VoxiRenderer* voxi, const std::string& contentDir,

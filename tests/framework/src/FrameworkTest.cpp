@@ -6,6 +6,7 @@
 #include "aver/core/Math.hpp"
 #include "aver/framework/framework_abi.h"
 #include "aver/framework/framework_hooks.h"
+#include "aver/framework/framework_terrain_abi.h"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/scene_abi.h"
@@ -1634,6 +1635,88 @@ static void testInputSchemeTriggers() {
 }
 
 // Runs every framework test. Returns the failure count as the exit code.
+// ---- wave 3: terrain and water queries (framework_terrain_abi.h) ----
+struct FakeTerrain { int calls = 0; };
+static int32_t fakeTerrainSample(float x, float y, float* z, float* n, int32_t* dom, float* w, void* user) {
+    ++static_cast<FakeTerrain*>(user)->calls;
+    if (x < 0.0f) return 0;
+    if (z) *z = x + y;
+    if (n) { n[0] = 0.0f; n[1] = 0.6f; n[2] = 0.8f; }
+    if (dom) *dom = 2;
+    if (w) for (int i = 0; i < AVER_FW_TERRAIN_MAX_LAYERS; ++i) w[i] = i == 2 ? 1.0f : 0.0f;
+    return 1;
+}
+static int32_t fakeLayerCount(void*) { return 3; }
+static int32_t fakeLayer(int32_t i, char* name, int32_t nameCap, char* surface, int32_t surfaceCap, float* fr, float* re, void*) {
+    if (i < 0 || i > 2) return 0;
+    static const char* names[3] = {"Grass", "Rock", "SandyBeachWithAVeryLongName"};
+    static const char* surfaces[3] = {"Turf", "Stone", "Sand"};
+    if (name && nameCap > 0) { std::strncpy(name, names[i], static_cast<size_t>(nameCap) - 1); name[nameCap - 1] = 0; }
+    if (surface && surfaceCap > 0) { std::strncpy(surface, surfaces[i], static_cast<size_t>(surfaceCap) - 1); surface[surfaceCap - 1] = 0; }
+    if (fr) *fr = 0.25f * static_cast<float>(i + 1);
+    if (re) *re = 0.1f;
+    return 1;
+}
+static int32_t fakeWater(float x, float, float, float* surfaceZ, float* n, float* cur, float* depth, int32_t* kind, void*) {
+    if (x > 100.0f) return 0;
+    if (surfaceZ) *surfaceZ = 150.0f;
+    if (n) { n[0] = 0; n[1] = 0; n[2] = 1; }
+    if (cur) { cur[0] = 30.0f; cur[1] = 0; cur[2] = 0; }
+    if (depth) *depth = 75.0f;
+    if (kind) *kind = AVER_FW_WATER_KIND_RIVER;
+    return 1;
+}
+
+static void testTerrainAbi() {
+    AVER_INFO("=== terrain and water queries ===");
+    check(aver_fw_terrain_abi_version() == AVER_FW_TERRAIN_ABI_VERSION, "terrain ABI version matches the header");
+
+    // No provider: every call answers 0 and leaves its outputs untouched.
+    aver_fw_set_terrain_provider(nullptr, nullptr, nullptr, nullptr);
+    aver_fw_set_water_provider(nullptr, nullptr);
+    float z = -7.0f, n[3] = {-1, -1, -1}, w[8];
+    for (float& f : w) f = -1.0f;
+    int32_t dom = -9;
+    check(aver_fw_terrain_sample(1, 2, &z, n, &dom, w) == 0 && z == -7.0f && n[0] == -1.0f && dom == -9 && w[0] == -1.0f,
+          "no terrain provider: sample answers 0 and writes nothing");
+    check(aver_fw_terrain_layer_count() == 0, "no provider: zero layers");
+    char nameBuf[16] = "untouched";
+    float fr = -3.0f, re = -3.0f;
+    check(aver_fw_terrain_layer(0, nameBuf, 16, nullptr, 0, &fr, &re) == 0 && std::string(nameBuf) == "untouched" && fr == -3.0f,
+          "no provider: layer answers 0 and writes nothing");
+    float sz = -5.0f, wn[3] = {-1, -1, -1}, wc[3] = {-1, -1, -1}, wd = -1.0f;
+    int32_t kind = -4;
+    check(aver_fw_water_sample(0, 0, 0, &sz, wn, wc, &wd, &kind) == 0 && sz == -5.0f && kind == -4 && wd == -1.0f,
+          "no water provider: sample answers 0 and writes nothing");
+
+    // A fake provider relays exactly.
+    FakeTerrain ft;
+    check(aver_fw_set_terrain_provider(&fakeTerrainSample, &fakeLayerCount, &fakeLayer, &ft) == 1, "provider installed");
+    check(aver_fw_terrain_sample(10, 5, &z, n, &dom, w) == 1 && approx(z, 15.0f) && approx(n[2], 0.8f) && dom == 2 && w[2] == 1.0f && w[0] == 0.0f,
+          "sample relays z, normal, dominant layer and weights");
+    check(ft.calls == 1, "the provider saw exactly one call, with its user pointer");
+    check(aver_fw_terrain_sample(-1, 0, &z, nullptr, nullptr, nullptr) == 0, "off the section answers 0");
+    check(aver_fw_terrain_sample(1, 1, nullptr, nullptr, nullptr, nullptr) == 1, "every output pointer may be null");
+    check(aver_fw_terrain_layer_count() == 3, "layer count relays");
+    char surf[16];
+    check(aver_fw_terrain_layer(1, nameBuf, 16, surf, 16, &fr, &re) == 1 && std::string(nameBuf) == "Rock" && std::string(surf) == "Stone" &&
+              approx(fr, 0.5f) && approx(re, 0.1f),
+          "layer relays name, surface, friction and restitution");
+    check(aver_fw_terrain_layer(2, nameBuf, 8, surf, 16, &fr, &re) == 1 && std::string(nameBuf) == "SandyBe" && std::strlen(nameBuf) == 7,
+          "a long name is truncated at nameCap with a terminator");
+    check(aver_fw_terrain_layer(5, nameBuf, 16, surf, 16, &fr, &re) == 0, "an unknown layer answers 0");
+
+    check(aver_fw_set_water_provider(&fakeWater, nullptr) == 1, "water provider installed");
+    check(aver_fw_water_sample(0, 0, 0, &sz, wn, wc, &wd, &kind) == 1 && approx(sz, 150.0f) && approx(wc[0], 30.0f) && approx(wd, 75.0f) &&
+              kind == AVER_FW_WATER_KIND_RIVER,
+          "water sample relays surface, normal, current, depth and kind");
+    check(aver_fw_water_sample(500, 0, 0, &sz, wn, wc, &wd, &kind) == 0, "dry land answers 0");
+
+    aver_fw_set_terrain_provider(nullptr, nullptr, nullptr, nullptr);
+    aver_fw_set_water_provider(nullptr, nullptr);
+    check(aver_fw_terrain_layer_count() == 0, "clearing the provider answers 0 again");
+}
+
 int main() {
     AVER_INFO("Aver.Framework test");
     check(aver_fw_scene_abi_matches() == 1, "the framework's scene ABI major matches the loaded scene DLL");
@@ -1661,6 +1744,7 @@ int main() {
     testActionLegacyUntouched();
     testActionRegistryReadback();
     testInputSchemeTriggers();
+    testTerrainAbi();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

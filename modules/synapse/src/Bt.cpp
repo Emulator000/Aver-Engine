@@ -298,6 +298,22 @@ const BtRegistry::ActionEntry* BtRegistry::findAction(const std::string& name) c
     return it != actions_.end() ? &it->second : nullptr;
 }
 
+std::vector<std::string> BtRegistry::conditionNames() const {
+    std::vector<std::string> r;
+    r.reserve(conditions_.size());
+    for (const auto& kv : conditions_) r.push_back(kv.first);
+    std::sort(r.begin(), r.end());
+    return r;
+}
+
+std::vector<std::string> BtRegistry::actionNames() const {
+    std::vector<std::string> r;
+    r.reserve(actions_.size());
+    for (const auto& kv : actions_) r.push_back(kv.first);
+    std::sort(r.begin(), r.end());
+    return r;
+}
+
 void BtRegistry::registerBlackboardLeaves() {
     registerCondition("BbCompare", &bbCompareCondition, this);
     registerAction("BbSet", &bbSetAction, this);
@@ -333,6 +349,22 @@ BtStatus tickBt(const fmt::OcBtData& tree, const BtRegistry& registry, i32 subje
         state.active.clear();
     }
     return tickNode(c, 0);
+}
+
+} // namespace aver::synapse
+
+namespace aver::synapse {
+
+void abortBt(const fmt::OcBtData& tree, const BtRegistry& registry, i32 subject, BtRunningState& state) {
+    for (const auto& [idx, elapsed] : state.actionElapsed) {
+        (void)elapsed;
+        if (idx < 0 || static_cast<usize>(idx) >= tree.nodes.size()) continue;
+        const fmt::OcBtNode& n = tree.nodes[static_cast<usize>(idx)];
+        if (n.kind != fmt::OcBtNodeKind::Action) continue;
+        if (const BtRegistry::ActionEntry* e = registry.findAction(n.name))
+            if (e->onAbort) e->onAbort(subject, n, e->user);
+    }
+    state.reset();
 }
 
 } // namespace aver::synapse

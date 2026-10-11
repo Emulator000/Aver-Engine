@@ -281,6 +281,10 @@ void SandboxApp::loadLevel(Engine& eng, const std::string& path) {
         levelHeader_.lights.clear();   // rebuilt from the live CLight entities by saveLevel
         levelHeader_.decals.clear();   // ...and the DECAL records from the live CDecal entities
         levelHeader_.prefabInstances.clear();   // ...and the PREFABINST records from the live instances
+        // [wave3/level-instances begin] ...the LEVELINST records from level_.instances(), and EXTENT from the live bounds
+        levelHeader_.levelInstances.clear();
+        levelHeader_.hasExtent = false;
+        // [wave3/level-instances end]
         if (!levelPcgVolumes_.empty())
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
                       levelPcgVolumes_.size());
@@ -383,13 +387,11 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     {
         // LIGHT records: one bare CLight entity each (the instantiator does not know them).
         scene::World& lw = scene::World::instance();
-        for (const fmt::OcLight& r : w.lights) {
-            const scene::Entity le = lw.create(r.name.empty() ? std::string("Light") : r.name, scene::kInvalidEntity,
-                                               editor::transformFromRecord(r));
-            if (le == scene::kInvalidEntity) continue;
-            if (auto* c = static_cast<scene::CLight*>(lw.addComponent(le, scene::kComponentLight)))
-                *c = editor::lightFromRecord(r);
-            entityLabels_[static_cast<u32>(le)] = r.name.empty() ? std::string("Light") : r.name;
+        {
+            // [wave3/level-instances] game::spawnLevelLights is the one spawner now (the packaged game uses it too).
+            const std::vector<scene::Entity> lights = game::spawnLevelLights(lw, w.lights);
+            for (usize k = 0; k < lights.size() && k < w.lights.size(); ++k)
+                entityLabels_[static_cast<u32>(lights[k])] = w.lights[k].name.empty() ? std::string("Light") : w.lights[k].name;
         }
         // PREFABINST records: each instance is rebuilt from its asset, with its overrides applied. The hooks add the
         // entities to levelEntities_ and label them.
@@ -419,6 +421,8 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
         // instruction nothing records afterwards. Inferring it from entityBodies_ would be wrong:
         // a level opened before aver_phys_init has no bodies for ANY placement.
         entityCollide_[static_cast<u32>(e)] = p.collide;
+        // [wave3/level-instances] A placement's stable id survives a save: instance overrides are keyed by it.
+        if (p.placementId) entityPlaceId_[static_cast<u32>(e)] = p.placementId;
         // THE AUTHORED ANIMATION, remembered for the same reason: world::instantiate has already given
         // the entity a CAnimator, but that is the live clock Play advances, and the save must write what
         // the level said, not where a session left it.
@@ -484,6 +488,10 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     applyLevelSky(w);
     levelPath_ = loaded.path;
     levelName_ = w.name;
+    // [wave3/level-instances begin] the model's view of "the open level", for the cycle check
+    levelInstanceModel_.setContentDir(project_.contentDir());
+    levelInstanceModel_.setOpenLevel(editor::LevelInstanceEditorModel::assetRefFor(project_.contentDir(), loaded.path));
+    // [wave3/level-instances end]
 #if AVER_MODULE_SYNAPSE
     // The overlay is a DEVICE resource and this function has no device -- loadLevel is
     // reachable from paths that pass no Engine at all. Latched here and serviced from the
@@ -917,6 +925,8 @@ void SandboxApp::unloadLevel(Engine& eng) {
     entityLabels_.clear();
     labelCounts_.clear();
     entityBodies_.clear();
+    entityPlaceId_.clear();         // [wave3/level-instances]
+    entityAuthoredName_.clear();    // [wave3/level-instances]
     // Cleared with the rest of the level's state: carrying one level's PCG records into the
     // next would write them into a file that never had them.
     levelPcgVolumes_.clear();

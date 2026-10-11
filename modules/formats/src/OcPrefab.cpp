@@ -400,4 +400,12 @@ void appendOcPrefabInstances(std::string& out, const std::vector<OcPrefabInstanc
     }
 }
 
+// [wave3/level-instances begin]
+bool parseOcOverrideBody(const std::vector<std::string_view>& t, usize from, OcPrefabOverride& ov) {
+    return parseOverride(t, from, ov);
+}
+
+void appendOcOverrideBody(std::string& s, const OcPrefabOverride& ov) { appendOverrideBody(s, ov); }
+// [wave3/level-instances end]
+
 } // namespace aver::fmt

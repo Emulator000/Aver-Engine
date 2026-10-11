@@ -446,6 +446,14 @@ void SandboxApp::onInit(Engine& e)  {
     // The visual behaviour-tree editor claims .ocbt ahead of the plain list editor (registration order is
     // precedence); BtEditor stays registered as the fallback.
     assetEditors_.registerFactory(&editor::makeBtGraphEditor);
+    // AI: wave 3 #21 -- state trees (.ocst) and environment queries (.oceqs). A smart object (.ocso) has no tab.
+    assetEditors_.registerFactory(&editor::makeStateTreeEditor);
+    assetEditors_.registerFactory(&editor::makeEqsEditor);
+    editor::setEqsSelectionSource([this]() {
+        std::vector<u32> picked;
+        for (const scene::Entity e : selectedEntities()) picked.push_back(e);
+        return picked;
+    });
     // Append BtEditor (claims .ocbt).
     assetEditors_.registerFactory(&editor::makeBtEditor);
     assetEditors_.registerFactory(&editor::makeUiLayoutEditor);            // .ocui
@@ -610,6 +618,7 @@ void SandboxApp::onInit(Engine& e)  {
     game::registerGameSystems();
 #if AVER_MODULE_SCENE
     installPrefabHooks();
+    installLevelInstanceHooks();   // [wave3/level-instances]
 #endif
 
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
@@ -825,6 +834,13 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_FLUIDS
     // Register fluid (spawned only if level asks for it). Must precede Voxi (reads vertex buffer).
     water_.init(*e.device());
+#if AVER_MODULE_LANDSCAPE
+    // wave3: river / lake depth reads the ground; C# and graphs read the landscape layers.
+    water_.setGroundHeightSource([this](f64 x, f64 y, f64& z) { return landscape_.groundHeightAt(x, y, z); });
+#endif
+#endif
+#if AVER_MODULE_LANDSCAPE
+    landscape_.installProviders();
 #endif
 
 #if AVER_FLUIDS_SIMULATED
@@ -986,6 +1002,9 @@ void SandboxApp::onInit(Engine& e)  {
             // Same sink for synapse (SynapsePerception.hpp).
             synapse::perceptionSystem().setNotifySink(&SandboxApp::animNotify, this);
             synapse::btSystem().setNotifySink(&SandboxApp::animNotify, this);
+#if AVER_WITH_SYNAPSE_AI
+            game::installAiNotify(&SandboxApp::animNotify, this);   // AI: wave 3 #21 -- EqsFinished, SmartObject* ...
+#endif
 #endif
         }
 #endif
@@ -1013,6 +1032,7 @@ void SandboxApp::onInit(Engine& e)  {
         // Declare graph classes (retry after scripting host bootstraps).
 #if AVER_MODULE_FRAMEWORK
         if (scripts_.ready() && project_.valid()) {
+            game::setAiContentRoot(project_.contentDir());   // AI: wave 3 #21 -- where .oceqs / .ocso / .ocst paths resolve
             const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
             if (graphClasses > 0)
                 AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
@@ -1121,6 +1141,7 @@ void SandboxApp::onInit(Engine& e)  {
 #if AVER_MODULE_PBR
             content_.setTextureFactory(e.device()->resources());
             voxiRenderer_.materials().setTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
+            voxiRenderer_.materials().setTerrainResolver(&game::GameContent::resolveTerrainAtlas, &content_);   // wave3 terrain layers
             // Same resolver for asset tabs' preview (consistent look across tabs and level).
             editor::setPreviewTextureResolver(&game::GameContent::resolveMaterialTexture, &content_);
             editor::setPreviewMaterialLookup(
@@ -1613,6 +1634,21 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
         else
             AVER_ERROR("[Level] --save-level failed for {}", saveLevelTo_);
     }
+#endif
+#if AVER_MODULE_SCENE
+    // [wave3/level-instances begin] --bake-level-pack <level>: bakes that level's pack once the project's meshes are in.
+    if (!bakeLevelPackAsset_.empty() && !bakeLevelPackDone_ && t.frame >= 2 && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
+        bakeLevelPackDone_ = true;
+        std::string bakeWhy;
+        world::LevelAssetLibrary& lib = level_.assets();
+        lib.setLoader(world::LevelAssetLibrary::diskLoader(project_.contentDir()));
+        world::PackBakeReport rep;
+        if (game::bakeLevelPackWithContent(lib, bakeLevelPackAsset_, content_, project_.contentDir(), project_.dir, rep, &bakeWhy))
+            AVER_INFO("[LevelPack] --bake-level-pack: {} row(s) in {} group(s), {} kept as entities", rep.rows, rep.groups, rep.kept);
+        else
+            AVER_ERROR("[LevelPack] --bake-level-pack failed for {}: {}", bakeLevelPackAsset_, bakeWhy);
+    }
+    // [wave3/level-instances end]
 #endif
     // Forwarded open request (guarded as a whole; queue filled only by setOpenRequestHook).
 #if AVER_MODULE_SCENE

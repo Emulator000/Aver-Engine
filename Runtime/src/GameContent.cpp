@@ -24,6 +24,7 @@
 #include "aver/assets/AssetId.hpp"
 
 #if AVER_MODULE_PBR
+#  include "aver/assets/TextureAtlas.hpp"
 #  include "aver/assets/TextureUpload.hpp"
 #  include "aver/formats/OcGraph.hpp"
 #  include "aver/formats/OcMat.hpp"
@@ -1474,6 +1475,73 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
     out.bytes = info.bytes;
     return out;
 }
+
+// ---- wave3 terrain layers ----
+bool GameContent::resolveTerrainAtlas(const pbr::MaterialDesc& d, pbr::TerrainTextures& out, void* user) {
+    auto* self = static_cast<GameContent*>(user);
+    if (!self || !self->textureFactory_ || !d.terrain.enabled()) return false;
+    const u32 count = static_cast<u32>(std::min<usize>(d.terrain.layers.size(), pbr::kMaxTerrainLayers));
+
+    // Up to 4 columns: 8 layers are 4 x 2, fewer shrink the atlas to what they need.
+    assets::AtlasSpec spec;
+    spec.cols = std::min<u32>(count, 4u);
+    spec.rows = (count + spec.cols - 1) / spec.cols;
+    spec.tileTexels = d.terrain.tileTexels;
+    spec.padTexels = d.terrain.padTexels;
+    assets::AtlasSpec albedo = spec, normal = spec, orm = spec;
+    albedo.usage = assets::TextureUsage::Colour;
+    normal.usage = assets::TextureUsage::NormalMap;
+    orm.usage = assets::TextureUsage::Data;
+    for (u32 i = 0; i < count; ++i) {
+        const pbr::TerrainLayerDesc& l = d.terrain.layers[i];
+        assets::AtlasTile a, n, o;
+        a.colorPath = self->resolveAssetPath(l.baseColor);
+        a.alphaPath = self->resolveAssetPath(l.height);
+        a.alphaFromLuma = a.alphaPath.empty();            // no height map: the albedo's luminance stands in
+        n.colorPath = self->resolveAssetPath(l.normal);
+        n.fill[0] = 0.5f; n.fill[1] = 0.5f; n.fill[2] = 1.0f; n.fill[3] = 1.0f;   // a flat tangent-space normal
+        o.colorPath = self->resolveAssetPath(l.metalRough);
+        o.fill[0] = 1.0f; o.fill[1] = 1.0f; o.fill[2] = 0.0f; o.fill[3] = 1.0f;   // full AO, rough, non-metal
+        albedo.tiles.push_back(std::move(a));
+        normal.tiles.push_back(std::move(n));
+        orm.tiles.push_back(std::move(o));
+    }
+
+    assets::AtlasImage ia, in, io;
+    std::string err;
+    if (!assets::buildAtlasImage(albedo, ia, &err) || !assets::buildAtlasImage(normal, in, &err) ||
+        !assets::buildAtlasImage(orm, io, &err)) {
+        AVER_WARN("[Terrain] material '{}': the atlas could not be built: {}", d.name, err);
+        return false;
+    }
+    const usize bytes = [&] { usize b = 0; for (const auto* im : {&ia, &in, &io}) for (const auto& l : im->levels) b += l.size(); return b; }();
+    if (bytes > (160u << 20))
+        AVER_WARN("[Terrain] material '{}': the atlases take {} MiB of GPU memory (tile {}); use 512 texel tiles to save memory",
+                  d.name, bytes >> 20, d.terrain.tileTexels);
+
+    out = pbr::TerrainTextures{};
+    out.albedo = assets::uploadAtlas(*self->textureFactory_, ia, true, &err);
+    out.normal = assets::uploadAtlas(*self->textureFactory_, in, false, &err);
+    out.orm = assets::uploadAtlas(*self->textureFactory_, io, false, &err);
+    if (!out.albedo || !out.normal || !out.orm) {
+        AVER_WARN("[Terrain] material '{}': the atlas could not be uploaded: {}", d.name, err);
+        for (rhi::TextureHandle t : {out.albedo, out.normal, out.orm}) if (t) self->textureFactory_->destroyTexture(t);
+        out = pbr::TerrainTextures{};
+        return false;
+    }
+    const u32 S = spec.tileTexels + 2 * spec.padTexels;
+    out.cols = spec.cols; out.rows = spec.rows; out.stride = S; out.tile = spec.tileTexels; out.pad = spec.padTexels;
+    out.atlasW = ia.width; out.atlasH = ia.height;
+    out.bytes = bytes;
+    for (u32 i = 0; i < count; ++i) {
+        out.avg[i][0] = ia.tileAverage[i][0]; out.avg[i][1] = ia.tileAverage[i][1]; out.avg[i][2] = ia.tileAverage[i][2];
+        out.avg[i][3] = io.tileAverage[i][1];   // ORM: G = roughness
+        out.avg[i][4] = io.tileAverage[i][2];   // B = metallic
+    }
+    AVER_INFO("[Terrain] material '{}': {} layer(s) packed into {}x{} atlases ({} MiB)", d.name, count, ia.width, ia.height, bytes >> 20);
+    return true;
+}
+// ---- end wave3 terrain layers ----
 
 // .ocmat GRAPHREF path to gMaterialGraphId. Returns 0 for materials with no graph or load failure.
 // Broken graph does not disable the material: falls back to stock factors/maps.

@@ -430,7 +430,7 @@ u32 InstanceSetModel::findOrCreateGroup(const std::string& asset) {
 }
 
 InstanceId InstanceSetModel::add(const std::string& asset, const f32 m[12]) {
-    if (asset.empty() || !finite12(m)) return kNoInstance;
+    if (readOnly_ || asset.empty() || !finite12(m)) return kNoInstance;
     beginEdit();
     const u32 gi = findOrCreateGroup(asset);
     Group& g = groups_[gi];
@@ -444,6 +444,7 @@ InstanceId InstanceSetModel::add(const std::string& asset, const f32 m[12]) {
 }
 
 usize InstanceSetModel::deleteInstances(const std::vector<InstanceId>& ids) {
+    if (readOnly_) return 0;
     usize n = 0;
     beginEdit();
     for (const InstanceId id : ids)
@@ -455,6 +456,7 @@ usize InstanceSetModel::deleteInstances(const std::vector<InstanceId>& ids) {
 
 std::vector<InstanceId> InstanceSetModel::duplicate(const std::vector<InstanceId>& ids, const f32 offset[3]) {
     std::vector<InstanceId> out;
+    if (readOnly_) return out;
     out.reserve(ids.size());
     beginEdit();
     for (const InstanceId id : ids) {
@@ -478,7 +480,7 @@ std::vector<InstanceId> InstanceSetModel::duplicate(const std::vector<InstanceId
 }
 
 bool InstanceSetModel::setTransform(InstanceId id, const f32 m[12]) {
-    if (!alive(id) || !finite12(m)) return false;
+    if (readOnly_ || !alive(id) || !finite12(m)) return false;
     beginEdit();
     write(id, m, -1);
     endEdit();
@@ -486,7 +488,7 @@ bool InstanceSetModel::setTransform(InstanceId id, const f32 m[12]) {
 }
 
 usize InstanceSetModel::applyDelta(const std::vector<InstanceId>& ids, const f32 delta[12]) {
-    if (!finite12(delta)) return 0;
+    if (readOnly_ || !finite12(delta)) return 0;
     usize n = 0;
     beginEdit();
     for (const InstanceId id : ids) {

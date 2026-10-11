@@ -403,6 +403,7 @@ void SandboxApp::applyVisibilityTo(const EditCmd& c, bool undoing) {
 void SandboxApp::setEntityCollide(scene::Entity e, bool collide) {
     if (!scene::World::instance().valid(e)) return;
     entityCollide_[static_cast<u32>(e)] = collide;
+    level_.instances().setMemberCollide(e, collide);   // [wave3/level-instances] feeds an instance's override diff
 #if AVER_MODULE_PHYSICS
     rebuildEntityBody(e);
 #endif
@@ -1255,6 +1256,8 @@ void SandboxApp::undo() {
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.undo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+        case EditCmd::Kind::LevelInstance: if (c.levelInst) levelInstanceModel_.undo(*c.levelInst);   // [wave3/level-instances]
+                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
 #endif
         case EditCmd::Kind::CreateObj:   // undo a create: take it back out
             if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
@@ -1273,6 +1276,18 @@ void SandboxApp::undo() {
 #if AVER_MODULE_LANDSCAPE
         case EditCmd::Kind::LandscapeStroke:
             landscape_.applyHeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landBefore); break;
+#endif
+#if AVER_MODULE_LANDSCAPE
+        // wave3 layers / rivers: paint planes over a rect, and the level's RIVER / LAKE records.
+        case EditCmd::Kind::LandscapeWeights:
+            landscape_.applyWeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landPlanes, c.landWBefore); break;
+        case EditCmd::Kind::WaterBodies:
+            levelHeader_.rivers = c.riversBefore;
+            levelHeader_.lakes = c.lakesBefore;
+            waterBodiesStale_ = true;
+            waterSel_ = -1; waterPt_ = -1;
+            markLevelUnsaved();
+            break;
 #endif
 #if AVER_MODULE_LANDSCAPE && AVER_MODULE_SCENE
         // Undo of a PAINT removes what it made; undo of an ERASE puts it back.
@@ -1310,6 +1325,8 @@ void SandboxApp::redo() {
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Prefab:     if (c.prefab) prefabModel_.redo(*c.prefab);
                                         sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+        case EditCmd::Kind::LevelInstance: if (c.levelInst) levelInstanceModel_.redo(*c.levelInst);   // [wave3/level-instances]
+                                        sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
 #endif
         case EditCmd::Kind::CreateObj:   // redo a create: put it back
             if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
@@ -1326,6 +1343,17 @@ void SandboxApp::redo() {
 #if AVER_MODULE_LANDSCAPE
         case EditCmd::Kind::LandscapeStroke:
             landscape_.applyHeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landAfter); break;
+#endif
+#if AVER_MODULE_LANDSCAPE
+        case EditCmd::Kind::LandscapeWeights:
+            landscape_.applyWeightRect(c.landX0, c.landY0, c.landX1, c.landY1, c.landPlanes, c.landWAfter); break;
+        case EditCmd::Kind::WaterBodies:
+            levelHeader_.rivers = c.riversAfter;
+            levelHeader_.lakes = c.lakesAfter;
+            waterBodiesStale_ = true;
+            waterSel_ = -1; waterPt_ = -1;
+            markLevelUnsaved();
+            break;
 #endif
 #if AVER_MODULE_LANDSCAPE && AVER_MODULE_SCENE
         case EditCmd::Kind::FoliageStroke:

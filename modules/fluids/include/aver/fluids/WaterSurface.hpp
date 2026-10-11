@@ -91,6 +91,8 @@ public:
     void setWaves(const GerstnerWave* waves, size_t count);
     // Advances the wave clock; clamped to [0, 1] seconds like WaterRenderer::tick.
     void tick(f32 dtSeconds);
+    // The wave clock, in seconds (the compute pass's time; the CPU twin in buoyancy samples at the same instant).
+    f32 elapsedSeconds() const { return elapsedSeconds_; }
 
     // Re-centres an unbounded grid under `camPos`. Call before the frame's draw: the draw matrix and
     // the compute pass both read the origin this sets, so they cannot disagree.

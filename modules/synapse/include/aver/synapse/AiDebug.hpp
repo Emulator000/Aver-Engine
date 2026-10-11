@@ -22,7 +22,10 @@ enum AiDebugCategory : u32 {
     kAiDebugSteering = 1u << 3,
     kAiDebugBtState  = 1u << 4,
     kAiDebugCover    = 1u << 5,
-    kAiDebugAll      = 0x3Fu,
+    kAiDebugEqs      = 1u << 6,   // AI: wave 3 #21
+    kAiDebugSmartObjects = 1u << 7,
+    kAiDebugStateTree = 1u << 8,
+    kAiDebugAll      = 0x1FFu,
 };
 
 // 0xRRGGBBAA.

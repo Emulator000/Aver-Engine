@@ -646,6 +646,26 @@ struct Emitter {
                 return bind(n.id, pin, MatType::Float, "averWaveFocus(" + p2.expr + ")");
             return bind(n.id, pin, MatType::Float3, "averWaveNormal(" + p2.expr + ")");
         }
+        // -- wave 3: moving water --
+        //   VertexFlow.velocity -- the water velocity in cm/s a river mesh carries in its uv0 (world XY), taken from the
+        //                          RAW mesh uv: averSurfaceUV would return a projection under a world-aligned material.
+        //   VertexFlow.speed    -- its length.
+        //   FlowNormal.value    -- the wave normal advected along `flow` (averFlowNormal, shared_prelude.hlsl). `position`
+        //                          unwired is the pixel's world XY and `flow` unwired is VertexFlow.velocity, so a river
+        //                          material needs only this node; a lake (flow 0) gets exactly averWaveNormal.
+        if (ciEquals(ty, "VertexFlow")) {
+            if (ciEquals(pin, "speed")) return bind(n.id, pin, MatType::Float, "length(v.uv)");
+            return bind(n.id, pin, MatType::Float2, "v.uv");
+        }
+        if (ciEquals(ty, "FlowNormal")) {
+            const Value pos = linkInto(n.id, "position") ? input(n, "position", MatType::Float2)
+                                                         : Value{"v.wpos.xy", MatType::Float2};
+            const Value flow = linkInto(n.id, "flow") ? input(n, "flow", MatType::Float2)
+                                                      : Value{"v.uv", MatType::Float2};
+            const Value cycle = input(n, "cycle", MatType::Float);
+            return bind(n.id, pin, MatType::Float3,
+                        "averFlowNormal(" + pos.expr + ", " + flow.expr + ", " + cycle.expr + ")");
+        }
         // THE CLOCK, and the node that makes a material graph able to MOVE. Without it a graph is a
         // pure function of position and can only ever describe a still surface; with it, ripples,
         // scrolling, flicker and pulsing are all just arithmetic on one more input.
@@ -859,7 +879,7 @@ std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
     // ---- the raster entry point ----
     s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
     s += "    float2 uv = averSurfaceUV(v);\n";
-    s += "    AverAuthored a = averStockAuthored(uv, v.N);\n";
+    s += "    AverAuthored a = averStockAuthoredAt(v, uv);\n";
     emitSwitch(s, entries, "gMaterialGraphId", false);
     s += "    return averBuildSurface(v, l, a, uv);\n";
     s += "}\n";

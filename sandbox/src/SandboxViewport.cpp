@@ -574,12 +574,20 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
         picked = live[static_cast<size_t>(foliageRand(foliageSeed_) * live.size()) % live.size()];
     }
     const FoliageSpecies& sp = *picked;
+    foliagePlaceAt(e, sp, x, y, foliageSeed_);
+}
+
+// One instance of `sp` at (x, y): scale and yaw drawn from `rng`. foliagePlaceOne's tail, moved so the layer-driven scatter
+// (LandscapePaintTool.cpp) places exactly as the brush does -- same collision test, rotation, entity and undo bookkeeping.
+void SandboxApp::foliagePlaceAt(Engine& e, const FoliageSpecies& sp, f32 x, f32 y, u32& rng) {
+    f32 z = 0.0f;
+    if (!landscape::surfaceHeightAt(landscape_.data(), x, y, z)) return;   // off the section
 
     const u64 meshId = fnv1a64(std::string_view(sp.type.meshPath));
     if (content_.meshFor(meshId) == 0) return;
 
     const f32 sc = sp.type.scaleMin +
-                   foliageRand(foliageSeed_) * (sp.type.scaleMax - sp.type.scaleMin);
+                   foliageRand(rng) * (sp.type.scaleMax - sp.type.scaleMin);
 
     // Interpenetration check, mirroring ChunkGenerator.cpp's placedSolid: SUMMED radii (this
     // instance's scaled radius plus the neighbour's). A neighbour placed with collisionRadiusCm ==
@@ -601,7 +609,7 @@ void SandboxApp::foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
     // Yaw is a random azimuth unless randomizeYaw is false (then every instance faces the same way).
     // eps=10cm sits inside a section's sample spacing (OcLandData::spacingCm), keeping the four
     // probes local to this instance's patch rather than blurring across samples.
-    const f32 yaw = sp.type.randomizeYaw ? foliageRand(foliageSeed_) * 6.2831853f : 0.0f;
+    const f32 yaw = sp.type.randomizeYaw ? foliageRand(rng) * 6.2831853f : 0.0f;
     xf.rotation = editor::foliagePlacementRotation(landscape_.data(), x, y, /*epsCm=*/10.0f, yaw,
                                                     sp.type.alignToNormal);
     xf.scale = Vec3{sc, sc, sc};
@@ -1133,6 +1141,36 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         return;
     }
 #endif
+    // [wave3/level-instances begin] A level drops as an instance of it (its own undo entry); its entities come through
+    // the level-instance hooks.
+    if (ext == ".ocworld" || ext == ".ocmap") {
+        if (!(hideEditorScene_ || !levelPath_.empty())) {
+            cbStatus_ = "Load a level (or hide the editor scene) before dropping assets";
+            return;
+        }
+        levelInstanceModel_.setContentDir(project_.contentDir());
+        const std::string ref = editor::LevelInstanceEditorModel::assetRefFor(project_.contentDir(), full);
+        if (ref.empty()) { cbStatus_ = "Could not resolve '" + fileName + "' to a project-relative path"; return; }
+        Transform xf;
+        xf.position = dropWorldPoint(screenX, screenY);
+        if (!(std::isfinite(xf.position.x) && std::isfinite(xf.position.y) && std::isfinite(xf.position.z))) {
+            cbStatus_ = "Could not find a valid drop position";
+            return;
+        }
+        if (snapMove_) for (int k = 0; k < 3; ++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
+        const editor::LevelInstanceEditorModel::PlaceResult pr = levelInstanceModel_.place(ref, xf);
+        if (!pr.ok) {
+            cbStatus_ = pr.error;
+            AVER_WARN("[Editor] drop: level '{}' not placed: {}", ref, pr.error);
+            return;
+        }
+        sel_ = kSelScene; selEntity_ = pr.root;
+        pushLevelInstanceEdit(pr.edit);
+        markLevelUnsaved();
+        cbStatus_ = "Placed " + fileName;
+        return;
+    }
+    // [wave3/level-instances end]
     const bool isMesh = ext == ".ocmesh";
     bool isParticle = false;
 #if AVER_MODULE_PARTICLES
@@ -1436,10 +1474,13 @@ void SandboxApp::handleManip(Engine& e) {
         if (keybinds_.pressed(editor::CommandId::ModeToggleLandscape, io)) toggleEditorMode();
 #if AVER_MODULE_LANDSCAPE
         if (mode_ == EditorMode::Landscape) {
+            // wave3: the 1..4 sculpt keys belong to the Sculpt tab; Paint and Water have their own tools.
+            if (landscapeTab_ == LandscapeTab::Sculpt) {
             if (keybinds_.pressed(editor::CommandId::SculptRaise, io))   sculptTool_=SculptTool::Raise;
             if (keybinds_.pressed(editor::CommandId::SculptLower, io))   sculptTool_=SculptTool::Lower;
             if (keybinds_.pressed(editor::CommandId::SculptSmooth, io))  sculptTool_=SculptTool::Smooth;
             if (keybinds_.pressed(editor::CommandId::SculptFlatten, io)) sculptTool_=SculptTool::Flatten;
+            }
         } else
 #endif
         {
@@ -1479,7 +1520,12 @@ void SandboxApp::handleManip(Engine& e) {
 
 #if AVER_MODULE_LANDSCAPE
     if (isSculptTool) {
-        handleSculpt(e, io, overScene, mx, my);
+        // wave3: the Landscape panel's tabs pick the viewport tool (Sculpt is the original behaviour).
+        if (landscapeTab_ == LandscapeTab::Paint)      handlePaint(e, io, overScene, mx, my);
+#if AVER_MODULE_FLUIDS
+        else if (landscapeTab_ == LandscapeTab::Water) handleWaterSpline(e, io, overScene, mx, my);
+#endif
+        else                                           handleSculpt(e, io, overScene, mx, my);
     } else
 #if AVER_MODULE_SCENE
     // Foliage owns the click like Landscape does: no picking, no gizmo, just the brush. Tested here
@@ -1877,7 +1923,11 @@ void SandboxApp::drawSculptCursor(Engine& e) {
     if (!brushRing_ || !sculptCursorValid_) return;
     const bool sculptTool = editorModeIsLandscape();
     if (!sculptTool) return;
-    const Mat4 w = Mat4::scale(Vec3{sculptRadiusCm_, sculptRadiusCm_, sculptRadiusCm_}) *
+    // wave3: the Paint tab draws its own radius and falloff (the Water tab never sets the cursor).
+    const bool paintTab = landscapeTab_ == LandscapeTab::Paint;
+    const f32 brushRadius = paintTab ? paintRadiusCm_ : sculptRadiusCm_;
+    const f32 brushFalloff = paintTab ? paintFalloff_ : sculptFalloff_;
+    const Mat4 w = Mat4::scale(Vec3{brushRadius, brushRadius, brushRadius}) *
                    Mat4::translation(sculptCursor_);
     e.device()->setLineDepth(false);
     // Explicit, not relying on drawGizmo() having already reset it: these rings must stay hairline
@@ -1895,9 +1945,9 @@ void SandboxApp::drawSculptCursor(Engine& e) {
     //
     // Drawn only when it says something: at falloff 1 the inner ring collapses to a dot, at 0 it
     // coincides with the outer ring -- both extremes are already unambiguous without it.
-    const f32 soft  = sculptFalloff_ < 0.0f ? 0.0f : (sculptFalloff_ > 1.0f ? 1.0f : sculptFalloff_);
-    const f32 inner = sculptRadiusCm_ * (1.0f - soft);
-    if (inner > sculptRadiusCm_ * 0.04f && inner < sculptRadiusCm_ * 0.96f) {
+    const f32 soft  = brushFalloff < 0.0f ? 0.0f : (brushFalloff > 1.0f ? 1.0f : brushFalloff);
+    const f32 inner = brushRadius * (1.0f - soft);
+    if (inner > brushRadius * 0.04f && inner < brushRadius * 0.96f) {
         const Mat4 wi = Mat4::scale(Vec3{inner, inner, inner}) * Mat4::translation(sculptCursor_);
         e.device()->drawLines(brushRing_, &wi.m[0][0]);
     }
@@ -1923,6 +1973,16 @@ void SandboxApp::deleteSelection() {
             for (const scene::Entity v : victims) {
                 scene::World& w = scene::World::instance();
                 if (!w.valid(v)) continue;
+                // [wave3/level-instances begin] an instance deletes as an instance; a member of a locked one as an override
+                {
+                    editor::LevelInstanceEdit lie;
+                    if (levelInstanceModel_.destroyInstance(v, lie) ||
+                        levelInstanceModel_.deleteMember(v, lie, [this](scene::Entity m) { destroyEntity(m); })) {
+                        pushLevelInstanceEdit(lie);
+                        continue;
+                    }
+                }
+                // [wave3/level-instances end]
                 EditCmd c = describeEntity(v);
                 c.kind = EditCmd::Kind::Destroy;
                 captureSubtree(c, v);
@@ -1939,6 +1999,20 @@ void SandboxApp::deleteSelection() {
     if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity) {
         scene::World& w = scene::World::instance();
         if (w.valid(selEntity_)) {
+            // [wave3/level-instances begin]
+            {
+                editor::LevelInstanceEdit lie;
+                if (levelInstanceModel_.destroyInstance(selEntity_, lie) ||
+                    levelInstanceModel_.deleteMember(selEntity_, lie, [this](scene::Entity m) { destroyEntity(m); })) {
+                    AVER_INFO("[Editor] deleted level instance entity #{}", (u32)selEntity_);
+                    pushLevelInstanceEdit(lie);
+                    multiClear();
+                    selEntity_ = scene::kInvalidEntity;
+                    sel_ = -1;
+                    return;
+                }
+            }
+            // [wave3/level-instances end]
             AVER_INFO("[Editor] deleted entity #{} '{}'", (u32)selEntity_, w.name(selEntity_));
             EditCmd c = describeEntity(selEntity_);
             c.kind = EditCmd::Kind::Destroy;
@@ -2392,6 +2466,9 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     // clearing everything first. A miss that landed on a placeholder (best != -1) is not "empty
     // space" -- placeholders never joined the scene multi-select, so it falls through to the plain-click assignment below.
 #if AVER_MODULE_SCENE
+    // [wave3/level-instances] A click on a level instance's member selects the instance (Alt+click: the member).
+    if (bestEnt != kInvalidId)
+        bestEnt = levelInstanceModel_.pickTarget(static_cast<scene::Entity>(bestEnt), ImGui::GetIO().KeyAlt);
     const bool extend = ImGui::GetIO().KeyCtrl;
     if (extend && bestEnt != kInvalidId) {
         multiToggle(static_cast<scene::Entity>(bestEnt));
@@ -2719,6 +2796,14 @@ void SandboxApp::buildViewportOverlay() {
     ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+pad), ImGuiCond_Always, ImVec2(0,0));
     ImGui::SetNextWindowBgAlpha(0.62f);
     ImGui::Begin("##vpbar_left", nullptr, f);
+#if AVER_MODULE_SCENE
+    // [wave3/level-instances] Open Level on an instance left a way back: this button.
+    if (const editor::LevelReturnPoint* rp = levelInstanceModel_.returnTop()) {
+        const std::string back = "< Back to " + std::filesystem::path(rp->levelPath).stem().string();
+        if (ImGui::Button(back.c_str())) levelInstanceBack();
+        ImGui::SameLine();
+    }
+#endif
     if (dropButton("Perspective")) ImGui::OpenPopup("viewType");
     uiReg_.track("viewport.perspective");
     if (ImGui::BeginPopup("viewType")) {

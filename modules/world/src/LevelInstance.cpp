@@ -164,6 +164,89 @@ i32 addPivotBoxBody(const Transform& worldXf, const Vec3& localMin, const Vec3& 
 
 namespace aver::world {
 
+#  if AVER_MODULE_PHYSICS
+// [wave3/level-instances begin] Extracted from instantiate()'s collide branch, unchanged in behaviour.
+i32 addStaticPlacementBody(const InstantiateOptions& opt, std::unordered_map<u64, i32>& meshShapeCache, u64 meshId,
+                           const Transform& wx, u32* outTriangles, bool* outUsedMesh, bool moving,
+                           bool* outFollowsEntity, u32* outNewShapes) {
+    i32 body = 0;
+    bool usedMesh = false;
+    u32 meshTriCount = 0;
+    bool followsEntity = true;
+    u32 newShapes = 0;
+
+    // TRIANGLES FIRST. A mesh's per-material-merged geometry can be concave -- an archway, a
+    // courtyard wall -- and one box per mesh fills that concavity solid; asking for triangles
+    // before ever building a box means concave architecture only ever gets the box when
+    // nothing has (or can) give it triangles. Only trusted on a TRUE return with at least one
+    // triangle's worth of indices, same as localBoundsFor/groundHeightAt: a host that answers
+    // false, or leaves the counts at 0, has made no promise about the pointers either.
+    if (opt.localTrianglesFor) {
+        const f32* triPositions = nullptr; u32 triVertexCount = 0;
+        const u32* triIndices = nullptr;   u32 triIndexCount = 0;
+        if (opt.localTrianglesFor(meshId, triPositions, triVertexCount, triIndices, triIndexCount) &&
+            triVertexCount > 0 && triIndexCount >= 3) {
+            // SHARED SHAPE FIRST: aver_phys_create_mesh_shape ONCE per unique mesh id, however
+            // many placements name it, each wrapping it at its own transform through Jolt's
+            // ScaledShape (aver_phys_add_mesh_shape_body) -- no per-placement triangle scaling
+            // and no second BVH build for a mesh this level already placed once.
+            i32 shapeHandle = 0;
+            if (const auto cached = meshShapeCache.find(meshId); cached != meshShapeCache.end()) {
+                shapeHandle = cached->second;
+            } else {
+                shapeHandle = aver_phys_create_mesh_shape(
+                    triPositions, static_cast<i32>(triVertexCount),
+                    reinterpret_cast<const i32*>(triIndices), static_cast<i32>(triIndexCount));
+                meshShapeCache.emplace(meshId, shapeHandle);
+                if (shapeHandle) ++newShapes;
+            }
+            if (shapeHandle) {
+                body = aver_phys_add_mesh_shape_body(
+                    shapeHandle, wx.position.x, wx.position.y, wx.position.z,
+                    wx.rotation.x, wx.rotation.y, wx.rotation.z, wx.rotation.w,
+                    wx.scale.x, wx.scale.y, wx.scale.z);
+            }
+            // THE FALLBACK: a scale with a zero component, which a ScaledShape cannot
+            // represent at all (aver_phys_add_mesh_shape_body's own comment) but
+            // scaleMeshForBody's baking can, or a shape this mesh's own triangles never built
+            // in the first place. TRIANGLES WERE OFFERED, so this placement does not fall through
+            // to the box even if every attempt to use them returns 0.
+            if (!body)
+                body = addStaticMeshBody(wx, triPositions, triVertexCount, triIndices, triIndexCount);
+            usedMesh = true;
+            meshTriCount = triIndexCount / 3;
+        }
+    }
+    if (!usedMesh) {
+        // THE UNIT-CUBE PLACEHOLDER UNLESS THE HOST KNOWS BETTER. A placement's authored scale
+        // used to go straight into aver_phys_add_static_box as a half-extent -- exactly right
+        // for the built-in cube (local bounds exactly [-1,1] cm) and silently wrong for
+        // anything else: an imported mesh placed at scale 1 got a 2x2x2 cm box at its pivot,
+        // i.e. no collision an object of any real size could ever reach.
+        Vec3 lmin{-kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm};
+        Vec3 lmax{ kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm};
+        if (opt.localBoundsFor) {
+            Vec3 hostMin, hostMax;
+            if (opt.localBoundsFor(meshId, hostMin, hostMax)) { lmin = hostMin; lmax = hostMax; }
+        }
+        // A MOVING PLACEMENT'S BOX IS BUILT AROUND THE PIVOT, because its body gets driven to
+        // the entity's transform and a box centred elsewhere would jump by the offset. If Jolt
+        // refuses that hull the plain box still collides, but as a static body.
+        body = moving ? addPivotBoxBody(wx, lmin, lmax) : 0;
+        if (!body) {
+            body = addStaticBoxBody(wx, lmin, lmax);
+            if (moving) followsEntity = false;
+        }
+    }
+    if (outTriangles) *outTriangles = meshTriCount;
+    if (outUsedMesh) *outUsedMesh = usedMesh;
+    if (outFollowsEntity) *outFollowsEntity = followsEntity;
+    if (outNewShapes) *outNewShapes = newShapes;
+    return body;
+}
+// [wave3/level-instances end]
+#  endif
+
 LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& opt) {
     LevelInstance out;
     out.entities.reserve(w.placements.size());
@@ -190,6 +273,7 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
     // Per placement: it, or an ancestor of it, has an `anim` clip. A parent precedes its child, so the
     // parent's answer is final when the child asks.
     std::vector<char> movesWithClip(w.placements.size(), 0);
+    bool warnedAttachSnap = false;   // [wave3/level-instances]
 
 #if AVER_MODULE_PHYSICS
     // MESH ID -> the shared physics shape for it (this call's own, or the caller's opt.meshShapes), or 0 for "already asked and
@@ -245,7 +329,13 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // that asks to snap is told rather than silently obeyed or silently ignored.
         f64 pz = p.z;
         const bool isChild = p.parent >= 0 && p.parent < static_cast<i32>(w.placements.size());
-        if (p.snapToGround && !isChild && opt.groundHeightAt) {
+        // [wave3/level-instances] An attached level has no ground of its own: `snap` on a root is ignored.
+        if (p.snapToGround && !isChild && opt.attach) {
+            if (!warnedAttachSnap) {
+                warnedAttachSnap = true;
+                AVER_WARN("[Level] placement '{}' asks to snap to ground inside a level instance; ignored", p.asset);
+            }
+        } else if (p.snapToGround && !isChild && opt.groundHeightAt) {
             f64 ground = 0.0;
             if (opt.groundHeightAt(p.x, p.y, ground)) pz = ground + p.z;
         } else if (p.snapToGround && isChild) {
@@ -268,6 +358,7 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // pass -- so it loads as a root, at its parent-relative transform, and says so rather than
         // being quietly misplaced with no record of why.
         scene::Entity parentEnt = scene::kInvalidEntity;
+        if (!isChild && opt.attach) parentEnt = opt.attach->parent;   // [wave3/level-instances]
         if (isChild) {
             parentEnt = entityFor[static_cast<usize>(p.parent)];
             if (parentEnt == scene::kInvalidEntity)
@@ -287,6 +378,16 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             const Vec3 scaled{xf.position.x * pw.scale.x, xf.position.y * pw.scale.y,
                               xf.position.z * pw.scale.z};
             worldXf[i].position = pw.position + pw.rotation.rotate(scaled);
+        } else if (opt.attach) {
+            // [wave3/level-instances begin] A root of an attached level composes under the attach point.
+            const Transform& pw = opt.attach->parentWorld;
+            worldXf[i].scale    = Vec3{pw.scale.x * xf.scale.x, pw.scale.y * xf.scale.y,
+                                       pw.scale.z * xf.scale.z};
+            worldXf[i].rotation = pw.rotation * xf.rotation;
+            const Vec3 scaled{xf.position.x * pw.scale.x, xf.position.y * pw.scale.y,
+                              xf.position.z * pw.scale.z};
+            worldXf[i].position = pw.position + pw.rotation.rotate(scaled);
+            // [wave3/level-instances end]
         }
 
         const scene::Entity e = world.create(p.asset, parentEnt, xf);
@@ -355,74 +456,16 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
             // nothing has (or can) give it triangles. Only trusted on a TRUE return with at least one
             // triangle's worth of indices, same as localBoundsFor/groundHeightAt: a host that answers
             // false, or leaves the counts at 0, has made no promise about the pointers either.
+            // The triangle-or-box body is addStaticPlacementBody (above), shared with level instances' packed rows.
             bool usedMesh = false;
             u32 meshTriCount = 0;
             // False when the body's origin is not the entity's pivot, so driving it to the entity's
             // transform would misplace it. Mesh bodies are pivot-framed already.
             bool followsEntity = true;
-            if (opt.localTrianglesFor) {
-                const f32* triPositions = nullptr; u32 triVertexCount = 0;
-                const u32* triIndices = nullptr;   u32 triIndexCount = 0;
-                if (opt.localTrianglesFor(p.objectId, triPositions, triVertexCount,
-                                          triIndices, triIndexCount) &&
-                    triVertexCount > 0 && triIndexCount >= 3) {
-                    // SHARED SHAPE FIRST: aver_phys_create_mesh_shape ONCE per unique mesh id, however
-                    // many placements name it, each wrapping it at its own transform through Jolt's
-                    // ScaledShape (aver_phys_add_mesh_shape_body) -- no per-placement triangle scaling
-                    // and no second BVH build for a mesh this level already placed once. A Banyan
-                    // tree's leaf cards, named by hundreds of placements, used to bake and BVH-build
-                    // hundreds of identical meshes; now they build one.
-                    i32 shapeHandle = 0;
-                    if (const auto cached = meshShapeCache.find(p.objectId); cached != meshShapeCache.end()) {
-                        shapeHandle = cached->second;
-                    } else {
-                        shapeHandle = aver_phys_create_mesh_shape(
-                            triPositions, static_cast<i32>(triVertexCount),
-                            reinterpret_cast<const i32*>(triIndices), static_cast<i32>(triIndexCount));
-                        meshShapeCache.emplace(p.objectId, shapeHandle);
-                        if (shapeHandle) ++out.uniqueMeshShapeCount;
-                    }
-                    if (shapeHandle) {
-                        body = aver_phys_add_mesh_shape_body(
-                            shapeHandle, wx.position.x, wx.position.y, wx.position.z,
-                            wx.rotation.x, wx.rotation.y, wx.rotation.z, wx.rotation.w,
-                            wx.scale.x, wx.scale.y, wx.scale.z);
-                    }
-                    // THE FALLBACK: a scale with a zero component, which a ScaledShape cannot
-                    // represent at all (aver_phys_add_mesh_shape_body's own comment) but
-                    // scaleMeshForBody's baking can, or a shape this mesh's own triangles never built
-                    // in the first place. Same triangles either way, so a body addStaticMeshBody
-                    // cannot make either is a body this placement was never going to get -- exactly
-                    // the pre-existing rule (below), preserved: TRIANGLES WERE OFFERED, so this
-                    // placement does not fall through to the box even if every attempt to use them
-                    // returns 0.
-                    if (!body)
-                        body = addStaticMeshBody(wx, triPositions, triVertexCount, triIndices, triIndexCount);
-                    usedMesh = true;
-                    meshTriCount = triIndexCount / 3;
-                }
-            }
-            if (!usedMesh) {
-                // THE UNIT-CUBE PLACEHOLDER UNLESS THE HOST KNOWS BETTER. A placement's authored scale
-                // used to go straight into aver_phys_add_static_box as a half-extent -- exactly right
-                // for the built-in cube (local bounds exactly [-1,1] cm) and silently wrong for
-                // anything else: an imported mesh placed at scale 1 got a 2x2x2 cm box at its pivot,
-                // i.e. no collision an object of any real size could ever reach.
-                Vec3 lmin{-kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm, -kPlaceholderHalfExtentCm};
-                Vec3 lmax{ kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm,  kPlaceholderHalfExtentCm};
-                if (opt.localBoundsFor) {
-                    Vec3 hostMin, hostMax;
-                    if (opt.localBoundsFor(p.objectId, hostMin, hostMax)) { lmin = hostMin; lmax = hostMax; }
-                }
-                // A MOVING PLACEMENT'S BOX IS BUILT AROUND THE PIVOT, because its body gets driven to
-                // the entity's transform and a box centred elsewhere would jump by the offset. If Jolt
-                // refuses that hull the plain box still collides, but as a static body.
-                body = moving ? addPivotBoxBody(wx, lmin, lmax) : 0;
-                if (!body) {
-                    body = addStaticBoxBody(wx, lmin, lmax);
-                    if (moving) followsEntity = false;
-                }
-            }
+            u32 newShapes = 0;
+            body = addStaticPlacementBody(opt, meshShapeCache, p.objectId, wx, &meshTriCount, &usedMesh, moving,
+                                          &followsEntity, &newShapes);
+            out.uniqueMeshShapeCount += newShapes;
 
             out.bodyCreationSeconds +=
                 std::chrono::duration<f64>(std::chrono::steady_clock::now() - bodyStart).count();

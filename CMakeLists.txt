@@ -265,6 +265,9 @@ if(AVER_MODULE_SCENE)
   add_subdirectory(modules/save)
   # Prefab instances in a live world (spawn, overrides, propagation); see docs/PREFABS.md.
   add_subdirectory(modules/prefab)
+  # [wave3/level-instances begin] The plain-C seam onto level instances (docs/LEVEL_INSTANCES.md).
+  add_subdirectory(modules/levelinstance.abi)
+  # [wave3/level-instances end]
   # The scene/navigation join, same shape as anim.scene immediately above and for the same reason:
   # Aver.Synapse stays pure grid-and-arithmetic (added unconditionally, above), and this is the
   # "somebody" that turns a goal into a scene::Entity's actual path.
@@ -507,6 +510,9 @@ if(AVER_BUILD_TESTS)
     endif()
     add_subdirectory(tests/save)
     add_subdirectory(tests/prefab)
+    # [wave3/level-instances begin]
+    add_subdirectory(tests/levelinstance)
+    # [wave3/level-instances end]
     if(TARGET Aver.Formats)
       add_subdirectory(tests/decals)
     endif()
@@ -521,6 +527,7 @@ if(AVER_BUILD_TESTS)
   if(TARGET Aver.Synapse)
     add_subdirectory(tests/synapse)
     add_subdirectory(tests/synapse_bt)
+    add_subdirectory(tests/synapse_query)   # AI: wave 3 #21
     add_subdirectory(tests/sound)
   endif()
   if(AVER_MODULE_FRAMEWORK)

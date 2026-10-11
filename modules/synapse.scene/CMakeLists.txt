@@ -12,6 +12,10 @@ aver_add_module(Aver.Synapse.Scene
     src/SynapseCrowd.cpp
     src/SynapseHearing.cpp
     src/SynapseTactics.cpp
+    # Environment queries, smart objects and the managed (C#) leaf seam -- wave 3.
+    src/SynapseEqs.cpp
+    src/SynapseSmartObject.cpp
+    src/SynapseManaged.cpp
     src/SynapseAi.cpp
   DEPS
     Aver.Synapse

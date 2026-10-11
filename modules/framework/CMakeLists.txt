@@ -20,7 +20,9 @@ add_library(Aver.Framework SHARED
   src/AnimAbi.cpp
   src/LocalizationAbi.cpp
   src/DataTableAbi.cpp
-  src/EntityStateAbi.cpp)
+  src/EntityStateAbi.cpp
+  # Terrain and water queries relayed from the host (wave 3, landscape layers and rivers).
+  src/TerrainAbi.cpp)
 
 target_include_directories(Aver.Framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Framework PUBLIC cxx_std_20)

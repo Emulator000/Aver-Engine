@@ -293,6 +293,7 @@ public static class HostBridge
         // Timers and event subscribers are callbacks into the context being unloaded: drop them first.
         try { Timers.Shutdown(); Events.Shutdown(); } catch { }
         try { GameplayAbilities.Shutdown(); } catch { }   // its callbacks and behaviours are script-context objects too
+        try { Aver.Synapse.ManagedAi.Shutdown(); } catch { }   // AI: wave 3 #21 -- managed leaves and EQS tests are script-context delegates
 
         ScriptLoadContext? ctx = s_context;
         s_context = null;
@@ -906,6 +907,7 @@ public static class HostBridge
 
             int actors = DeclareActors(asm, file);
             GameplayAbilities.RegisterAssembly(asm);
+            Aver.Synapse.ManagedAi.ScanAssembly(asm);   // AI: wave 3 #21 -- [AverAiAction] / [AverAiCondition] / [AverEqsTest]
             DiscoverHuds(asm, file);
 
             if (found == 0 && actors == 0) WarnAboutNearMisses(asm, file);
@@ -1009,6 +1011,7 @@ public static class HostBridge
             GraphEvents.Router = FireEventRouter;
             InstallGraphVarProvider();
             GameplayAbilities.Startup();   // the managed-state save provider (ability systems ride in saves)
+            Aver.Synapse.ManagedAi.Startup();   // AI: wave 3 #21 -- the one dispatch function native AI leaves call
         }
         catch (Exception ex)
         {

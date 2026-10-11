@@ -6,10 +6,13 @@
   physics-heightfield adapter (3), and a real GPU renderer target with a residency cache that evicts
   correctly (4).
 
-A GPU renderer (`src/LandscapeRenderer.cpp`) has been built, but no pixel of landscape has ever
-reached a screen — stage 5 (the editor tab, sculpt brushes, storage) has not started, and nothing in
-the editor calls `LandscapeRenderer::draw`. See [`docs/LANDSCAPE_EDITOR.md`](../../docs/LANDSCAPE_EDITOR.md)
-for the plan to close that gap.
+The GPU renderer (`src/LandscapeRenderer.cpp`) is live: both hosts draw it every frame through
+`game::GameLandscape`, the editor sculpts it, and it carries collision. See
+[`docs/LANDSCAPE_EDITOR.md`](../../docs/LANDSCAPE_EDITOR.md) for the editor's history. **Paint layers and rivers
+landed in wave 3**: `Paint.hpp` (weightmap brush, fill, slope auto-fill, name-based remap and the RGBA8 weight
+textures) and `Carve.hpp` (one-shot river bed and lake basin carving), both CPU-only and tested by
+`LayerPaintTest` / `CarveTest`; the paint itself is stored in the `.ocland` (`LLYR` / `LWGT`) by layer name. See
+[`docs/LANDSCAPE_LAYERS_WATER.md`](../../docs/LANDSCAPE_LAYERS_WATER.md).
 
 Chunked heightfield terrain: the sample grid, the node quadtree, screen-space-error LOD selection,
 frustum culling, and chunk geometry with skirts.

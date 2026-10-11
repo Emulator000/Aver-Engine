@@ -20,6 +20,15 @@ aver_add_module(Aver.Synapse
     src/Crowd.cpp
     src/Hearing.cpp
     src/Cover.cpp
+    # Environment queries, smart objects and state trees (wave 3): pure cores and their text formats.
+    src/TextRecords.cpp
+    src/AiPaths.cpp
+    src/EqsAsset.cpp
+    src/Eqs.cpp
+    src/SmartObjectAsset.cpp
+    src/SmartObject.cpp
+    src/StateTreeAsset.cpp
+    src/StateTree.cpp
   DEPS
     Aver.Formats
     Aver.Core

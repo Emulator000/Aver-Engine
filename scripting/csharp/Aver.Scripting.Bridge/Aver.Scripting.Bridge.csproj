@@ -46,6 +46,7 @@
          above, so this adds no new native surface, just the managed graph runtime. -->
     <ProjectReference Include="..\Aver.Graph\Aver.Graph.csproj" />
     <ProjectReference Include="..\Aver.Prefab\Aver.Prefab.csproj" />
+    <ProjectReference Include="..\Aver.LevelInstance\Aver.LevelInstance.csproj" />   <!-- [wave3/level-instances] -->
   </ItemGroup>
 
 </Project>

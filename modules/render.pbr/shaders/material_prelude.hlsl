@@ -118,6 +118,20 @@ cbuffer AverMaterial : register(b2) {
 // sphere light, CSRdLocalLights) and by voxi_restir.hlsli (skips a promoted emitter's own emission
 // in GI candidate hits); this prelude itself never branches on the bit.
 #define AVER_MAT_LIGHT          (1u << 16)
+// ---- wave3 terrain layers ----
+// Layered terrain material (pbr::MaterialFlag_TerrainLayers): the slots are reinterpreted, see averTerrainMaps.
+#define AVER_MAT_TERRAIN        (1u << 17)
+// The parameter texture's rows (slot 5, R32Float, 8 x 9); TerrainLayers.hpp's kTerrainRow* mirror them.
+#define AVER_TERRAIN_ROW_UVSCALE    0
+#define AVER_TERRAIN_ROW_HEIGHTBIAS 1
+#define AVER_TERRAIN_ROW_AVG_R      2
+#define AVER_TERRAIN_ROW_AVG_G      3
+#define AVER_TERRAIN_ROW_AVG_B      4
+#define AVER_TERRAIN_ROW_AVG_ROUGH  5
+#define AVER_TERRAIN_ROW_AVG_METAL  6
+#define AVER_TERRAIN_ROW_LAYOUT     7
+#define AVER_TERRAIN_ROW_SECTION    8
+// ---- end wave3 terrain layers ----
 
 // Shading model ids. The id arrives per draw in gShadingModel and is dispatched by a uniform switch.
 #define AVER_MODEL_STANDARD 0u   // metallic / roughness, Cook-Torrance GGX
@@ -677,6 +691,238 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     return averAuthoredFrom(averMaterialData(), map);
 }
 
+// ---- wave3 terrain layers ----
+// A LAYERED TERRAIN MATERIAL (AVER_MAT_TERRAIN): up to 8 layers blended per pixel by a section's weightmaps
+// and a height-based mix. ONE BODY FOR EVERY PATH -- raster (averStockAuthoredAt) and every ray hit
+// (voxi_rt.hlsli's rtHitSurface) call averTerrainMaps; only the two fetch functions differ, selected by the
+// static gAverTerrainRt exactly as the material graph's ray twin selects its sampler. No blend maths is
+// duplicated.
+//
+// The slots under the flag: 0 albedo atlas (rgb sRGB, a = layer height), 1 ORM atlas (R AO, G roughness,
+// B metallic), 2 normal atlas, 3 weightmap A (layers 1..4 in rgba), 4 weightmap B (layers 5..7 in rgb),
+// 5 the 8 x 9 R32Float parameter texture (rows AVER_TERRAIN_ROW_*). Layer 0 has no stored weight: it is
+// whatever the others leave.
+static bool gAverTerrainRt = false;
+#ifdef AVER_RT_BINDLESS
+// Defined in voxi_rt.hlsli, which follows this text in the translation unit.
+float4 averRtTerrainSample(uint slot, float2 uv, float2 gx, float2 gy);
+float  averRtTerrainParam(uint x, uint y);
+#endif
+
+float averTerrainParam(uint x, uint y) {
+#ifdef AVER_RT_BINDLESS
+    if (gAverTerrainRt) return averRtTerrainParam(x, y);
+#endif
+#ifdef AVER_MATERIAL_SRV
+    return gL1BaseColorMap.Load(int3(x, y, 0)).r;
+#else
+    return 0.0;
+#endif
+}
+
+// Explicit gradients always: layers are fetched under divergent control flow, and a ray hit has no
+// screen derivatives. Slots 0..4 only.
+float4 averTerrainSample(uint slot, float2 uv, float2 gx, float2 gy) {
+#ifdef AVER_RT_BINDLESS
+    if (gAverTerrainRt) return averRtTerrainSample(slot, uv, gx, gy);
+#endif
+#ifdef AVER_MATERIAL_SRV
+    switch (slot) {
+    case 0u: return gBaseColorMap.SampleGrad(gMaterialSampler, uv, gx, gy);
+    case 1u: return gMetalRoughMap.SampleGrad(gMaterialSampler, uv, gx, gy);
+    case 2u: return gNormalMap.SampleGrad(gMaterialSampler, uv, gx, gy);
+    case 3u: return gOcclusionMap.SampleGrad(gMaterialSampler, uv, gx, gy);
+    case 4u: return gEmissiveMap.SampleGrad(gMaterialSampler, uv, gx, gy);
+    default: break;
+    }
+#endif
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+
+// Where layer k's pixel lands in the atlas, its footprint there, and how far into the flat-average
+// blend it is. Cell tiles are `tile` texels with `pad` wrapped texels around them (stride = tile + 2 pad),
+// and mips are built per cell, so the pad stays valid down to mip log2(pad); past log2(pad) + 0.5 a layer
+// is its flat average instead of a fetch, which is why no pad bleed shows.
+void averTerrainAtlasUV(uint k, float2 uv, float2 gx, float2 gy, float uvScale, float cols, float stride,
+                        float tile, float pad, float2 atlasSize,
+                        out float2 auv, out float2 gxa, out float2 gya, out float farK) {
+    const float2 gxt = gx * (uvScale * tile);   // texels per pixel inside one tile
+    const float2 gyt = gy * (uvScale * tile);
+    const float lod = log2(max(max(length(gxt), length(gyt)), 1.0));
+    farK = saturate(lod - (log2(max(pad, 1.0)) - 0.5));
+    const float2 cell = float2(float(k % uint(cols + 0.5)), float(k / uint(cols + 0.5)));
+    const float2 f = frac(uv * uvScale);
+    auv = (cell * stride + pad + f * tile) / atlasSize;
+    gxa = gxt / atlasSize;
+    gya = gyt / atlasSize;
+}
+
+// The maps of a terrain material at one point. gx/gy are the uv-space footprint (screen derivatives on
+// raster, ray differentials or a cone on a hit); `lite` is a secondary bounce: the dominant layer's albedo
+// and ORM only, no height blend and no normals. The weightmap footprint is derived from the same gx/gy
+// through uvTilesPerCm, which is valid because the landscape mesh bakes world-aligned UVs at that scale.
+AverMaps averTerrainMaps(AverMaterialData m, float3 wpos, float2 uv, float2 gx, float2 gy, bool lite) {
+    AverMaps r;
+    r.baseColor  = float4(1.0, 1.0, 1.0, 1.0);
+    r.metalRough = float2(1.0, 1.0);
+    r.normalTS   = float3(0.0, 0.0, 1.0);
+    r.normalLen  = 1.0;
+    r.occlusion  = 1.0;
+    r.emissive   = float3(1.0, 1.0, 1.0);
+
+    const uint  count = min(uint(averTerrainParam(5u, AVER_TERRAIN_ROW_LAYOUT) + 0.5), 8u);
+    if (count == 0u) return r;
+    const float cols      = averTerrainParam(0u, AVER_TERRAIN_ROW_LAYOUT);
+    const float stride    = averTerrainParam(2u, AVER_TERRAIN_ROW_LAYOUT);
+    const float tile      = averTerrainParam(3u, AVER_TERRAIN_ROW_LAYOUT);
+    const float pad       = averTerrainParam(4u, AVER_TERRAIN_ROW_LAYOUT);
+    const float blendDepth = max(averTerrainParam(6u, AVER_TERRAIN_ROW_LAYOUT), 1e-3);
+    const float2 atlasSize = float2(averTerrainParam(7u, AVER_TERRAIN_ROW_LAYOUT),
+                                    averTerrainParam(4u, AVER_TERRAIN_ROW_SECTION));
+    const float invExtent = averTerrainParam(2u, AVER_TERRAIN_ROW_SECTION);
+
+    // ---- 1. the weights: layer 0 is what the stored layers leave ----
+    float w[8];
+    [unroll] for (uint z = 0u; z < 8u; ++z) w[z] = 0.0;
+    w[0] = 1.0;
+    if (invExtent > 0.0) {
+        const float2 origin = float2(averTerrainParam(0u, AVER_TERRAIN_ROW_SECTION),
+                                     averTerrainParam(1u, AVER_TERRAIN_ROW_SECTION));
+        const float  halfTexel = averTerrainParam(3u, AVER_TERRAIN_ROW_SECTION);
+        const float2 uvW = (wpos.xy - origin) * invExtent + halfTexel;
+        if (all(uvW >= 0.0) && all(uvW <= 1.0)) {
+            const float  wScale = m.uvTilesPerCm > 0.0 ? invExtent / m.uvTilesPerCm : 0.0;
+            const float2 uvC = clamp(uvW, halfTexel.xx, 1.0 - halfTexel.xx);   // never wrap at the section edge
+            const float4 wA = averTerrainSample(3u, uvC, gx * wScale, gy * wScale);
+            const float4 wB = averTerrainSample(4u, uvC, gx * wScale, gy * wScale);
+            w[1] = wA.r; w[2] = wA.g; w[3] = wA.b; w[4] = wA.a; w[5] = wB.r; w[6] = wB.g; w[7] = wB.b;
+            w[0] = saturate(1.0 - (wA.r + wA.g + wA.b + wA.a + wB.r + wB.g + wB.b));
+        }
+    }
+    float wsum = 0.0, wmax = -1.0;
+    uint dom = 0u;
+    [loop] for (uint i0 = 0u; i0 < 8u; ++i0) {
+        if (i0 >= count) w[i0] = 0.0;       // a layer the material does not have contributes nothing
+        wsum += w[i0];
+        if (w[i0] > wmax) { wmax = w[i0]; dom = i0; }
+    }
+    [unroll] for (uint i1 = 0u; i1 < 8u; ++i1) w[i1] = wsum > 1e-5 ? w[i1] / wsum : (i1 == 0u ? 1.0 : 0.0);
+
+    // ---- 2. pass 1: albedo and height of the active layers ----
+    float3 albedo[8];
+    float  farK[8];
+    float  a[8];
+    float  b[8];
+    float  aMax = -1e9;
+    [loop] for (uint k = 0u; k < 8u; ++k) {
+        albedo[k] = float3(0.0, 0.0, 0.0);
+        farK[k] = 1.0;
+        a[k] = -1e9;
+        b[k] = 0.0;
+        if (k >= count) continue;
+        if (lite ? (k != dom) : (k != dom && w[k] < 0.004)) continue;
+        const float uvScale = averTerrainParam(k, AVER_TERRAIN_ROW_UVSCALE);
+        const float3 avg = float3(averTerrainParam(k, AVER_TERRAIN_ROW_AVG_R), averTerrainParam(k, AVER_TERRAIN_ROW_AVG_G),
+                                  averTerrainParam(k, AVER_TERRAIN_ROW_AVG_B));
+        float2 auv, gxa, gya; float fk;
+        averTerrainAtlasUV(k, uv, gx, gy, uvScale, cols, stride, tile, pad, atlasSize, auv, gxa, gya, fk);
+        float3 col = avg;
+        float  h = 0.5;
+        if (fk < 1.0) {
+            const float4 s = averTerrainSample(0u, auv, gxa, gya);
+            col = lerp(s.rgb, avg, fk);
+            h   = lerp(s.a, 0.5, fk);
+        }
+        albedo[k] = col;
+        farK[k] = fk;
+        a[k] = w[k] + h + averTerrainParam(k, AVER_TERRAIN_ROW_HEIGHTBIAS);
+        aMax = max(aMax, a[k]);
+    }
+
+    // ---- 3. the height blend (Mishkinis): layers within blendDepth of the tallest keep weight ----
+    // Depth near 1 is meant to read as plain linear weights, which the formula alone does not give (every
+    // active layer would sit within depth of the top), so above 0.5 it fades to the weights themselves.
+    float sumB = 0.0, sumW = 0.0;
+    [loop] for (uint k2 = 0u; k2 < 8u; ++k2) {
+        if (a[k2] < -1e8) continue;
+        b[k2] = lite ? 1.0 : max(a[k2] - aMax + blendDepth, 0.0);
+        sumB += b[k2];
+        sumW += w[k2];
+    }
+    const float lin = saturate((blendDepth - 0.5) * 2.0);
+    float keptSum = 0.0;
+    [loop] for (uint k3 = 0u; k3 < 8u; ++k3) {
+        if (a[k3] < -1e8) { b[k3] = 0.0; continue; }
+        const float hb = sumB > 0.0 ? b[k3] / sumB : 0.0;
+        const float lw = sumW > 0.0 ? w[k3] / sumW : 0.0;
+        b[k3] = lite ? hb : lerp(hb, lw, lin);
+        if (!lite && b[k3] <= 0.01) b[k3] = 0.0;   // too small to pay a second fetch for
+        keptSum += b[k3];
+    }
+
+    // ---- 4. pass 2: ORM and normals of the layers that survived, combined ----
+    float3 alb = float3(0.0, 0.0, 0.0);
+    float  rough = 0.0, metal = 0.0, ao = 0.0;
+    float3 nScaled = float3(0.0, 0.0, 0.0), nRaw = float3(0.0, 0.0, 0.0);
+    [loop] for (uint k4 = 0u; k4 < 8u; ++k4) {
+        if (b[k4] <= 0.0) continue;
+        const float bk = b[k4] / max(keptSum, 1e-5);
+        alb += albedo[k4] * bk;
+        float layerRough = averTerrainParam(k4, AVER_TERRAIN_ROW_AVG_ROUGH);
+        float layerMetal = averTerrainParam(k4, AVER_TERRAIN_ROW_AVG_METAL);
+        float layerAo = 1.0;
+        float3 n = float3(0.0, 0.0, 1.0);
+        if (farK[k4] < 1.0) {
+            float2 auv, gxa, gya; float fk;
+            averTerrainAtlasUV(k4, uv, gx, gy, averTerrainParam(k4, AVER_TERRAIN_ROW_UVSCALE), cols, stride, tile, pad,
+                               atlasSize, auv, gxa, gya, fk);
+            const float4 orm = averTerrainSample(1u, auv, gxa, gya);
+            layerAo    = lerp(orm.r, 1.0, fk);
+            layerRough = lerp(orm.g, layerRough, fk);
+            layerMetal = lerp(orm.b, layerMetal, fk);
+            if (!lite) {
+                const float3 nt = averTerrainSample(2u, auv, gxa, gya).xyz * 2.0 - 1.0;
+                n = lerp(nt, float3(0.0, 0.0, 1.0), fk);
+            }
+        }
+        rough += layerRough * bk;
+        metal += layerMetal * bk;
+        ao    += layerAo * bk;
+        nRaw    += n * bk;
+        nScaled += float3(n.xy * m.normalScale, n.z) * bk;
+    }
+    r.baseColor  = float4(alb, 1.0);
+    r.metalRough = float2(rough, metal);
+    r.occlusion  = ao;
+    if (!lite) {
+        r.normalTS  = normalize(nScaled);
+        r.normalLen = length(nRaw);
+    }
+    return r;
+}
+
+// Raster entry: the terrain maps when the flag is set, else the stock path. The footprint is the screen
+// derivative of uv, so this must be called from uniform control flow (the flag is a cbuffer bit).
+// Not in the ray-traced raster variants by default: at their register limit the extra body hung the RX 7800 XT
+// on the first raster frame (2026-10-11); there the terrain shows its base layer.
+#ifndef AVER_RASTER_TERRAIN_LAYERS
+#if defined(AVER_RT) && AVER_RT
+#define AVER_RASTER_TERRAIN_LAYERS 0
+#else
+#define AVER_RASTER_TERRAIN_LAYERS 1
+#endif
+#endif
+AverAuthored averStockAuthoredAt(AverVertex v, float2 uv) {
+    const AverMaterialData m = averMaterialData();
+    if (AVER_RASTER_TERRAIN_LAYERS && (m.flags & AVER_MAT_TERRAIN)) {
+        const AverMaps map = averTerrainMaps(m, v.wpos, uv, ddx(uv), ddy(uv), false);
+        return averAuthoredFrom(m, map);
+    }
+    return averStockAuthored(uv, v.N);
+}
+// ---- end wave3 terrain layers ----
+
+
 // THE SURFACE, from authored values, the material and the draw's terms, at shading normal N (already
 // perturbed by whichever path has the tangent frame). The one place every renderer derives F0, the
 // energy split, coverage and the rest. No clip(): raster's averBuildSurface does that (compute can't).
@@ -825,7 +1071,7 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
 #ifndef AVER_MATERIAL_GRAPH
 AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     float2 uv = averSurfaceUV(v);
-    return averBuildSurface(v, l, averStockAuthored(uv, v.N), uv);
+    return averBuildSurface(v, l, averStockAuthoredAt(v, uv), uv);
 }
 #endif
 

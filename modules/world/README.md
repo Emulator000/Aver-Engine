@@ -13,6 +13,8 @@ The level/world runtime: `.ocworld`/`.ocmap` loading, object-reference placement
 | `ChunkCoord.hpp` | The region → chunk → local-float coordinate hierarchy. Header-only, **Core-only**. |
 | `LevelTransform.hpp` | The `.ocworld` rotation encoding: Euler degrees ↔ quaternion. Header-only, **Core-only**. |
 | `LevelInstance.hpp/.cpp` | `instantiate()` — parsed placements into live scene entities, plus their static bodies. |
+| `LevelAssetLibrary.hpp/.cpp` | Level instances: the parse cache of child `.ocworld`s, nested-instance closure with cycle and depth checks, stable ids, override resolution and instance bounds. Pure (Core + Formats), compiles without a scene. `docs/LEVEL_INSTANCES.md`. |
+| `LevelPack.hpp/.cpp` | Bakes a level's statically packable mesh placements into an instance table (`.ocinst`) plus a `.ocpack` sidecar for packed level instances. Pure. |
 | `ChunkPayload.hpp/.cpp` | A chunk's contents with **no process-local value in it**, and `capture`/`restore`. |
 | `ChunkPartition.hpp/.cpp` | Which chunk owns which entity, and capturing a whole world at once. |
 | `BodyRegistry.hpp` | Entity → physics body. This association exists nowhere else in the engine. |

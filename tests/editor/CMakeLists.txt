@@ -109,7 +109,9 @@ set_target_properties(LevelListTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_
 # LevelListTest above; the ImGui widgets are visual-only.
 add_executable(LightDetailsTest src/LightDetailsTest.cpp)
 target_include_directories(LightDetailsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src
-                                                  ${CMAKE_SOURCE_DIR}/modules/world/include)
+                                                  ${CMAKE_SOURCE_DIR}/modules/world/include
+                                                  # [wave3/level-instances] the pure half moved to aver/game/LevelLights.hpp (header-only)
+                                                  ${CMAKE_SOURCE_DIR}/Runtime/include)
 target_link_libraries(LightDetailsTest PRIVATE Aver.Formats Aver.Scene Aver.Core Aver.Platform)
 set_target_properties(LightDetailsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
