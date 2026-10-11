@@ -1573,9 +1573,13 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     nrd2Session_.tick(e.device());
     shaderWarmup_.poll();
     hm.mark("head");
-    // --nrd2-capture: handed over once the renderer is attached and the level has a name (or after ~10 s);
-    // it starts stepping on NRD2 frames and holds the camera the same way.
-    if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (!levelName_.empty() || t.frame > 600)) {
+    // --nrd2-capture: handed over once the renderer is attached and the level asked for (--open-level) is the
+    // one loaded, plus ~10 s for streaming to bring in the scene (the startup level used to be captured
+    // instead); it starts stepping on NRD2 frames and holds the camera the same way.
+    const bool nrd2LevelReady = openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_ &&
+                                !levelName_.empty();
+    nrd2CaptureSettle_ = nrd2LevelReady ? nrd2CaptureSettle_ + 1u : 0u;
+    if (nrd2CapturePoses_ && voxiAttached_ && !nrd2CaptureStarted_ && (nrd2CaptureSettle_ > 600u || t.frame > 6000)) {
         render::denoise::Nrd2CaptureConfig c;
         c.scene = levelName_.empty() ? std::string("unnamed") : levelName_;
         // Path Tracing feeds NRD2 different noise: its poses form their own scene for stratified training.

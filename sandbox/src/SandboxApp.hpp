@@ -3637,6 +3637,7 @@ private:
     bool camWanderBased_=false;
     u64  camWanderHeld_=0;           // frames the wander was paused (NeuRAA capture holding a pose)
     std::string nrd2CaptureDir_;     // --nrd2-capture (see setNrd2Capture)
+    u32 nrd2CaptureSettle_ = 0;      // frames the requested level has been loaded
     u32  nrd2CapturePoses_=0, nrd2CaptureHold_=256, nrd2CaptureHeldOut_=~0u;
     bool nrd2CaptureGrid_=false, nrd2CaptureStarted_=false;
     Vec3 camWanderBasePos_{};
