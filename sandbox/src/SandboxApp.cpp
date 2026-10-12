@@ -616,6 +616,9 @@ void SandboxApp::onInit(Engine& e)  {
     // Control rig: register and install before project opens (needs no level).
     anim::controlRigSystem().registerComponents(scene::World::instance());
     anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
+    // Root motion Apply moves the entity only while Play is live: the animation system ticks in edit mode too, and a merely
+    // selected character must not walk off its placement (the packaged game is always live and does not opt in).
+    anim::animSystem().setRootMotionRequiresLive(true);
     game::installIkGroundProbe();   // [wave5/ik-retarget] foot IK casts through physics; a no-op without it
 #endif
 #if AVER_MODULE_RAGDOLL
@@ -2292,6 +2295,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     // --undo-test: fires runUndoTest() N frames in. Lives inside `#if AVER_WITH_IMGUI` block (same as commands it proves).
 #if AVER_WITH_IMGUI
     if (undoTestAutoFrames_ > 0 && --undoTestAutoFrames_ == 0) runUndoTest(e);
+    if (classPlaceTestAutoFrames_ > 0 && --classPlaceTestAutoFrames_ == 0) runClassPlaceTest(e);
     if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
     if (cbMoveTestFrames_ > 0 && --cbMoveTestFrames_ == 0) runCbMoveTest(cbMoveTestDir_);
     if (saveDirtyTestFrames_ > 0 && --saveDirtyTestFrames_ == 0) runSaveDirtyTest();

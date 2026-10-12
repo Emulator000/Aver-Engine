@@ -107,6 +107,9 @@ void SandboxApp::setDroneAuto(int framesIn) { droneAutoFrames_ = framesIn; }
 // --undo-test [N]: frames before runUndoTest fires and exits.
 void SandboxApp::setUndoTestAuto(int framesIn) { undoTestAutoFrames_ = framesIn; }
 
+// --class-place-test [N]: frames before runClassPlaceTest fires and exits.
+void SandboxApp::setClassPlaceTestAuto(int framesIn) { classPlaceTestAutoFrames_ = framesIn; }
+
 // --keybind-test write|read [N]: test keybinding persistence.
 void SandboxApp::setKeybindTestAuto(std::string mode, int framesIn) {
     keybindTestMode_ = std::move(mode); keybindTestAutoFrames_ = framesIn;
@@ -927,6 +930,10 @@ void SandboxApp::maybeInputStuckTest() {
 void SandboxApp::maybePlayTest() {
     if (!playTest_) return;
     if (!playTestBegun_) {
+        // Wait for an --open-level request to finish loading (and ~1 s more): otherwise Play begins on the
+        // startup level, which is what the play-test then reports on.
+        if (!openLevelByName_.empty() || !pendingOpenPath_.empty() || pendingOpenPrompt_) { playTestSettle_ = 0; return; }
+        if (++playTestSettle_ < 60u) return;
         // No GameMode is a case worth testing; test the engine default pawn fallback too.
         if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
             if (++playTestWait_ <= 10) return;
@@ -2179,6 +2186,223 @@ void SandboxApp::runUndoTest(Engine& eng) {
 
     AVER_INFO("[undo-test] {} failure(s)", failures);
     std::exit(failures == 0 ? 0 : 1);
+}
+
+// --class-place-test [N]: graph-class actors placed, saved, deleted, undone and respawned, against
+// test-content/ClassPlace (one `class AN_CompProbe` placement; Content/Scripts/CompProbe.ocgraph declares it
+// with a Mesh part and a Scene part under it). Needs the managed scripting host up, which is why the default
+// delay is long. Run: Sandbox.exe --project test-content/ClassPlace/Game.ocproject --class-place-test
+void SandboxApp::runClassPlaceTest(Engine& eng) {
+    (void)eng;
+    int failures = 0;
+    auto check = [&](bool cond, const char* what) {
+        if (cond) AVER_INFO("[class-place-test] PASS: {}", what);
+        else      { AVER_ERROR("[class-place-test] FAIL: {}", what); ++failures; }
+    };
+    auto finish = [&]() {
+        AVER_INFO("[class-place-test] {} failure(s)", failures);
+        std::exit(failures == 0 ? 0 : 1);
+    };
+
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    scene::World& w = scene::World::instance();
+    const std::string tmp = (std::filesystem::temp_directory_path() / "aver_classplace_test.ocworld").string();
+
+    // The class placements a save writes, read back through the file parser.
+    auto savedClassLines = [&](std::vector<fmt::OcWorldPlacement>& out) {
+        out.clear();
+        if (!saveLevel(tmp)) return false;
+        fmt::OcWorldData d;
+        if (!fmt::loadOcworld(tmp, d)) return false;
+        for (const fmt::OcWorldPlacement& p : d.placements)
+            if (!p.className.empty()) out.push_back(p);
+        return true;
+    };
+    auto liveInstances = [&]() {
+        usize n = 0;
+        for (const ClassInstance& ci : levelClassInstances_)
+            if (!ci.removed && ci.entity != 0 && w.valid(static_cast<scene::Entity>(ci.entity))) ++n;
+        return n;
+    };
+    auto subtreeSize = [&](scene::Entity root) {
+        std::vector<scene::Entity> v;
+        collectSubtree(w, root, v);
+        return v.size();
+    };
+
+    // The viewport accepts what spawnFromAssetDrop can place (prefabs and levels were refused before).
+    check(isPlaceableAssetExt(".ocgraph"), "a .ocgraph is placeable");
+    check(isPlaceableAssetExt(".ocworld") && isPlaceableAssetExt(".ocmap"), "a level (.ocworld/.ocmap) is placeable");
+    check(isPlaceableAssetExt(".ocprefab"), "a .ocprefab is placeable");
+    check(isPlaceableAssetExt(".ocmesh") && !isPlaceableAssetExt(".ocmat") && !isPlaceableAssetExt(""),
+          "meshes stay placeable and other assets are not");
+
+#if AVER_MODULE_SCRIPTING
+    if (!scripts_.ready()) {
+        check(false, "the scripting host is ready (build the managed projects, or raise the frame delay)");
+        finish();
+    }
+#endif
+    spawnClassPlacements();   // idempotent; covers a level that finished loading after the retry call
+
+    // 1. The level's own class placement is live, with its COMP parts, and the Mesh part is visible.
+    check(liveInstances() == 1 && classAuthored_.size() == 1, "after load: one class placement, one live instance");
+    if (liveInstances() != 1) finish();
+    const scene::Entity root = static_cast<scene::Entity>(levelClassInstances_[0].entity);
+    check(subtreeSize(root) == 3, "the root has its two COMP parts (body, and tip under it)");
+    scene::Entity body = scene::kInvalidEntity;
+    {
+        std::vector<scene::Entity> v;
+        collectSubtree(w, root, v);
+        for (usize i = 1; i < v.size(); ++i)
+            if (const auto* mr = w.component<scene::CMeshRenderer>(v[i], scene::kComponentMeshRenderer))
+                if (mr->mesh == fnv1a64(std::string_view("Meshes/cube.ocmesh")) &&
+                    (mr->flags & scene::kMeshRendererVisible))
+                    body = v[i];
+    }
+    check(body != scene::kInvalidEntity, "the body part is a visible CMeshRenderer on Meshes/cube.ocmesh (the edit-mode preview)");
+
+    // 2. A click on a part resolves to the class root.
+    const scene::Entity plain = w.create("ClassPlaceProbeCube", scene::kInvalidEntity, Transform{});
+    check(classRootOf(body) == root && classRootOf(root) == root, "classRootOf: part -> root, root -> itself");
+    check(classRootOf(plain) == scene::kInvalidEntity, "classRootOf: an ordinary entity belongs to no class");
+    w.destroy(plain);
+
+    // 3. Framing a mesh-less root uses its parts' box, not the 1 cm fallback.
+    multiSetSingle(root);
+    check(selectedRadius() > 40.0f, "selectedRadius of a class root spans its parts");
+
+    // 4. placeClassInstance.
+    std::string why;
+    const scene::Entity e2 = placeClassInstance(editor::makeClassPlacement("AN_CompProbe", Vec3{500, 0, 0}, 90.0), &why);
+    check(e2 != scene::kInvalidEntity && w.valid(e2), "placeClassInstance spawns a class actor");
+    if (e2 == scene::kInvalidEntity) { AVER_ERROR("[class-place-test] why: {}", why); finish(); }
+    check(liveInstances() == 2 && classAuthored_.size() == 2, "two live instances, two authored placements");
+    check(!undoStack_.empty() && undoStack_.back().kind == EditCmd::Kind::Create &&
+          undoStack_.back().className == "AN_CompProbe" && undoStack_.back().classSlot == 1,
+          "the Create edit carries the class name and slot");
+    check(selEntity_ == e2 && subtreeSize(e2) == 3, "the new root is selected and has its parts");
+
+    // 5. A moved root is saved at its live pose.
+    {
+        Transform xf = w.localTransform(e2);
+        xf.position = Vec3{700, 50, 0};
+        xf.rotation = quatFromEulerDeg(Vec3{0, 0, 90});
+        w.setLocalTransform(e2, xf);
+    }
+    std::vector<fmt::OcWorldPlacement> lines;
+    check(savedClassLines(lines) && lines.size() == 2, "save writes both class placements");
+    if (lines.size() == 2)
+        check(std::fabs(lines[1].x - 700.0) < 0.01 && std::fabs(lines[1].y - 50.0) < 0.01 &&
+              std::fabs(lines[1].yaw - 90.0) < 0.1, "the second placement is written at its moved pose");
+
+    // 6. Delete, undo, redo (F5 and F6).
+    const EditId id2 = editIdFor(e2);
+    std::vector<scene::Entity> parts2;
+    collectSubtree(w, e2, parts2);
+    multiSetSingle(e2);
+    deleteSelection();
+    w.flush();
+    bool partsGone = true;
+    for (const scene::Entity p : parts2) if (w.valid(p)) partsGone = false;
+    check(!w.valid(e2) && partsGone, "Delete removes the root and its parts");
+    check(liveInstances() == 1 && classSlotOfEntity(e2) < 0, "the deleted instance is tombstoned");
+    check(savedClassLines(lines) && lines.size() == 1, "save after Delete writes one class placement");
+
+    undo();
+    w.flush();
+    const scene::Entity back = static_cast<scene::Entity>(entityForEdit(id2));
+    check(back != scene::kInvalidEntity && w.valid(back) && subtreeSize(back) == 3,
+          "undo of Delete respawns the class with its parts, bound to the same edit id");
+    check(liveInstances() == 2 && savedClassLines(lines) && lines.size() == 2, "save after undo writes two");
+    if (lines.size() == 2) check(std::fabs(lines[1].x - 700.0) < 0.01, "the respawned actor is back where it was");
+
+    redo();
+    w.flush();
+    check(liveInstances() == 1 && savedClassLines(lines) && lines.size() == 1, "redo deletes it again");
+
+    // 7. Undo and redo of a Create.
+    const scene::Entity e3 = placeClassInstance(editor::makeClassPlacement("AN_CompProbe", Vec3{400, 0, 0}, 0.0), &why);
+    check(e3 != scene::kInvalidEntity && savedClassLines(lines) && lines.size() == 2, "a third placement is saved");
+    undo();
+    w.flush();
+    check(liveInstances() == 1 && savedClassLines(lines) && lines.size() == 1, "undo of a Create removes it from the level and the save");
+    redo();
+    w.flush();
+    check(liveInstances() == 2 && savedClassLines(lines) && lines.size() == 2, "redo of a Create brings it back");
+
+    // 8. The Stop respawn: aver_fw_end_play destroys class actors; respawnLostClassInstances puts them back
+    // at the pose Play started from (the snapshot capturePlayWorld takes, written here directly so the
+    // test does not start Play's physics and mobility sessions).
+    {
+        playClassSnapshot_.clear();
+        for (usize slot = 0; slot < levelClassInstances_.size(); ++slot) {
+            const ClassInstance& ci = levelClassInstances_[slot];
+            if (ci.removed || ci.entity == 0) continue;
+            const scene::Entity r = static_cast<scene::Entity>(ci.entity);
+            playClassSnapshot_.push_back(PlayClassSaved{ci.placement, editIdFor(r), w.localTransform(r)});
+        }
+        const scene::Entity first = static_cast<scene::Entity>(levelClassInstances_[0].entity);
+        const EditId firstId = editIdFor(first);
+        const Transform firstXf = w.localTransform(first);
+        aver_fw_destroy(static_cast<int32_t>(first));
+        w.flush();
+        check(!w.valid(first), "the stand-in sweep destroyed the class root");
+        respawnLostClassInstances();
+        w.flush();
+        const scene::Entity again = static_cast<scene::Entity>(entityForEdit(firstId));
+        check(again != scene::kInvalidEntity && w.valid(again) && again != first && subtreeSize(again) == 3,
+              "respawnLostClassInstances recreates the root with its parts and rebinds its edit id");
+        check(again != scene::kInvalidEntity && w.valid(again) &&
+              dist(w.localTransform(again).position, firstXf.position) < 0.01f,
+              "...at its pre-Play pose");
+        check(liveInstances() == 2, "no instance was duplicated or lost");
+    }
+
+    // 9. Duplicate refuses a class actor instead of making an unsaved husk.
+    {
+        const scene::Entity r = static_cast<scene::Entity>(levelClassInstances_[0].entity);
+        multiSetSingle(r);
+        const u32 before = w.count();
+        cbStatus_.clear();
+        duplicateSelection();
+        w.flush();
+        check(w.count() == before && cbStatus_.find("graph-class") != std::string::npos,
+              "Duplicate on a class actor changes nothing and says why");
+    }
+
+#if AVER_MODULE_MCP
+    // 10. The MCP place path takes class lines.
+    {
+        const usize liveBefore = liveInstances();
+        std::string res, wy;
+        check(mcpLevelPlace("PLACE none 100 0 0 0 0 0 1 class AN_CompProbe", res, wy) && liveInstances() == liveBefore + 1,
+              "level place accepts a class line and spawns it");
+        res.clear(); wy.clear();
+        const usize liveMid = liveInstances();
+        check(!mcpLevelPlace("PLACE none 0 0 0 0 0 0 1 class AN_DoesNotExist", res, wy) &&
+              wy.find("not declared") != std::string::npos && liveInstances() == liveMid,
+              "level place refuses an undeclared class, naming why, and places nothing");
+    }
+#endif
+
+    // 11. A class declared as a GameMode is refused (the flag is set directly: no graph needed).
+    {
+        const int32_t rules = aver_fw_class_declare("AN_ClassPlaceTestRules", "Actor");
+        aver_fw_class_set_flags(rules, AVER_FW_CLASS_GAME_MODE);
+        const usize liveBefore = liveInstances();
+        why.clear();
+        const scene::Entity r = placeClassInstance(editor::makeClassPlacement("AN_ClassPlaceTestRules", Vec3{0, 0, 0}, 0.0), &why);
+        check(r == scene::kInvalidEntity && why.find("World Settings") != std::string::npos && liveInstances() == liveBefore,
+              "a GameMode class is refused with the World Settings text");
+    }
+
+    std::error_code rmEc;
+    std::filesystem::remove(tmp, rmEc);
+#else
+    AVER_INFO("[class-place-test] AVER_MODULE_SCENE or AVER_MODULE_FRAMEWORK is off; nothing to test");
+#endif
+    finish();
 }
 
 // --keybind-test write|read: a TWO-PROCESS test that a rebind survives restart

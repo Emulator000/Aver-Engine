@@ -3,6 +3,7 @@
 #include "EditorEntitySnapshot.hpp"
 #if AVER_MODULE_SCENE
 #include "aver/scene/Components.hpp"
+#include "aver/scene/scene_abi.h"
 
 #include <cstring>
 
@@ -36,6 +37,14 @@ EntitySnapshot captureEntity(scene::World& world, scene::Entity e) {
         c.type = type;
         c.bytes.resize(size);
         std::memcpy(c.bytes.data(), src, size);
+        const u32 fields = world.fieldCount(type);
+        for (u32 k = 0; k < fields; ++k) {
+            const u32 fid = world.fieldAt(type, k);
+            const scene::FieldDesc* fd = world.field(fid);
+            if (!fd || fd->kind != scene::FieldKind::String) continue;
+            const char* text = aver_scene_get_str(static_cast<int32_t>(e), static_cast<int32_t>(fid));
+            c.strings.emplace_back(fid, text ? text : "");
+        }
         snap.components.push_back(std::move(c));
     }
     return snap;
@@ -55,6 +64,14 @@ scene::Entity instantiateEntity(scene::World& world, const EntitySnapshot& snap,
         // handed back.
         if (!dst || world.componentSize(c.type) != c.bytes.size()) continue;
         std::memcpy(dst, c.bytes.data(), c.bytes.size());
+        // The copied slot index belongs to the source: clear it so set_str allocates a fresh slot.
+        for (const auto& [fid, text] : c.strings) {
+            const scene::FieldDesc* fd = world.field(fid);
+            if (!fd || fd->kind != scene::FieldKind::String) continue;
+            std::memset(static_cast<std::byte*>(dst) + fd->offset, 0, sizeof(i64));
+            if (!text.empty())
+                aver_scene_set_str(static_cast<int32_t>(e), static_cast<int32_t>(fid), text.c_str());
+        }
         if (c.type == scene::kComponentMeshRenderer) {
             auto* mr = static_cast<scene::CMeshRenderer*>(dst);
             // dirty=1 ONLY, not flags -- this used to force kMeshRendererVisible on too, which

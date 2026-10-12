@@ -281,6 +281,8 @@ editor specifically: **a class instance's `OnTick` runs the moment it is placed,
 whether or not you have pressed Play** — unlike an ordinary C# actor, which is gated on Play. This
 is also the closest thing to a Construction-Script moment Aver Node has, and it is not a separate
 phase at all — it is the same `OnStart`/`OnTick` a spawned instance always runs.
+Stop ends a play session by destroying every class-bearing entity, so the editor then recreates the
+level's class instances at their pre-Play pose (`respawnLostClassInstances`); their `VAR` state starts fresh.
 
 **Any other `ENTRY` name is on-demand**, compiled the same way but invoked later via
 `GraphHost.Fire(eventName, args, out result)` rather than driven by `Tick()`'s own cadence.
@@ -329,11 +331,23 @@ editor):
 5. **An unresolvable class name** (never declared, or failed to seal per §2) gets one `WARN` and
    produces **no entity at all** — not even a fallback mesh (`GameLevel.cpp:259-286`).
 
-**Authoring one today is a text edit, not a palette drag.** There is no editor UI that places a
-class instance the way dragging a mesh from the content browser places one — you write
-`class AN_Foo` into the `.ocworld`/`.ocmap` file yourself, exactly like `OrbitDemo.ocmap` above.
-The editor's **File ▸ Open Level** does call `spawnClassPlacements()` so a class placement appears
-after loading a level that has one — but see §8 for what **Save** does to it.
+**Placing one in the editor.** Drag an `.ocgraph` that declares a `CLASS` from the Content Browser
+into the viewport, or use **Add ▸ Actor From Graph** (every gameplay graph under Content that declares
+a `CLASS`; GameMode, PlayerController, GameInstance and abstract classes are listed but disabled).
+Either way the editor writes the `PLACE none … class <Name>` record above for you on **Save**, spawns
+the actor for real at the drop point (or in front of the camera), selects it, and makes it one undo
+entry. A click on any part of the actor selects its root; a class with no mesh of its own shows three
+small axis lines so it can be seen and clicked. `level place` over the MCP bridge takes the same
+`class` lines. Writing `class AN_Foo` into the `.ocworld`/`.ocmap` by hand still works, exactly like
+`OrbitDemo.ocmap` above, and **File ▸ Open Level** calls `spawnClassPlacements()` so a class
+placement appears after loading a level that has one.
+
+Limits, stated rather than hidden: a graph's `VAR` state is not kept across Delete/Undo or Play/Stop
+(the respawned instance starts fresh); a `COMP` child can still be moved from the Outliner but is
+rebuilt from the graph, so that is not saved; **Copy / Duplicate** of a class actor is refused with a
+status line (drag the graph in again); Add Component does not apply to a class actor. Placing runs the
+project's graph scan again so a graph written after the project opened is placeable, and is refused
+during Play.
 
 ## 7. Worked example: two orbiting entities, no C#
 
@@ -468,6 +482,16 @@ running. It is also new, and smaller than what it resembles. Specifically:
   entity per placement, `aver_fw_spawn`'s handle IS a scene entity, and the World Outliner lists
   anything carrying a mesh or a name. Both are fixed; `sandbox/src/LevelClassSave.hpp` holds the
   rebuild, and `GraphEditorLoadSaveTest` fails against the old behaviour.
+
+  Two more followed from the same missing bookkeeping, and are fixed with placement: **Delete** went
+  through `World::destroy` and left the placement's instance entry alone, so the next save fell back
+  to the copy read off disk and the deleted actor came back on reload; it now goes through
+  `aver_fw_destroy` (the only path that releases the managed instance) and tombstones the entry
+  (`LevelClassInstance::removed`), and Ctrl+Z respawns the class instead of rebuilding a mesh-less
+  husk. And **Stop** destroyed every class instance in the level (`aver_fw_end_play` sweeps all
+  class-bearing entities), leaving the viewport without them after the first Play; the editor now
+  recreates them at their pre-Play pose. `--class-place-test` against `test-content/ClassPlace`
+  exercises all of it.
 
 A few smaller, related edges, already covered in more depth above: an undeclared/misspelled
 `CLASS` parent fails almost silently (§2), parenting one graph class to another is file-sort-order

@@ -22,6 +22,7 @@ add_executable(Sandbox WIN32
   src/SandboxShell.cpp
   src/SandboxContentBrowser.cpp
   src/SandboxPanels.cpp
+  src/SandboxComponentDetails.cpp
   src/SoftBodyPanel.cpp
   src/SandboxSettings.cpp
   src/SandboxLevelEdit.cpp

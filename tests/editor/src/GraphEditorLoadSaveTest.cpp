@@ -1522,6 +1522,62 @@ static void testClassPlacementsCarryTheEditorsMoves() {
           "the placement would climb on every save/load");
 }
 
+static void testClassPlacementsHonourDeletesAndSessionAdds() {
+    AVER_INFO("=== a deleted graph-class placement is not written; a placed one is ===");
+
+    // THE BUG THIS ENCODES (PLACE_CLASS F5). Delete destroyed the entity and left the placement's instance
+    // entry alone, so the next save found a dead entity, fell back to the copy read off disk, and the deleted
+    // actor came back on reload. An instance now carries a tombstone, and appendClassPlacements honours it
+    // while still writing a placement that has NO instance (its class did not resolve) as it was read.
+    std::vector<fmt::OcWorldPlacement> authored(4);
+    for (auto& p : authored) { p.x = 1; p.y = 2; p.z = 3; p.sx = p.sy = p.sz = 1; }
+    authored[0].className = "AN_Unresolved";   // no instance: written as read
+    authored[1].className = "AN_Deleted";      // instance, removed
+    authored[2].className = "AN_Snapped";      // instance, removed, snapped neighbour of the next
+    authored[2].snapToGround = true; authored[2].z = 25;
+    authored[3].className = "AN_Added";        // session-added: an index beyond the loaded ones
+
+    std::vector<editor::LevelClassInstance> live = {{1, 0}, {2, 0}, {3, 43}};
+    live[0].removed = true;
+    live[1].removed = true;
+    check(live[2].removed == false, "an instance is not removed unless it says so");
+
+    const auto transformOf = [](int32_t e, Transform& xf) {
+        if (e == 43) { xf.position = Vec3{10, 20, 30}; xf.scale = Vec3{1, 1, 1}; return true; }
+        return false;
+    };
+    std::vector<fmt::OcWorldPlacement> out;
+    editor::appendClassPlacements(authored, live, transformOf, out);
+
+    check(out.size() == 2, "the two removed placements are omitted, the other two written");
+    if (out.size() != 2) return;
+    check(out[0].className == "AN_Unresolved" && out[0].x == 1 && out[0].z == 3,
+          "a placement with no instance at all is still written as it was read");
+    check(out[1].className == "AN_Added" && out[1].x == 10 && out[1].y == 20 && out[1].z == 30,
+          "a session-added placement is written at its live pose");
+
+    // A removed instance whose entity handle was reused must not capture the new owner's transform.
+    live.clear();
+    live.push_back(editor::LevelClassInstance{0, 43});
+    live[0].removed = true;
+    out.clear();
+    editor::appendClassPlacements(authored, live, transformOf, out);
+    check(out.size() == 3 && out[0].className == "AN_Deleted" && out[0].x == 1,
+          "(index 0 removed) the rest are written and none takes the stale handle's transform");
+
+    // The snap rule survives next to a removal: a live snapped placement keeps its authored offset.
+    live.clear();
+    live.push_back(editor::LevelClassInstance{1, 0});
+    live.push_back(editor::LevelClassInstance{2, 43});
+    live[0].removed = true;
+    out.clear();
+    editor::appendClassPlacements(authored, live, transformOf, out);
+    bool sawSnapped = false;
+    for (const auto& p : out)
+        if (p.className == "AN_Snapped") { sawSnapped = true; check(p.x == 10 && p.z == 25, "a snapped neighbour still moves in x/y and keeps its z offset"); }
+    check(sawSnapped && out.size() == 3, "removing one placement does not shift which instance pairs with which");
+}
+
 static void testPaletteSearchRanksSensibly() {
     AVER_INFO("=== the add-node palette search ===");
 
@@ -1951,6 +2007,7 @@ int main() {
     testConstNodeValueIsEditable();
     testContentBrowserStarterOpensAndKeepsItsClass();
     testClassPlacementsCarryTheEditorsMoves();
+    testClassPlacementsHonourDeletesAndSessionAdds();
     testPaletteSearchRanksSensibly();
     testCopyPasteRemapsIdsAndLinks();
     testControlRigNodeCarriesItsWeightDefault();

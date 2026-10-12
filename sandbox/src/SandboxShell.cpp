@@ -2247,7 +2247,12 @@ void SandboxApp::buildUI(Engine& e) {
     ImGui::EndDisabled();
 #endif
     ImGui::SameLine();
-    if (dropButton("Add")) ImGui::OpenPopup("addActor");
+    if (dropButton("Add")) {
+        ImGui::OpenPopup("addActor");
+#if AVER_MODULE_FRAMEWORK
+        classPickDirty_ = true;   // Actor From Graph rescans Content each time the popup opens
+#endif
+    }
     uiReg_.track("toolbar.add");
     if (ImGui::BeginPopup("addActor")) {
         ImGui::TextDisabled("Place Actor"); ImGui::Separator();
@@ -2268,6 +2273,10 @@ void SandboxApp::buildUI(Engine& e) {
         uiReg_.track("toolbar.add.rectLight");
         if (ImGui::Selectable("Decal")) spawnDecalAtCamera();
         uiReg_.track("toolbar.add.decal");
+#if AVER_MODULE_FRAMEWORK
+        if (ImGui::BeginMenu("Actor From Graph")) { drawGraphActorMenu(); ImGui::EndMenu(); }
+        uiReg_.track("toolbar.add.actorFromGraph");
+#endif
 #endif
         if (ImGui::Selectable("Post Process Volume")) {
             postVolumeTools_.addAtCamera(levelHeader_.postVolumes, viewPos());
@@ -2394,7 +2403,7 @@ void SandboxApp::buildUI(Engine& e) {
                                 ++placed;
                             }
                             if (placed == 0) {
-                                cbStatus_ = "Nothing in that drag can be placed in the level (only .ocmesh/.ocparticle assets can)";
+                                cbStatus_ = "Nothing in that drag can be placed in the level (only meshes, particles, prefabs, levels and graph classes can)";
                                 AVER_INFO("[Editor] drop: none of the {} dragged item(s) is a placeable asset",
                                           dragged.size());
                             }

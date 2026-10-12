@@ -33,6 +33,7 @@ namespace aver::editor {
 struct LevelClassInstance {
     std::size_t placement = 0;
     int32_t     entity    = 0;
+    bool        removed   = false;   // deleted in the editor: not written, not pickable
 };
 
 // Rebuilds `authored` into `out`, replacing each placement's transform with its live entity's when
@@ -51,6 +52,7 @@ void appendClassPlacements(const std::vector<fmt::OcWorldPlacement>& authored,
         if (li.placement < byPlacement.size()) byPlacement[li.placement] = &li;
 
     for (std::size_t i = 0; i < authored.size(); ++i) {
+        if (byPlacement[i] && byPlacement[i]->removed) continue;
         fmt::OcWorldPlacement p = authored[i];
         Transform xf;
         if (byPlacement[i] && transformOf(byPlacement[i]->entity, xf)) {
@@ -64,6 +66,19 @@ void appendClassPlacements(const std::vector<fmt::OcWorldPlacement>& authored,
         }
         out.push_back(std::move(p));
     }
+}
+
+// The live class root `hit` belongs to: itself, or its nearest ancestor that a non-removed instance owns; 0 if none.
+// parentOf(entity) -> parent or 0. Bounded, so a corrupt hierarchy cannot loop a click.
+template <typename ParentOf>
+int32_t classRootOf(int32_t hit, ParentOf&& parentOf,
+                    const std::vector<LevelClassInstance>& live, std::size_t maxDepth = 64) {
+    for (std::size_t d = 0; hit != 0 && d <= maxDepth; ++d) {
+        for (const LevelClassInstance& li : live)
+            if (!li.removed && li.entity == hit) return hit;
+        hit = parentOf(hit);
+    }
+    return 0;
 }
 
 } // namespace aver::editor

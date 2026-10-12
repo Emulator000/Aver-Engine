@@ -197,6 +197,32 @@ target_include_directories(GraphAssetPresentationTest PRIVATE ${CMAKE_SOURCE_DIR
 target_link_libraries(GraphAssetPresentationTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(GraphAssetPresentationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# GraphClassPlacementTest -- sandbox/src/GraphClassPlacement.hpp + the class-root/tombstone rules in
+# LevelClassSave.hpp. Header-only; the ImGui menu, drop and gizmo are covered by --class-place-test.
+add_executable(GraphClassPlacementTest src/GraphClassPlacementTest.cpp)
+target_include_directories(GraphClassPlacementTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_compile_definitions(GraphClassPlacementTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+target_link_libraries(GraphClassPlacementTest PRIVATE Aver.Formats Aver.World Aver.Core Aver.Platform)
+set_target_properties(GraphClassPlacementTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PlacedComponentModelTest -- sandbox/src/PlacedComponentModel.hpp, the rules behind Details > Add Component for the
+# animation and AI components: canAttach / canRemove and their reasons, the picker's asset listing, the creation
+# defaults (also pushed through game::applyPlacedComponent on a live world) and the skeleton preselect. Header-only and
+# window-free like LightDetailsTest; the sections themselves (SandboxComponentDetails.cpp) are ImGui, covered by the
+# owner's headed run (docs/plans/parity_demo/ADD_COMPONENT.md section 10). The AI cases compile only where Aver.Synapse.Scene
+# exists (it brings AVER_MODULE_SYNAPSE_SCENE); Game.Core links it PRIVATE, so the test links it itself.
+if(TARGET Aver.Runtime.Game.Core AND TARGET Aver.Anim.Scene AND TARGET Aver.Scene)
+  add_executable(PlacedComponentModelTest src/PlacedComponentModelTest.cpp)
+  target_include_directories(PlacedComponentModelTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src
+                                                              ${CMAKE_SOURCE_DIR}/Runtime/include
+                                                              ${CMAKE_SOURCE_DIR}/modules/world/include)
+  target_link_libraries(PlacedComponentModelTest PRIVATE Aver.Runtime.Game.Core Aver.Anim.Scene Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+  if(TARGET Aver.Synapse.Scene)
+    target_link_libraries(PlacedComponentModelTest PRIVATE Aver.Synapse.Scene)
+  endif()
+  set_target_properties(PlacedComponentModelTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
 # (add/delete/reparent/reorder) and the tab's own load/save/dirty/undo bookkeeping.
 #

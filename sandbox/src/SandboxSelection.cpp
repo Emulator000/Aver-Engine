@@ -793,6 +793,9 @@ scene::Entity SandboxApp::spawnEntityFrom(const editor::EntitySnapshot& snap, co
 // caller of spawnEntityFrom that must preserve the original EditId rather than mint a fresh one,
 // since a later redo/undo of the SAME command needs to keep finding the same logical entity.
 void SandboxApp::recreateFrom(const EditCmd& c) {
+#if AVER_MODULE_FRAMEWORK
+    if (!c.className.empty()) { respawnClassFromEdit(c); return; }
+#endif
     // RESTORED UNDER WHAT IT HUNG FROM. A parent that has since been destroyed itself resolves
     // to kInvalidEntity and the entity comes back as a root -- losing the relationship, which is
     // recoverable by hand, rather than losing the object, which is not.
@@ -1120,12 +1123,22 @@ void SandboxApp::destroyEntity(scene::Entity e) {
     if (!w.valid(e)) return;
 
     std::vector<scene::Entity> doomed;
+#if AVER_MODULE_FRAMEWORK
+    const int classIdx = classSlotOfEntity(e);
+#endif
     collectSubtree(w, e, doomed);
 #if AVER_MODULE_SCENE
     onStreamedEntityDestroyed(e);   // a streamed placement's record goes with it
 #endif
 
-    w.destroy(e);
+#if AVER_MODULE_FRAMEWORK
+    if (classIdx >= 0) {
+        aver_fw_destroy(static_cast<int32_t>(e));   // managed unbind frees the GraphHost; destroys the subtree like w.destroy
+        levelClassInstances_[classIdx].entity  = 0;
+        levelClassInstances_[classIdx].removed = true;
+    } else
+#endif
+        w.destroy(e);
     for (const scene::Entity d : doomed) {
         levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), d),
                              levelEntities_.end());
@@ -1251,6 +1264,7 @@ void SandboxApp::undo() {
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameBefore); break;
         case EditCmd::Kind::RemoveComponent: restoreComponent(c.id, c.removedComponent); break;
+        case EditCmd::Kind::PlacedComponent: applyPlacedComponentState(c.id, c.pcType, c.pcBefore); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/true); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/true); break;
@@ -1320,6 +1334,7 @@ void SandboxApp::redo() {
 #if AVER_MODULE_SCENE
         case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameAfter); break;
         case EditCmd::Kind::RemoveComponent: removeComponentRaw(c.id, c.removedComponent.type); break;
+        case EditCmd::Kind::PlacedComponent: applyPlacedComponentState(c.id, c.pcType, c.pcAfter); break;
         case EditCmd::Kind::Visibility: applyVisibilityTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Collision:  applyCollideTo(c, /*undoing=*/false); break;
         case EditCmd::Kind::Animation:  applyAnimationTo(c, /*undoing=*/false); break;
@@ -1411,6 +1426,14 @@ f32 SandboxApp::selectedRadius() const {
                 // filled in -- fall through to the scale rather than framing a point.
                 if (half > 1e-3f) return std::fmax(1.0f, half);
             }
+#if AVER_MODULE_FRAMEWORK
+            // A graph-class root carries no mesh of its own: frame the box of its parts.
+            Vec3 lo, hi;
+            if (classPartsBounds(selEntity_, lo, hi)) {
+                const Vec3 d{hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
+                return std::fmax(1.0f, 0.5f * std::sqrt(dot(d, d)));
+            }
+#endif
         }
         return std::fmax(1.0f, s);
     }

@@ -12,12 +12,20 @@
 #include "aver/core/Log.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
+#include "aver/scene/scene_abi.h"
 
+#include <cstddef>
+#include <cstring>
 #include <string>
 
 using namespace aver;
 using namespace aver::scene;
 using aver::editor::EntitySnapshot;
+
+// A component with a String field (the scene's interned string pool, like CSmartObject::asset) and one plain, dynamic
+// component shaped like the Add Component ones (CIkRig: asset id, weight, flags, padding).
+struct CSnapStr { i64 text = 0; i32 count = 0; i32 pad = 0; };
+struct CSnapDyn { u64 asset = 0; f32 weight = 0.0f; u32 flags = 0; u32 reserved[2] = {}; };
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -197,6 +205,85 @@ int main() {
               "undo: CParticleEmitter.seed round-trips byte-exact too (restoreObjectId=true is the SAME "
               "logical entity coming back, not a new one -- it must reproduce the same particle stream, "
               "unlike paste/duplicate above)");
+    }
+
+    // ---------------------------------------------------------------------- String fields (6.3)
+    // A String field stores an index into a process-wide intern pool. A byte copy alone would make a pastedStr entity SHARE
+    // its source's slot, and editing one path would edit both (a duplicated Smart Object); capture records the text and
+    // instantiateEntity re-interns it into a fresh slot, for undo and for paste alike.
+    {
+        auto sb = w.registerComponent<CSnapStr>("CSnapStr");
+        sb.field("text", FieldKind::String, static_cast<u16>(offsetof(CSnapStr, text)))
+          .field("count", FieldKind::I32, static_cast<u16>(offsetof(CSnapStr, count)))
+          .field("pad", FieldKind::I32, static_cast<u16>(offsetof(CSnapStr, pad)));
+        check(sb.verify(sizeof(CSnapStr)), "the test string component's field table verifies");
+        const u32 strType = sb.typeId();
+        const u32 textField = w.fieldId("CSnapStr.text");
+        check(strType != 0 && textField != 0, "the test string component and its field registered");
+
+        const Entity s0 = w.create("StringSnapshotSource", kInvalidEntity, xf0);
+        auto* c0 = static_cast<CSnapStr*>(w.addComponent(s0, strType));
+        check(c0 != nullptr, "string source got its component");
+        if (c0) { *c0 = CSnapStr{}; c0->count = 7; }
+        check(aver_scene_set_str(static_cast<int32_t>(s0), static_cast<int32_t>(textField), "AI/Bench.ocso") != 0,
+              "the source's string field was set");
+
+        const EntitySnapshot ss = aver::editor::captureEntity(w, s0);
+        const auto* sc = findComp(ss, strType);
+        check(sc != nullptr && sc->strings.size() == 1 && sc->strings[0].first == textField && sc->strings[0].second == "AI/Bench.ocso",
+              "captureEntity records the text of the String field");
+
+        const Entity undone = aver::editor::instantiateEntity(w, ss, xf1, kInvalidEntity, /*restoreObjectId=*/true);
+        const Entity pastedStr = aver::editor::instantiateEntity(w, ss, xf1, kInvalidEntity, /*restoreObjectId=*/false);
+        check(undone != kInvalidEntity && pastedStr != kInvalidEntity, "both rebuilds produced an entity");
+        const auto* cU = w.component<CSnapStr>(undone, strType);
+        const auto* cP = w.component<CSnapStr>(pastedStr, strType);
+        check(cU && cP && c0, "all three entities carry the string component");
+        if (cU && cP && c0) {
+            check(c0->text != 0 && cU->text != 0 && cP->text != 0, "all three own a pool slot");
+            check(c0->text != cU->text && c0->text != cP->text && cU->text != cP->text,
+                  "undo and paste each get a FRESH slot: the three entities do not alias one string");
+            check(cU->count == 7 && cP->count == 7, "the plain field beside the string round-trips byte-exact");
+            const auto text = [&](Entity e) { return std::string(aver_scene_get_str(static_cast<int32_t>(e), static_cast<int32_t>(textField))); };
+            check(text(s0) == "AI/Bench.ocso" && text(undone) == "AI/Bench.ocso" && text(pastedStr) == "AI/Bench.ocso",
+                  "the text is equal on all three");
+            aver_scene_set_str(static_cast<int32_t>(pastedStr), static_cast<int32_t>(textField), "AI/Other.ocso");
+            check(text(pastedStr) == "AI/Other.ocso" && text(s0) == "AI/Bench.ocso" && text(undone) == "AI/Bench.ocso",
+                  "editing the copy's path leaves the source and the undone entity alone");
+            aver_scene_set_str(static_cast<int32_t>(s0), static_cast<int32_t>(textField), "AI/Third.ocso");
+            check(text(undone) == "AI/Bench.ocso" && text(pastedStr) == "AI/Other.ocso", "editing the source's path leaves both copies alone");
+        }
+
+        // An empty string stays empty and owns no slot.
+        const Entity e0 = w.create("StringSnapshotEmpty", kInvalidEntity, xf0);
+        if (auto* ce = static_cast<CSnapStr*>(w.addComponent(e0, strType))) *ce = CSnapStr{};
+        const EntitySnapshot es = aver::editor::captureEntity(w, e0);
+        const Entity e1 = aver::editor::instantiateEntity(w, es, xf1, kInvalidEntity, /*restoreObjectId=*/false);
+        const auto* c1 = w.component<CSnapStr>(e1, strType);
+        check(c1 != nullptr && c1->text == 0, "an empty string field comes back empty, with no slot");
+        check(std::string(aver_scene_get_str(static_cast<int32_t>(e1), static_cast<int32_t>(textField))).empty(), "and reads as \"\"");
+    }
+
+    // ---------------------------------------------------- a dynamic (name-registered) component, byte-exact
+    {
+        auto db = w.registerComponent<CSnapDyn>("CSnapDyn");
+        db.field("asset", FieldKind::I64, static_cast<u16>(offsetof(CSnapDyn, asset)))
+          .field("weight", FieldKind::F32, static_cast<u16>(offsetof(CSnapDyn, weight)))
+          .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CSnapDyn, flags)))
+          .field("reserved0", FieldKind::I32, static_cast<u16>(offsetof(CSnapDyn, reserved)))
+          .field("reserved1", FieldKind::I32, static_cast<u16>(offsetof(CSnapDyn, reserved) + sizeof(u32)));
+        check(db.verify(sizeof(CSnapDyn)), "the dynamic test component's field table verifies");
+        const u32 dynType = db.typeId();
+        const Entity d0 = w.create("DynamicSnapshotSource", kInvalidEntity, xf0);
+        auto* cd = static_cast<CSnapDyn*>(w.addComponent(d0, dynType));
+        check(cd != nullptr, "dynamic source got its component");
+        if (cd) { *cd = CSnapDyn{}; cd->asset = 0xA11CE5ull; cd->weight = 0.8f; cd->flags = 6; }
+        const EntitySnapshot ds = aver::editor::captureEntity(w, d0);
+        const auto* dc = findComp(ds, dynType);
+        check(dc != nullptr && dc->bytes.size() == sizeof(CSnapDyn) && dc->strings.empty(), "a component with no String field records no text");
+        const Entity d1 = aver::editor::instantiateEntity(w, ds, xf1, kInvalidEntity, /*restoreObjectId=*/true);
+        const auto* cd1 = w.component<CSnapDyn>(d1, dynType);
+        check(cd1 != nullptr && cd && std::memcmp(cd1, cd, sizeof(CSnapDyn)) == 0, "the dynamic component round-trips byte-exact");
     }
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);

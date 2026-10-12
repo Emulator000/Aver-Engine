@@ -648,6 +648,8 @@ bool SandboxApp::mcpLevelSave(const std::string& targetIn, std::string& r, std::
 // the entities added instead of replaced: label, collide flag, snap offset, authored animation, vehicle
 // preset and body.
 // One Create undo entry per entity -- the undo stack has no compound command (see deleteSelection).
+// A line with `class <Name>` places that graph class actor through placeClassInstance (after the mesh
+// placements), the same path a viewport drop takes; world::instantiate makes no entity for it.
 bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::string& w) {
 #if AVER_MODULE_SCENE
     namespace fs = std::filesystem;
@@ -680,14 +682,12 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
                 "scale or animation value) -- nothing was placed";
             return false;
         }
+#if !AVER_MODULE_FRAMEWORK
         if (!p.className.empty()) {
-            // saveLevel writes a class instance back by pairing it with the level file's own class
-            // record (level_.classPlacements()), which a placement made here does not have.
-            w = "placement '" + p.asset + "' names class '" + p.className + "': a class placement cannot be "
-                "added through place, because a save pairs class instances with the level file's own "
-                "records and would lose it -- put the line in the .ocworld and open that";
+            w = "placement names class '" + p.className + "', but this build has no framework module (AVER_MODULE_FRAMEWORK=OFF)";
             return false;
         }
+#endif
         if (p.asset.empty()) { w = "a placement line has no asset"; return false; }
         if (!p.animClip.empty()) {
             // saveLevelAsOcmap has no record for an animation: the entity would play in this session and
@@ -708,7 +708,8 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
         std::vector<std::string> out;
         std::unordered_set<u64> seen;
         for (const fmt::OcWorldPlacement& p : doc.placements)
-            if (content_.meshFor(p.objectId) == 0 && seen.insert(p.objectId).second) out.push_back(p.asset);
+            if (p.className.empty() && content_.meshFor(p.objectId) == 0 && seen.insert(p.objectId).second)
+                out.push_back(p.asset);
         return out;
     };
     std::vector<std::string> missing = unloaded();
@@ -763,6 +764,7 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
     };
     std::unordered_set<u64> meshMaterialsBound;
     for (const fmt::OcWorldPlacement& p : doc.placements) {
+        if (!p.className.empty()) continue;   // a class actor has no mesh asset ("none")
         if (!meshMaterialsBound.insert(p.objectId).second) continue;
         const i32 slot0Token = content_.meshDefaultMaterial(p.objectId);
         if (slot0Token) {
@@ -785,7 +787,9 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
 #endif
 
     const world::LevelInstance inst = world::instantiate(doc, opt);
-    if (inst.entities.empty()) {
+    usize classLines = 0;
+    for (const fmt::OcWorldPlacement& p : doc.placements) if (!p.className.empty()) ++classLines;
+    if (inst.entities.empty() && classLines == 0) {
         w = "the world created no entity for any of the " + std::to_string(doc.placements.size()) +
             " placement(s) -- see the editor log";
         return false;
@@ -829,6 +833,27 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
         pushEdit(std::move(c));
     }
 
+    // Class actors last: each is spawned, selected and given its own Create entry by placeClassInstance. A
+    // failure stops here; whatever was placed before it stays placed and can be undone.
+    usize classPlaced = 0;
+#if AVER_MODULE_FRAMEWORK
+    for (usize i = 0; i < doc.placements.size(); ++i) {
+        const fmt::OcWorldPlacement& p = doc.placements[i];
+        if (p.className.empty()) continue;
+        std::string why;
+        const scene::Entity ce = placeClassInstance(p, &why);
+        if (ce == scene::kInvalidEntity) {
+            w = why;
+            if (n + classPlaced > 0)
+                w += " -- the " + std::to_string(n + classPlaced) + " placement(s) before it were placed and can be undone";
+            return false;
+        }
+        idFor[i] = static_cast<u32>(ce);
+        ++classPlaced;
+    }
+#endif
+    const usize placedTotal = n + classPlaced;
+
     std::string ids = "[";
     for (usize i = 0; i < idFor.size(); ++i) {
         if (i) ids += ",";
@@ -837,12 +862,12 @@ bool SandboxApp::mcpLevelPlace(const std::string& text, std::string& r, std::str
     ids += "]";
     // requested = the record lines the text held; parsed = the placements the parser read from them; placed
     // = the entities made. A misspelt record is requested but never parsed, and is listed rather than dropped.
-    r = "{\"ids\":" + ids + ",\"placed\":" + std::to_string(n) + ",\"requested\":" +
+    r = "{\"ids\":" + ids + ",\"placed\":" + std::to_string(placedTotal) + ",\"requested\":" +
         std::to_string(scan.records) + ",\"parsed\":" + std::to_string(doc.placements.size()) +
         ",\"ignored\":" + std::to_string(scan.ignored.size()) + ",\"ignoredLines\":" + ignoredJson(scan) +
         ",\"animated\":" + std::to_string(animated) +
-        ",\"undoEntries\":" + std::to_string(n - firstUndo) + "}";
-    AVER_INFO("[Mcp] level::place put {} of {} placement(s) into the level", n, doc.placements.size());
+        ",\"undoEntries\":" + std::to_string(n - firstUndo + classPlaced) + "}";
+    AVER_INFO("[Mcp] level::place put {} of {} placement(s) into the level", placedTotal, doc.placements.size());
     if (!scan.ignored.empty())
         AVER_WARN("[Mcp] level::place ignored {} line(s) that are not placements (first: line {}, '{}')",
                   scan.ignored.size(), scan.ignored[0].first, scan.ignored[0].second);

@@ -80,6 +80,7 @@
 
 #include "ProjectBrowser.hpp"
 #include "LevelClassSave.hpp"
+#include "GraphClassPlacement.hpp"   // Place Class: the CLASS scan, placement record and marker
 #include "LevelList.hpp"
 #include "ProjectScaffold.hpp"
 #include "GraphAssetPresentation.hpp"
@@ -180,6 +181,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/game/LevelInstancesAbiHost.hpp"
 #include "aver/game/LevelInstancesFramework.hpp"
 #include "aver/game/LevelLights.hpp"
+#include "aver/game/LevelComponents.hpp"   // the COMPONENT applier shared with the packaged game
+#include "PlacedComponentModel.hpp"
 #include "aver/game/LevelPackBaker.hpp"
 // [wave3/level-instances end]
 #endif
@@ -1436,6 +1439,7 @@ public:
 #endif
     void setDroneAuto(int framesIn);
     void setUndoTestAuto(int framesIn);
+    void setClassPlaceTestAuto(int framesIn);   // --class-place-test (SandboxSelfTests.cpp)
     void setKeybindTestAuto(std::string mode, int framesIn);
     void setShowEditorPrefs(bool on);   // --editor-prefs
     void setScrollPrefsToKeybinds(bool on);
@@ -1874,6 +1878,7 @@ private:
     int chunkStreamAutoFrames_ = 5;
     int droneAutoFrames_ = 0;        // --drone: frames left before auto-enabling, 0 = off
     int undoTestAutoFrames_ = 0;     // --undo-test: frames left before runUndoTest() fires, 0 = off
+    int classPlaceTestAutoFrames_ = 0;   // --class-place-test: frames left before runClassPlaceTest() fires, 0 = off
     int keybindTestAutoFrames_ = 0;  // --keybind-test: frames left before it fires, 0 = off
     std::string keybindTestMode_;    // "write" or "read"
     static constexpr int kAutoCompileQuietMs = 500;
@@ -2007,7 +2012,7 @@ private:
 
     // One undoable edit (transform, create/destroy). Components captured via EntitySnapshot.
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename, RemoveComponent, Visibility, Collision, Animation, Prefab, LevelInstance, LandscapeWeights, WaterBodies, PlacedComponent };
         Kind kind = Kind::Transform;
         // Monotonic serial for save points; never reused so undo/redo cross saves correctly.
         u64 serial = 0;
@@ -2037,6 +2042,10 @@ private:
         bool  hadCollide = true;      // the default saveLevel writes for an entity it has no entry for
         bool  hadSnapZ   = false;
         f32   snapZ      = 0.0f;
+        // Non-empty className: Create/Destroy of a graph-class actor, replayed by respawning the class (classSlot indexes
+        // classAuthored_), not rebuilt from `snap`.
+        std::string className;
+        i32 classSlot = -1;
         // Object animation (empty clip = none); not in snap (Play advances its clock).
         EntityAnim hadAnim;
         // Vehicle preset (empty = no car); not in snap, level-held.
@@ -2061,6 +2070,10 @@ private:
 #if AVER_MODULE_SCENE
         // Removed component type and byte-exact contents (EntitySnapshot::Comp shape).
         editor::EntitySnapshot::Comp removedComponent;
+        // PlacedComponent: one Add Component / Remove Component / Details edit of an animation or AI component, as the
+        // COMPONENT record before and after (nullopt = the component is absent). One command covers Add, Edit and Remove.
+        std::string pcType;
+        std::optional<fmt::OcPlacedComponent> pcBefore, pcAfter;
 #endif
 
         // LandscapeStroke: rect diff, not snapshot (512x512 section = 1 MB, touched rect = KB). One entry per stroke, unioned.
@@ -2545,6 +2558,7 @@ private:
     void runAssetAssignTest();
 
     void runUndoTest(Engine& eng);
+    void runClassPlaceTest(Engine& eng);
 
     void runKeybindPersistTest(const std::string& mode);
 
@@ -2868,6 +2882,29 @@ private:
         void drop() { std::vector<AssetChoice>().swap(list); lastFrame = -2; }
     };
     PickerCands pickMeshCands_, pickMaterialCands_, pickEffectCands_;
+#if AVER_MODULE_SCENE
+    PickerCands pickPlacedCands_;   // the Add Component asset rows share one picker: only one popup is open at a time
+
+    // ---- Details > Add Component for the animation and AI components (SandboxComponentDetails.cpp) ----
+    void drawPlacedComponentSections();                                   // called once from the Details panel
+    bool addPlacedComponent(const editor::PlacedKind&);                   // create + defaults + one undo entry + markLevelUnsaved
+    bool removePlacedComponentFromSelection(const editor::PlacedKind&);   // capture, remove (Brain: stop first), one undo entry
+    void beginPlacedGesture(const editor::PlacedKind&);                   // captures the "before" of a drag / typed edit
+    void commitPlacedEdit(const editor::PlacedKind&, std::optional<fmt::OcPlacedComponent> before);   // capture "after", push if different
+    // true when changed. `accept` (optional) filters the picker's candidates, e.g. Animator drops object clips.
+    bool drawAssetField(const char* id, const char* label, std::string& path, std::span<const char* const> exts,
+                        const std::function<bool(u64 id, const std::string& absPath)>& accept = {});
+    void drawPlacedAddMenu();                                             // the "Animation and AI" entries of the Add Component popup
+    bool drawPlacedRemoveMenu();                                          // ...and of the Remove popup; true when any is present
+    std::string pathOfContentId(u64) const;                               // cbRelativeToContent(content_.pathFor(id)), "" if not indexed
+    // Undo / redo: puts one component into `st` (nullopt = absent) on the entity behind `id`.
+    void applyPlacedComponentState(EditId id, const std::string& type, const std::optional<fmt::OcPlacedComponent>& st);
+    editor::AttachContext placedAttachContext(scene::Entity e) const;
+    std::optional<fmt::OcPlacedComponent> placedBefore_;                  // the open gesture's "before"
+    const editor::PlacedKind* placedGesture_ = nullptr;                   // the kind that gesture edits; null = none open
+    // Authored component state at Play start, so a save during Play writes it and not what a script did since.
+    std::unordered_map<u32, std::vector<fmt::OcPlacedComponent>> placedBaseline_;
+#endif
 
     // ---- Three assignments (each asset id type is different) ----
     // NOT UNDOABLE: asset writes mark level dirty with no EditCmd.
@@ -3142,6 +3179,7 @@ private:
     editor::MotionDebugOptions motionDebug_;   // Show > Motion Matching: trajectories, matched row, labels
     editor::MotionDebugFrame motionDebugFrame_;
     rhi::LineHandle motionDebugMesh_ = 0;     // this frame's motion-matching lines
+    rhi::LineHandle classMarkerMesh_ = 0;     // this frame's graph-class root markers
     // PREFABS: the library (loaded assets), the system (instances in the world), the editor's operations on
     // them and the Create Prefab dialog. The system's hooks keep levelEntities_, labels and bodies in step.
     prefab::PrefabLibrary prefabLib_;
@@ -3676,6 +3714,7 @@ private:
     f32  drawerPixelH_=0.0f;
     bool playTest_=false;            // --play-test: headless begin_play -> tick -> end_play trigger
     bool playTestBegun_=false;       // begin_play has fired (one-shot, once a GameMode class is declared)
+    u32 playTestSettle_ = 0;   // frames the requested level has been loaded (play-test waits ~1 s)
     int  playTestWait_=0;            // frames spent waiting for a GameMode class before giving up
     int  playTestFrames_=0;          // frames since begin_play, so the Stop is one-shot too
     editor::ProjectBrowser browser_;
@@ -4069,6 +4108,17 @@ private:
 
 #if AVER_MODULE_FRAMEWORK
     void spawnClassPlacements();
+    // Place Class (docs/plans/parity_demo/PLACE_CLASS.md): bodies are in SandboxLevelLoad.cpp / SandboxViewport.cpp.
+    scene::Entity spawnClassSlot(usize slot, const Transform* worldXf);
+    scene::Entity placeClassInstance(fmt::OcWorldPlacement p, std::string* why);
+    void dropGraphClass(const std::string& fullPath, f32 screenX, f32 screenY);
+    void drawGraphActorMenu();                 // body of the Add submenu
+    int  classSlotOfEntity(scene::Entity e) const;      // index into levelClassInstances_, -1 if not a live root
+    scene::Entity classRootOf(scene::Entity hit) const; // hit's class root or kInvalidEntity
+    void tagClassEdit(EditCmd& c, scene::Entity e);
+    void respawnClassFromEdit(const EditCmd& c);
+    void respawnLostClassInstances();
+    bool classPartsBounds(scene::Entity root, Vec3& lo, Vec3& hi) const;  // world box of the root's mesh parts
 #endif
 
     void applyLevelSky(const fmt::OcWorldData& w);
@@ -4177,6 +4227,11 @@ private:
     // Each instance carries its placement id explicitly, not by position.
     using ClassInstance = editor::LevelClassInstance;
     std::vector<ClassInstance> levelClassInstances_;
+    std::vector<fmt::OcWorldPlacement> classAuthored_;      // every class placement of the open level (loaded first, session-added appended)
+    struct PlayClassSaved { usize slot; EditId id; Transform xf; };
+    std::vector<PlayClassSaved> playClassSnapshot_;        // class roots at Play start, for the Stop respawn
+    std::vector<editor::GraphClassDecl> classPickList_;
+    bool classPickDirty_ = true;                           // rescan when the Add popup opens
 #endif
 
     // PCG chunk streaming (opt-in, transient entities).

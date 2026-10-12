@@ -2258,6 +2258,16 @@ void SandboxApp::drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir,
 #if AVER_MODULE_PARTICLES
     if (ext == ".ocparticle") return true;
 #endif
+    // Prefabs and levels drop as instances. spawnFromAssetDrop has handled both for a while, but this gate
+    // refused them first, so those branches were unreachable from a viewport drop.
+#if AVER_MODULE_SCENE
+    if (ext == ".ocprefab") return true;
+#endif
+    if (ext == ".ocworld" || ext == ".ocmap") return true;
+    // A graph that declares a CLASS drops as a class actor (dropGraphClass reports one that does not).
+#if AVER_MODULE_FRAMEWORK
+    if (editor::isGraphAssetExt(ext)) return true;
+#endif
     return false;
 }
 
@@ -2322,7 +2332,7 @@ void SandboxApp::cbClearSelection() { cbSelection_.clear(); cbSelectedFile_.clea
 // What the drag preview says: the one name, or how many are coming.
 // Counts cbMoveDragPayloadFor's payload: newline-separated paths (a path can't contain one), the
 // whole selection, unfiltered. No separate "placeable assets only" payload -- ImGui carries one
-// payload per drag, so each drop target filters what it can use (viewport keeps .ocmesh/.ocparticle).
+// payload per drag, so each drop target filters what it can use (the viewport keeps what isPlaceableAssetExt accepts).
  std::string SandboxApp::cbDragLabel(const std::string& name, const std::string& blob) {
     const usize n = static_cast<usize>(std::count(blob.begin(), blob.end(), '\n')) + 1;
     return n <= 1 ? name : std::to_string(n) + " assets";
@@ -2419,7 +2429,7 @@ void SandboxApp::drawFolderGallery(const std::vector<const DirEntry*>& shown) {
                 // ImGui has no "two payloads on one drag" -- a second SetDragDropPayload overwrites
                 // the first's type, so the old asset payload was replaced by the move payload and
                 // every viewport drop did nothing. Each target now takes this one payload and keeps
-                // what it understands: the viewport places .ocmesh/.ocparticle from it, a folder
+                // what it understands: the viewport places what isPlaceableAssetExt accepts from it, a folder
                 // moves all of it.
                 if (ImGui::BeginDragDropSource()) {
                     const std::string moveBlob = cbMoveDragPayloadFor(e.full);

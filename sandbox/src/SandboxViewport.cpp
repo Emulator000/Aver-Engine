@@ -1103,6 +1103,82 @@ bool SandboxApp::pickSurfacePoint(f32 screenX, f32 screenY, Vec3& out) {
     return true;
 }
 
+#if AVER_MODULE_FRAMEWORK
+// A graph (.ocgraph) dropped on the viewport: places the CLASS it declares at the drop point. The spawn,
+// selection and undo entry are placeClassInstance's.
+void SandboxApp::dropGraphClass(const std::string& fullPath, f32 screenX, f32 screenY) {
+    const std::string fileName = std::filesystem::path(fullPath).filename().string();
+    std::string text;
+    {
+        std::ifstream in(fullPath, std::ios::binary);
+        if (in) text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    editor::GraphClassDecl d;
+    if (!editor::parseGraphClassDecl(text, d)) {
+        cbStatus_ = "'" + fileName + "' declares no CLASS (or is not a gameplay graph), so it cannot be placed. "
+                    "Add a 'CLASS AN_Name Actor' line.";
+        AVER_WARN("[Editor] drop: '{}' declares no placeable CLASS", fullPath);
+        return;
+    }
+    Vec3 at = dropWorldPoint(screenX, screenY);
+    if (!(std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z))) {
+        cbStatus_ = "Could not find a valid drop position";
+        return;
+    }
+    if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+    // No rest-lift: a class's bounds are unknown before it spawns, and a character's origin is its feet.
+    std::string why;
+    placeClassInstance(editor::makeClassPlacement(d.className, at, 0.0), &why);
+}
+
+// Body of Add > Actor From Graph: every gameplay graph under Content that declares a CLASS. The list is
+// scanned when the Add popup opens (classPickDirty_) and again on Refresh.
+void SandboxApp::drawGraphActorMenu() {
+    if (classPickDirty_) {
+        classPickList_ = editor::scanGraphClasses(project_.contentDir());
+        classPickDirty_ = false;
+    }
+    const bool playing = anyPlayActive();
+    const bool noLevel = !(hideEditorScene_ || !levelPath_.empty());
+    if (classPickList_.empty()) ImGui::TextDisabled("No graph under Content declares a CLASS");
+    const editor::GraphClassDecl* chosen = nullptr;
+    for (const editor::GraphClassDecl& d : classPickList_) {
+        std::string why;
+        if (playing) why = "Stop Play before placing an actor";
+        else if (noLevel) why = "Load a level (or hide the editor scene) first";
+        else if (const int32_t c = aver_fw_class_find(d.className.c_str()); c != 0) {
+            aver_fw_class_seal(c);   // kind flags are inherited from the parent at seal
+            const int32_t f = aver_fw_class_get_flags(c);
+            editor::ClassRoleBits bits;
+            bits.gameMode      = (f & AVER_FW_CLASS_GAME_MODE) != 0;
+            bits.controller    = (f & AVER_FW_CLASS_CONTROLLER) != 0;
+            bits.gameInstance  = (f & AVER_FW_CLASS_GAME_INSTANCE) != 0;
+            bits.abstractClass = (f & AVER_FW_CLASS_ABSTRACT) != 0;
+            why = editor::classPlaceRefusalText(bits, d.className);
+        }
+        ImGui::PushID(d.path.c_str());
+        const bool clicked = ImGui::MenuItem(d.className.c_str(), d.parent.c_str(), false, why.empty());
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            std::string tip = d.relPath + "\nParent: " + d.parent + "\n" + std::to_string(d.componentCount) + " component(s)";
+            if (d.duplicate) tip += "\nDeclared by more than one graph";
+            if (!why.empty()) tip += "\n" + why;
+            ImGui::SetTooltip("%s", tip.c_str());
+        }
+        ImGui::PopID();
+        if (clicked) chosen = &d;
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Refresh")) classPickDirty_ = true;
+
+    if (chosen) {
+        Vec3 at = camPos_ + camForward() * kAddDistance;
+        if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
+        std::string why;
+        placeClassInstance(editor::makeClassPlacement(std::string(chosen->className), at, 0.0), &why);
+    }
+}
+#endif
+
 // Places a content-browser asset dropped on the viewport at a screen-space position, following
 // spawnCube()'s create -> CMeshRenderer -> levelEntities_ -> undo recipe exactly. Only .ocmesh
 // assets are placeable in this slice; anything else is reported, not silently ignored.
@@ -1141,6 +1217,10 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
         return;
     }
 #endif
+#if AVER_MODULE_FRAMEWORK
+    // A graph that declares a CLASS drops as that class actor.
+    if (editor::isGraphAssetExt(ext)) { dropGraphClass(full, screenX, screenY); return; }
+#endif
     // [wave3/level-instances begin] A level drops as an instance of it (its own undo entry); its entities come through
     // the level-instance hooks.
     if (ext == ".ocworld" || ext == ".ocmap") {
@@ -1178,11 +1258,11 @@ void SandboxApp::spawnFromAssetDrop(Engine& e, const std::string& full, f32 scre
 #endif
     if (!isMesh && !isParticle) {
 #if AVER_MODULE_PARTICLES
-        cbStatus_ = "'" + fileName + "' can't be placed in the level (only .ocmesh/.ocparticle assets can)";
-        AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh or .ocparticle)", full);
+        cbStatus_ = "'" + fileName + "' can't be placed in the level (only meshes, particles, prefabs, levels and graph classes can)";
+        AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh, .ocparticle, .ocprefab, .ocworld or .ocgraph)", full);
 #else
-        cbStatus_ = "'" + fileName + "' can't be placed in the level (only .ocmesh assets can)";
-        AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh)", full);
+        cbStatus_ = "'" + fileName + "' can't be placed in the level (only meshes, prefabs, levels and graph classes can)";
+        AVER_WARN("[Editor] drop: '{}' is not a placeable asset (need .ocmesh, .ocprefab, .ocworld or .ocgraph)", full);
 #endif
         return;
     }
@@ -1986,6 +2066,9 @@ void SandboxApp::deleteSelection() {
                 EditCmd c = describeEntity(v);
                 c.kind = EditCmd::Kind::Destroy;
                 captureSubtree(c, v);
+#if AVER_MODULE_FRAMEWORK
+                tagClassEdit(c, v);
+#endif
                 destroyEntity(v);
                 pushEdit(std::move(c));
             }
@@ -2019,6 +2102,9 @@ void SandboxApp::deleteSelection() {
             // Before destroyEntity, which retires the subtree and its hierarchy links -- a capture
             // afterwards would find an empty subtree and report a complete undo record it didn't have.
             captureSubtree(c, selEntity_);
+#if AVER_MODULE_FRAMEWORK
+            tagClassEdit(c, selEntity_);
+#endif
             if (!c.subtree.empty())
                 AVER_INFO("[Editor] ...and {} descendant(s) with it", c.subtree.size());
             destroyEntity(selEntity_);
@@ -2062,6 +2148,9 @@ void SandboxApp::copySelection() {
             for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
                 if (multiIsSelected(p)) { ancestorSelected = true; break; }
             if (ancestorSelected) continue;
+#if AVER_MODULE_FRAMEWORK
+            if (classSlotOfEntity(ent) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; continue; }
+#endif
 
             EditCmd c = describeEntity(ent);
             captureSubtree(c, ent);
@@ -2078,6 +2167,9 @@ void SandboxApp::copySelection() {
         return;
     }
     if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
+#if AVER_MODULE_FRAMEWORK
+        if (classSlotOfEntity(selEntity_) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
+#endif
         EditCmd c = describeEntity(selEntity_);
         captureSubtree(c, selEntity_);
         ClipboardEntity ce;
@@ -2185,6 +2277,9 @@ void SandboxApp::duplicateSelection() {
             for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
                 if (multiIsSelected(p)) { ancestorSelected = true; break; }
             if (ancestorSelected) continue;
+#if AVER_MODULE_FRAMEWORK
+            if (classSlotOfEntity(ent) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; continue; }
+#endif
 
             EditCmd src = describeEntity(ent);
             captureSubtree(src, ent);
@@ -2211,6 +2306,9 @@ void SandboxApp::duplicateSelection() {
         return;
     }
     if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
+#if AVER_MODULE_FRAMEWORK
+        if (classSlotOfEntity(selEntity_) >= 0) { cbStatus_ = "Duplicate/Copy is not supported for graph-class actors yet: drag the graph in again"; return; }
+#endif
         EditCmd src = describeEntity(selEntity_);
         // Descendants read BEFORE anything is spawned -- the copy is about to become the
         // selection, and captureSubtree walks whatever it is handed.
@@ -2465,6 +2563,29 @@ bool SandboxApp::pick(Engine& e, const ImGuiIO& io) {
     // selection at all, so the caller can arm the Select-tool marquee ADDITIVELY instead of
     // clearing everything first. A miss that landed on a placeholder (best != -1) is not "empty
     // space" -- placeholders never joined the scene multi-select, so it falls through to the plain-click assignment below.
+#if AVER_MODULE_FRAMEWORK
+    {
+        // A class actor's mesh is a COMP part under a root that has no mesh of its own: a click on the part
+        // selects the class root, the thing that is saved and moved.
+        if (bestEnt != kInvalidId)
+            if (const scene::Entity r = classRootOf(static_cast<scene::Entity>(bestEnt)); r != scene::kInvalidEntity)
+                bestEnt = r;
+        // A root nobody can see (no mesh) is clickable through its marker box, only while the marker is drawn.
+        if (!noEditorChrome_ && !anyPlayActive()) {
+            scene::World& cw = scene::World::instance();
+            constexpr f32 h = editor::kClassMarkerHalf;
+            for (const ClassInstance& ci : levelClassInstances_) {
+                if (ci.removed || ci.entity == 0) continue;
+                const scene::Entity root = static_cast<scene::Entity>(ci.entity);
+                if (!cw.valid(root) || cw.destroyPending(root)) continue;
+                const Vec3 pos = worldTransformOf(cw, root).position;
+                f32 t;
+                if (rayAabb(ro - pos, rd, Vec3{-h, -h, -h}, Vec3{h, h, h}, t) && t > 0.0f && t < bestT)
+                    { bestT = t; bestEnt = root; best = -1; }
+            }
+        }
+    }
+#endif
 #if AVER_MODULE_SCENE
     // [wave3/level-instances] A click on a level instance's member selects the instance (Alt+click: the member).
     if (bestEnt != kInvalidId)
@@ -2508,6 +2629,18 @@ bool SandboxApp::selectionBounds(Vec3& center, f32& radius) const {
             ey = (mr->aabbMax[1] - mr->aabbMin[1]) * std::fabs(t.scale.y);
             ez = (mr->aabbMax[2] - mr->aabbMin[2]) * std::fabs(t.scale.z);
         }
+#if AVER_MODULE_FRAMEWORK
+        // A class actor's root has no mesh; its COMP parts' box is what to frame.
+        if (ex <= 1e-3f && ey <= 1e-3f && ez <= 1e-3f && classSlotOfEntity(e) >= 0) {
+            Vec3 plo, phi;
+            if (classPartsBounds(e, plo, phi)) {
+                mn.x = std::fmin(mn.x, plo.x); mx.x = std::fmax(mx.x, phi.x);
+                mn.y = std::fmin(mn.y, plo.y); mx.y = std::fmax(mx.y, phi.y);
+                mn.z = std::fmin(mn.z, plo.z); mx.z = std::fmax(mx.z, phi.z);
+                continue;
+            }
+        }
+#endif
         // Zero/missing extent falls back to the scale itself, like selectedRadius: unfilled bounds must not frame as a point.
         if (ex <= 1e-3f && ey <= 1e-3f && ez <= 1e-3f) {
             const f32 s = 2.0f * std::fmax(1.0f, std::fmax(std::fabs(t.scale.x),

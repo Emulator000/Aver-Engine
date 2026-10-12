@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace aver::editor {
@@ -53,7 +54,15 @@ struct EntitySnapshot {
     // Local/World/Hierarchy/Name lands here, whatever it turns out to be -- this is what makes
     // capture forward-compatible with components this file has never heard of (CLight, CCamera,
     // CSkeletalMesh, CAnimator today; anything registered later for free).
-    struct Comp { u32 type = 0; std::vector<std::byte> bytes; };
+    //
+    // `strings` holds the text of every FieldKind::String field (field id, text). A String field stores an
+    // index into a process-wide intern pool, so the byte copy alone would make a pasted entity share the
+    // source's slot and an edit of one would edit both; instantiateEntity re-interns each into a fresh slot.
+    struct Comp {
+        u32 type = 0;
+        std::vector<std::byte> bytes;
+        std::vector<std::pair<u32, std::string>> strings;
+    };
     std::vector<Comp> components;
 };
 
@@ -64,8 +73,10 @@ struct EntitySnapshot {
 EntitySnapshot captureEntity(scene::World& world, scene::Entity e);
 
 // Rebuilds an entity from a snapshot at `xf`, parented under `parent` (root by default -- see the
-// CHierarchy note above). Reattaches every captured component by raw byte copy -- EXCEPT two named
+// CHierarchy note above). Reattaches every captured component by raw byte copy -- EXCEPT the named
 // touch-ups afterward, not a general post-processing hook:
+//   - String fields: each is re-set through aver_scene_set_str into a fresh intern slot (undo and paste
+//     alike: a restored entity must not alias the one it came from).
 //   - CMeshRenderer: `dirty` is GPU-upload bookkeeping, not editor state, and a byte-for-byte copy of
 //     an entity the renderer had already uploaded would restore dirty=0, and the rebuilt copy would
 //     never reach the GPU. The visible bit is NOT touched -- it is AUTHORED data now (a level saves

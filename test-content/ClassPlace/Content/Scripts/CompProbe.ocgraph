@@ -1,0 +1,8 @@
+OCGRAPH 1
+DOMAIN gameplay
+# A class with a component tree and nothing else: a body mesh and a point under it. No ENTRY, so it never
+# ticks. Meshes/cube.ocmesh is the editor's built-in unit cube; `scale` is its half-extent in cm.
+NAME CompProbe
+CLASS AN_CompProbe Actor
+COMP body Mesh mesh=Meshes/cube.ocmesh scale=50,50,50
+COMP tip Scene parent=body pos=0,0,1

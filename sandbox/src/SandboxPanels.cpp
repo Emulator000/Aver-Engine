@@ -1744,6 +1744,20 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             uiReg_.track("details.entityName");
         }
         ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
+#if AVER_MODULE_FRAMEWORK
+        // A graph-class actor's root: which class it is, and the way to its graph.
+        if (const int classIdx = classSlotOfEntity(selEntity_); classIdx >= 0) {
+            const usize slot = levelClassInstances_[static_cast<usize>(classIdx)].placement;
+            const std::string cls = slot < classAuthored_.size() ? classAuthored_[slot].className : std::string();
+            ImGui::TextDisabled("Graph class: %s", cls.c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Open Graph")) {
+                for (const editor::GraphClassDecl& d : editor::scanGraphClasses(project_.contentDir()))
+                    if (d.className == cls) { assetEditors_.open(d.path); break; }
+            }
+            uiReg_.track("details.graphClass.open");
+        }
+#endif
         // Multi-selection, computed once and reused by Transform/Mesh/Material below (which apply
         // to the whole set); name and components stay single-entity, the anchor alone -- per
         // multiSel_'s own header comment, "one entity to talk about".
@@ -2479,6 +2493,10 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
             }
         }
 
+        // ---- Skeletal Mesh, Animator, Root Motion, Motion Matching, Control Rig, IK Rig, AI Brain, Smart Object ----
+        // Their own TU (SandboxComponentDetails.cpp): the sections, and the Add / Remove entries further down.
+        drawPlacedComponentSections();
+
         // ---- Add Component ----
         // Previously impossible from the editor: every panel above renders only when its
         // component already exists, so one no importer/template attaches needed a hand-edited file.
@@ -2525,6 +2543,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 else if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", a.tip);
             }
+            drawPlacedAddMenu();   // "Animation and AI" entries; each is undoable, unlike the three above
             ImGui::EndPopup();
         }
 
@@ -2557,6 +2576,7 @@ void SandboxApp::buildDetailsPanel(Engine& e) {
                 if (!present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("This entity does not have one.");
             }
+            if (drawPlacedRemoveMenu()) anyPresent = true;
             if (!anyPresent) ImGui::TextDisabled("Nothing removable is attached.");
             ImGui::EndPopup();
         }

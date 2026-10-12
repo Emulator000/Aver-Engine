@@ -739,7 +739,9 @@ public static class HostBridge
                 // the symptom looked like a bug in the graph. A warning, not a refusal: last-wins is
                 // aver_fw_class_declare's own idempotent-by-name behaviour; refusing both would block a rename-in-progress entirely.
                 long classKey = Assets.ObjectIdOf(graph.ClassName);
-                if (s_graphClasses.TryGetValue(classKey, out GraphClassInfo prior))
+                // The same file seen again (every placement re-runs this scan) supersedes nothing, so it is not a warning.
+                if (s_graphClasses.TryGetValue(classKey, out GraphClassInfo prior)
+                    && !string.Equals(prior.Path, path, StringComparison.OrdinalIgnoreCase))
                     Emit((int)Log.Level.Warn,
                          $"[Graph] class '{graph.ClassName}' is declared by more than one graph: "
                          + $"'{prior.Path}' is superseded by '{path}'. Only the latter will run -- "

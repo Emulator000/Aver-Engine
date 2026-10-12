@@ -465,6 +465,17 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
     // [wave3/level-instances] The stable id the placement had when the level was loaded (or it was last saved with).
     if (const auto idIt = entityPlaceId_.find(static_cast<u32>(e)); idIt != entityPlaceId_.end()) p.placementId = idIt->second;
+    // THE COMPONENT RECORDS (Skeletal Mesh, Animator, Root Motion, ...), read back from the live components. WHILE PLAY
+    // RUNS they come from the Play-start baseline: a script may have changed an animator's speed or an IK weight since,
+    // and an autosave landing mid-Play must write the authored state (the same hazard as the transforms above).
+    // An entity with no baseline entry (streamed in during Play) is captured live.
+    if (playWorldCaptured_) {
+        if (const auto baseIt = placedBaseline_.find(static_cast<u32>(e)); baseIt != placedBaseline_.end()) {
+            p.components = baseIt->second;
+            return true;
+        }
+    }
+    p.components = game::capturePlacedComponents(world, e, [this](u64 id) { return pathOfContentId(id); });
     return true;
 }
 
@@ -727,7 +738,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // graph-as-class actors at all, so there is no live instance list for this call to read.
 #if AVER_MODULE_FRAMEWORK
     editor::appendClassPlacements(
-        level_.classPlacements(), levelClassInstances_,
+        classAuthored_, levelClassInstances_,
         [&world](int32_t e, Transform& xf) {
             const scene::Entity ent = static_cast<scene::Entity>(e);
             if (!world.valid(ent)) return false;

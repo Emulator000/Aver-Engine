@@ -461,6 +461,22 @@ On the timeline, click a key to select it (Ctrl or Shift adds to the selection, 
 
 ---
 
+## Phase 16 — Add Component: skeletal animation and AI on a placed mesh
+
+**Details → Add Component → Animation and AI** attaches Skeletal Mesh, Animator, Root Motion, Motion Matching, Control Rig, IK Rig, AI Brain or Smart Object to a placed mesh, and **Remove Component** takes them off. Each attached component gets a section in the Details panel (skeleton / clip / database / rig / tree / `.ocso` rows with a *Change…* picker and a drop target, plus the component's own numbers and read-outs). Source: `sandbox/src/SandboxComponentDetails.cpp`; the rules are in the header-only `PlacedComponentModel.hpp` (`kPlacedKinds`, `canAttach`, `canRemove`, `listAssets`, `makeNewRecord`, `presetSkeletonFor`), which `PlacedComponentModelTest` drives.
+
+**Where they apply.** Only to a level's own mesh placements in an `.ocworld`. Every entry is disabled, with the reason as its tooltip, on a graph-class actor or its parts ("Not a level placement"), on a prefab or level-instance member, in a legacy `.ocmap`, while Play runs, and when the entity already has the component. Animator, Root Motion, Motion Matching, Control Rig and IK Rig also need a Skeletal Mesh *with a skeleton chosen*; a Skeletal Mesh is refused on a placement that plays an object animation (the two meanings of `CAnimator`), and cannot be removed while one of those five is still attached (no cascade: one undo entry stays one component). Adding a Skeletal Mesh preselects the `.ocskel` next to the mesh with the same stem when there is one.
+
+**Edits and undo.** Plain numbers and flags are changed on the live component; an asset change goes through `game::applyPlacedComponent`. Either way one gesture (a whole drag, one click, one pick) is one `EditCmd::Kind::PlacedComponent` carrying the `COMPONENT` record before and after, so Add, Edit and Remove all undo and redo through the same two calls. Sections are read-only while Play runs, except the AI Brain *Restart* / *Stop* buttons.
+
+**In the file.** `COMPONENT <Type> key=value...` lines directly under the placement they belong to (`docs/formats/FORMAT_SPECS.md` section 11). Save captures them from the live components (`fillPlacementFromEntity`), and a save that lands mid-Play writes the state captured at Play start rather than what a script has done since. Load applies them through the same `game::applyLevelComponents` the packaged game uses, so the editor and the game cannot disagree. A record the applier refuses (a missing skeleton, a brain that does not load) is logged and not kept: re-saving drops it.
+
+**Copy, duplicate, undo of a delete.** These rebuild an entity from a byte snapshot, which for a `String` field (the Smart Object's `.ocso` path) copied the source's interned-string slot, so editing one entity's path edited both. `EditorEntitySnapshot` now records each String field's text and re-interns it into a fresh slot on rebuild.
+
+**Root motion in edit mode.** The animation system ticks outside Play so previews run, and Apply would walk a selected character off its placement and save the drift. The editor therefore sets `AnimSystem::setRootMotionRequiresLive(true)`: Apply moves the entity only while Play is live; the pose plays in place otherwise. The packaged game does not opt in.
+
+---
+
 ## Instance-set editor
 
 A baked `.ocinst` (a level's instanced foliage: groups of one mesh each, a flat table of 12-float transforms) opens in its own tab from the Content Browser (double-click; the create menu's **New Instance Set** writes an empty one under `Content/Instances`) or from the Outliner's Foliage row (**Open instance set**, one button per file the level lists). Source: `sandbox/src/InstanceSetEditor.cpp`, over `InstanceSetModel` (ids, selection, delta undo, spatial index) and `PreviewGizmo` (the gizmo maths).

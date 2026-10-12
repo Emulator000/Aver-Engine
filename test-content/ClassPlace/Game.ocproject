@@ -1,0 +1,12 @@
+OCPROJECT 1
+# Engine test content for PLACING A GRAPH CLASS from the editor (docs/plans/parity_demo/PLACE_CLASS.md).
+# Not a demo game: Sandbox.exe --project test-content/ClassPlace/Game.ocproject --class-place-test
+# opens it, places and deletes and undoes class actors, saves, and exits 0 when every check passes.
+#
+# The two version stamps are the full engine version (0.6.0-1). A project made by an older series raises an
+# upgrade prompt at open, and a frame-limited run has nobody to answer it.
+NAME ClassPlace
+ENGINE Aver 0.6.0-1
+CREATEDWITH 0.6.0-1
+CONTENT Content
+STARTMAP Maps/ClassPlace.ocworld

@@ -102,8 +102,10 @@ void SandboxApp::capturePlayWorld() {
     playWorldSnapshot_.clear();
     playWorldCaptured_ = false;
 #if AVER_MODULE_SCENE
+    placedBaseline_.clear();
     scene::World& w = scene::World::instance();
     playWorldSnapshot_.reserve(levelEntities_.size());
+    const game::PathOfIdFn pathFn = [this](u64 id) { return pathOfContentId(id); };
     for (const scene::Entity e : levelEntities_) {
         if (!w.valid(e)) continue;
         // THE RAW BIT, deliberately NOT authoredVisible(): this is "what Play found", the exact
@@ -116,7 +118,21 @@ void SandboxApp::capturePlayWorld() {
         if (const auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer))
             vis = (mr->flags & scene::kMeshRendererVisible) != 0;
         playWorldSnapshot_.push_back({e, w.localTransform(e), vis});
+        // The authored COMPONENT state, so a save during Play writes it and not what a script did since (fillPlacementFromEntity).
+        if (auto comps = game::capturePlacedComponents(w, e, pathFn); !comps.empty())
+            placedBaseline_.emplace(static_cast<u32>(e), std::move(comps));
     }
+#if AVER_MODULE_FRAMEWORK
+    // The graph-class roots too: Stop puts a surviving one back like any placement, and respawns one that end_play destroyed.
+    playClassSnapshot_.clear();
+    for (const ClassInstance& ci : levelClassInstances_) {
+        if (ci.removed) continue;
+        const scene::Entity e = static_cast<scene::Entity>(ci.entity);
+        if (!w.valid(e)) continue;
+        playClassSnapshot_.push_back({ci.placement, editIdFor(e), w.localTransform(e)});
+        playWorldSnapshot_.push_back({e, w.localTransform(e), true});
+    }
+#endif
     playWorldCaptured_ = true;
     AVER_INFO("[Sandbox] Play: {} level transform(s) recorded; Stop will put them back",
               (u32)playWorldSnapshot_.size());
@@ -177,6 +193,9 @@ void SandboxApp::restorePlayWorld() {
 #endif
     playWorldSnapshot_.clear();
     playWorldCaptured_ = false;
+#if AVER_MODULE_SCENE
+    placedBaseline_.clear();
+#endif
 }
 
 // THE ENGINE'S OWN DEFAULT GAME MODE, PAWN AND CONTROLLER, declared once and reused.
@@ -425,6 +444,7 @@ void SandboxApp::startPlay() {
                       "camera is unchanged", aver_fw_class_name(gm));
 #if AVER_MODULE_SCENE
             anim::animSystem().setObjectAnimationLive(false);
+            placedBaseline_.clear();   // no Stop will come to clear it, and a stale baseline would shadow later saves
 #if AVER_MODULE_PHYSICS
             vehicles_.end();   // built by capturePlayWorld; no Stop will come for it
 #endif
@@ -461,6 +481,7 @@ void SandboxApp::startPlay() {
         AVER_WARN("[Sandbox] Play: begin_play was rejected (already playing?)");
 #if AVER_MODULE_SCENE
         anim::animSystem().setObjectAnimationLive(false);
+        placedBaseline_.clear();   // see the drone-pawn branch above
 #if AVER_MODULE_PHYSICS
         vehicles_.end();   // built by capturePlayWorld; no Stop will come for it
 #endif
@@ -700,6 +721,9 @@ void SandboxApp::stopPlay() {
     anim::animSystem().setObjectAnimationLive(false);
 #endif
     restorePlayWorld();
+#if AVER_MODULE_FRAMEWORK
+    respawnLostClassInstances();
+#endif
 #if AVER_MODULE_SCENE
     // The level is back where Play found it; the sequence stops and Animate's preview re-applies.
     seqEditor_.endPlay();

@@ -487,6 +487,14 @@ void SandboxApp::onLevelInstantiated(const game::GameLevel::LoadedLevel& loaded)
     // GRAPH-AS-CLASS / any other class placement: level_ collected them (level_.classPlacements());
     // spawnClassPlacements() spawns them later -- applyProject's "Loading level" stage runs BEFORE
     // "Starting scripts", so a class declared from a .ocgraph isn't registered yet here.
+#if AVER_MODULE_FRAMEWORK
+    // The editor's own copy of the class placements (same filter as GameLevel::load): the save and
+    // ClassInstance::placement index into it, and placeClassInstance appends to it. Filled here, not in
+    // spawnClassPlacements, so a level opened before scripting is ready still saves its class lines.
+    classAuthored_.clear();
+    for (const fmt::OcWorldPlacement& cp : w.placements)
+        if (!cp.className.empty()) classAuthored_.push_back(cp);
+#endif
 
     // A level that states where the player starts gets a visible, movable marker for it. Without
     // this the SPAWN record was invisible in the editor: authored only by hand-editing the file,
@@ -662,15 +670,48 @@ void SandboxApp::onLegacyOcmapInstantiated(const game::GameLevel::LoadedLevel& l
 // and this matches how every ORDINARY mesh placement already behaves. Accepted consequence: a
 // placed class runs OnTick immediately on load, even outside Play.
 void SandboxApp::spawnClassPlacements() {
-    const std::vector<fmt::OcWorldPlacement>& placements = level_.classPlacements();
-    for (usize pi = 0; pi < placements.size(); ++pi) {
-        const fmt::OcWorldPlacement& p = placements[pi];
-        const int32_t c = aver_fw_class_find(p.className.c_str());
-        if (c == 0) {
-            AVER_WARN("[Level] placement names class '{}', which is not declared -- skipped", p.className);
-            continue;
-        }
+    for (usize slot = 0; slot < classAuthored_.size(); ++slot) spawnClassSlot(slot, nullptr);
+    usize live = 0;
+    for (const ClassInstance& ci : levelClassInstances_) if (!ci.removed) ++live;
+    if (live > 0)
+        AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
+                  "COMPILED is reported per instance above, because aver_fw_spawn returns a live entity "
+                  "even when the managed bind behind it failed, so this count is placement, not success",
+                  live);
+}
 
+// Spawns classAuthored_[slot] and records it in levelClassInstances_ (reusing the slot's entry, so the
+// pairing stays by index). worldXf null: the authored pose, with `snap` resolved against the ground. worldXf
+// set: that exact world pose, no ground query -- undo and the Stop respawn already hold a resolved pose, and
+// adding the ground again would climb.
+scene::Entity SandboxApp::spawnClassSlot(usize slot, const Transform* worldXf) {
+    if (slot >= classAuthored_.size()) return scene::kInvalidEntity;
+    const fmt::OcWorldPlacement& p = classAuthored_[slot];
+    scene::World& world = scene::World::instance();
+
+    ClassInstance* prior = nullptr;
+    for (ClassInstance& ci : levelClassInstances_)
+        if (ci.placement == slot) { prior = &ci; break; }
+    if (!worldXf && prior) {
+        // The retry call at applyProject's tail must not spawn a second copy; a deleted placement stays deleted.
+        if (prior->removed) return scene::kInvalidEntity;
+        const scene::Entity live = static_cast<scene::Entity>(prior->entity);
+        if (prior->entity != 0 && world.valid(live) && !world.destroyPending(live)) return live;
+    }
+
+    const int32_t c = aver_fw_class_find(p.className.c_str());
+    if (c == 0) {
+        AVER_WARN("[Level] placement names class '{}', which is not declared -- skipped", p.className);
+        return scene::kInvalidEntity;
+    }
+
+    f32 pos3[3], quat4[4], scale3[3];
+    if (worldXf) {
+        pos3[0] = worldXf->position.x; pos3[1] = worldXf->position.y; pos3[2] = worldXf->position.z;
+        quat4[0] = worldXf->rotation.x; quat4[1] = worldXf->rotation.y;
+        quat4[2] = worldXf->rotation.z; quat4[3] = worldXf->rotation.w;
+        scale3[0] = worldXf->scale.x; scale3[1] = worldXf->scale.y; scale3[2] = worldXf->scale.z;
+    } else {
         f64 pz = p.z;
 #if AVER_MODULE_LANDSCAPE
         // Same ground query loadLevel hands level_ as hooks.groundHeightAt -- re-expressed here
@@ -680,26 +721,179 @@ void SandboxApp::spawnClassPlacements() {
             if (landscape_.groundHeightAt(p.x, p.y, gz)) pz = gz + p.z;
         }
 #endif
-        const f32 pos3[3]  = {static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz)};
-        const Quat rot     = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
-                                                           static_cast<f32>(p.pitch),
-                                                           static_cast<f32>(p.yaw)});
-        const f32 quat4[4]  = {rot.x, rot.y, rot.z, rot.w};
-        const f32 scale3[3] = {static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz)};
-
-        const int32_t e = aver_fw_spawn(c, p.className.c_str(), pos3, quat4, scale3);
-        if (e == 0) {
-            AVER_WARN("[Level] class '{}' failed to spawn at ({:.0f}, {:.0f}, {:.0f})",
-                      p.className, pos3[0], pos3[1], pos3[2]);
-            continue;
-        }
-        levelClassInstances_.push_back(ClassInstance{pi, e});
+        const Quat rot = world::quatFromEulerDeg(Vec3{static_cast<f32>(p.roll),
+                                                      static_cast<f32>(p.pitch),
+                                                      static_cast<f32>(p.yaw)});
+        pos3[0] = static_cast<f32>(p.x); pos3[1] = static_cast<f32>(p.y); pos3[2] = static_cast<f32>(pz);
+        quat4[0] = rot.x; quat4[1] = rot.y; quat4[2] = rot.z; quat4[3] = rot.w;
+        scale3[0] = static_cast<f32>(p.sx); scale3[1] = static_cast<f32>(p.sy); scale3[2] = static_cast<f32>(p.sz);
     }
-    if (!levelClassInstances_.empty())
-        AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
-                  "COMPILED is reported per instance above, because aver_fw_spawn returns a live entity "
-                  "even when the managed bind behind it failed, so this count is placement, not success",
-                  levelClassInstances_.size());
+
+    const int32_t e = aver_fw_spawn(c, p.className.c_str(), pos3, quat4, scale3);
+    if (e == 0) {
+        AVER_WARN("[Level] class '{}' failed to spawn at ({:.0f}, {:.0f}, {:.0f})",
+                  p.className, pos3[0], pos3[1], pos3[2]);
+        return scene::kInvalidEntity;
+    }
+    if (prior) { prior->entity = e; prior->removed = false; }
+    else levelClassInstances_.push_back(ClassInstance{slot, e});
+    return static_cast<scene::Entity>(e);
+}
+
+// Adds a class actor to the open level: appends to classAuthored_, spawns it, selects it and pushes a Create
+// edit. Every refusal sets the status line, warns, fills *why and returns kInvalidEntity.
+scene::Entity SandboxApp::placeClassInstance(fmt::OcWorldPlacement p, std::string* why) {
+    const auto refuse = [&](const std::string& msg) {
+        cbStatus_ = msg;
+        if (why) *why = msg;
+        AVER_WARN("[Editor] place class '{}': {}", p.className, msg);
+        return scene::kInvalidEntity;
+    };
+    if (anyPlayActive()) return refuse("Stop Play before placing an actor");
+    if (!(hideEditorScene_ || !levelPath_.empty()))
+        return refuse("Load a level (or hide the editor scene) before dropping assets");
+    // A legacy .ocmap save has no record for a class actor: it would be placed now and gone on save.
+    if (levelIsLegacyOcmap_) return refuse("this level is a legacy .ocmap, which cannot store a class actor -- Save As an .ocworld first");
+#if AVER_MODULE_SCRIPTING
+    // Declared again on every placement: a graph written or edited after the project opened becomes placeable,
+    // and its COMP data matches the file the managed bind reloads.
+    if (!scripts_.ready()) return refuse("Scripting is not ready; use Tools > Reload Scripts");
+    scripts_.declareGraphClasses(project_.contentDir());
+#endif
+    const int32_t c = aver_fw_class_find(p.className.c_str());
+    if (c == 0)
+        return refuse("class '" + p.className + "' is not declared: its graph did not parse, or no .ocgraph "
+                      "under Content declares it (see the log)");
+    aver_fw_class_seal(c);   // kind flags (GameMode, controller...) are inherited from the parent at seal
+    const int32_t flags = aver_fw_class_get_flags(c);
+    editor::ClassRoleBits bits;
+    bits.gameMode      = (flags & AVER_FW_CLASS_GAME_MODE) != 0;
+    bits.controller    = (flags & AVER_FW_CLASS_CONTROLLER) != 0;
+    bits.gameInstance  = (flags & AVER_FW_CLASS_GAME_INSTANCE) != 0;
+    bits.abstractClass = (flags & AVER_FW_CLASS_ABSTRACT) != 0;
+    if (const std::string r = editor::classPlaceRefusalText(bits, p.className); !r.empty()) return refuse(r);
+
+    const usize slot = classAuthored_.size();
+    classAuthored_.push_back(p);
+    const scene::Entity e = spawnClassSlot(slot, nullptr);
+    if (e == scene::kInvalidEntity) {
+        classAuthored_.pop_back();
+        return refuse("class '" + p.className + "' failed to spawn (see the log)");
+    }
+    multiSetSingle(e);
+    sel_ = kSelScene; selEntity_ = e;
+
+    EditCmd c2 = describeEntity(e);
+    c2.kind = EditCmd::Kind::Create;
+    c2.className = p.className;
+    c2.classSlot = static_cast<i32>(slot);
+    pushEdit(std::move(c2));
+    markLevelUnsaved();
+    cbStatus_ = "Placed " + p.className;
+    AVER_INFO("[Editor] placed class '{}' at ({:.0f}, {:.0f}, {:.0f})", p.className, p.x, p.y, p.z);
+    return e;
+}
+
+// Index into levelClassInstances_ of the live class root `e`, or -1.
+int SandboxApp::classSlotOfEntity(scene::Entity e) const {
+    if (e == scene::kInvalidEntity) return -1;
+    for (usize i = 0; i < levelClassInstances_.size(); ++i) {
+        const ClassInstance& ci = levelClassInstances_[i];
+        if (!ci.removed && ci.entity != 0 && static_cast<scene::Entity>(ci.entity) == e) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+// The class root `hit` is, or hangs from; kInvalidEntity when it belongs to none.
+scene::Entity SandboxApp::classRootOf(scene::Entity hit) const {
+    scene::World& w = scene::World::instance();
+    const auto parentOf = [&w](int32_t x) {
+        const scene::Entity ex = static_cast<scene::Entity>(x);
+        return w.valid(ex) ? static_cast<int32_t>(w.parent(ex)) : int32_t(0);
+    };
+    const int32_t r = editor::classRootOf(static_cast<int32_t>(hit), parentOf, levelClassInstances_);
+    return r == 0 ? scene::kInvalidEntity : static_cast<scene::Entity>(r);
+}
+
+// Marks a Create/Destroy edit of class root `e` so undo and redo respawn the class instead of replaying a snapshot.
+void SandboxApp::tagClassEdit(EditCmd& c, scene::Entity e) {
+    const int i = classSlotOfEntity(e);
+    if (i < 0) return;
+    const usize placement = levelClassInstances_[static_cast<usize>(i)].placement;
+    c.className = classAuthored_[placement].className;
+    c.classSlot = static_cast<i32>(placement);
+    c.subtree.clear();   // the class spawn rebuilds its parts; replaying captured ones would double them
+}
+
+// Undo of a Delete / redo of a Create: spawn the class again at the edit's pose and rebind the EditId to it.
+void SandboxApp::respawnClassFromEdit(const EditCmd& c) {
+    if (c.classSlot < 0 || static_cast<usize>(c.classSlot) >= classAuthored_.size()) return;
+    Transform xf;
+    xf.position = c.after.pos;
+    xf.rotation = world::quatFromEulerDeg(c.after.rotDeg);
+    xf.scale    = c.after.scale;
+    const scene::Entity e = spawnClassSlot(static_cast<usize>(c.classSlot), &xf);
+    if (e == scene::kInvalidEntity) return;
+    rebindEdit(c.id, e);
+    multiSetSingle(e);
+    sel_ = kSelScene; selEntity_ = e;
+}
+
+// After Stop: aver_fw_end_play destroys every class-bearing entity, so respawn each root it took, at its
+// pre-Play pose. Not a user edit, so no undo entry.
+void SandboxApp::respawnLostClassInstances() {
+    scene::World& w = scene::World::instance();
+    for (const PlayClassSaved& s : playClassSnapshot_) {
+        const auto it = std::find_if(levelClassInstances_.begin(), levelClassInstances_.end(),
+                                     [&](const ClassInstance& ci) { return ci.placement == s.slot && !ci.removed; });
+        if (it == levelClassInstances_.end()) continue;
+        const scene::Entity old = static_cast<scene::Entity>(it->entity);
+        // end_play destroys with a pending bit that valid() does not show until a flush.
+        if (it->entity != 0 && w.valid(old) && !w.destroyPending(old)) continue;
+        const Transform xf = s.xf;
+        const scene::Entity e = spawnClassSlot(s.slot, &xf);
+        if (e == scene::kInvalidEntity) continue;
+        rebindEdit(s.id, e);
+        for (scene::Entity& m : multiSel_) if (m == old) m = e;
+        if (selEntity_ == old) selEntity_ = e;
+        multiRebuildSet();
+    }
+    playClassSnapshot_.clear();
+}
+
+// World box of the root's mesh parts (not the root itself), for framing a class actor whose body is COMP parts.
+bool SandboxApp::classPartsBounds(scene::Entity root, Vec3& lo, Vec3& hi) const {
+    scene::World& w = scene::World::instance();
+    if (!w.valid(root)) return false;
+    std::vector<scene::Entity> parts;
+    collectSubtree(w, root, parts);
+    Vec3 mn{1e30f, 1e30f, 1e30f}, mx{-1e30f, -1e30f, -1e30f};
+    bool any = false;
+    for (usize i = 1; i < parts.size(); ++i) {
+        const scene::Entity part = parts[i];
+        const auto* mr = w.component<scene::CMeshRenderer>(part, scene::kComponentMeshRenderer);
+        if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+        Vec3 blo{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
+        Vec3 bhi{mr->aabbMax[0], mr->aabbMax[1], mr->aabbMax[2]};
+        if (!(bhi.x > blo.x && bhi.y > blo.y && bhi.z > blo.z)) {
+            // Bounds the renderer has not filled in yet: the content cache knows them.
+            const auto* bit = content_.boundsFor(mr->mesh);
+            if (!bit) continue;
+            blo = bit->first; bhi = bit->second;
+            if (!(bhi.x > blo.x && bhi.y > blo.y && bhi.z > blo.z)) continue;
+        }
+        const Mat4& wm = w.worldMatrix(part);
+        for (u32 k = 0; k < 8; ++k) {
+            const Vec3 t = xformPoint(wm, Vec3{(k & 1) ? bhi.x : blo.x, (k & 2) ? bhi.y : blo.y, (k & 4) ? bhi.z : blo.z});
+            mn.x = std::fmin(mn.x, t.x); mx.x = std::fmax(mx.x, t.x);
+            mn.y = std::fmin(mn.y, t.y); mx.y = std::fmax(mx.y, t.y);
+            mn.z = std::fmin(mn.z, t.z); mx.z = std::fmax(mx.z, t.z);
+        }
+        any = true;
+    }
+    if (!any) return false;
+    lo = mn; hi = mx;
+    return true;
 }
 
 #endif
@@ -904,8 +1098,10 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy() --
     // see GameLevel::unload's identical comment for why (the managed-dispatch unbind hook is what
     // releases a graph-class instance's GraphHost/VAR storage).
-    for (const ClassInstance& ci : levelClassInstances_) aver_fw_destroy(ci.entity);
+    for (const ClassInstance& ci : levelClassInstances_) if (ci.entity != 0) aver_fw_destroy(ci.entity);
     levelClassInstances_.clear();
+    classAuthored_.clear();
+    playClassSnapshot_.clear();
 #endif
     scene::World& world = scene::World::instance();
     for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);

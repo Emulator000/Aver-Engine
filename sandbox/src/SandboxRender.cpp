@@ -1982,6 +1982,33 @@ void SandboxApp::onRender(Engine& e)  {
         if (motionDebugMesh_) e.device()->drawLines(motionDebugMesh_, &mmId.m[0][0]);
     }
 #endif
+#if AVER_MODULE_FRAMEWORK
+    // Class-root markers: a class actor can have no mesh at all, so each live root gets three axis lines to be
+    // seen and clicked (pick() tests the same box). Edit mode only; world-space vertices, so identity.
+    if (classMarkerMesh_) { e.device()->destroyLineMesh(classMarkerMesh_); classMarkerMesh_ = 0; }
+    if (!noEditorChrome_ && !anyPlayActive() && !levelClassInstances_.empty()) {
+        scene::World& cw = scene::World::instance();
+        std::vector<editor::MarkerSeg> segs;
+        for (const ClassInstance& ci : levelClassInstances_) {
+            if (ci.removed || ci.entity == 0) continue;
+            const scene::Entity root = static_cast<scene::Entity>(ci.entity);
+            if (!cw.valid(root) || cw.destroyPending(root)) continue;
+            const bool selected = sel_ == kSelScene && (selEntity_ == root || multiIsSelected(root));
+            editor::classMarkerSegments(worldTransformOf(cw, root).position, editor::kClassMarkerHalf, selected, segs);
+        }
+        if (!segs.empty()) {
+            std::vector<rhi::LineVertex> verts;
+            verts.reserve(segs.size() * 2);
+            for (const editor::MarkerSeg& sg : segs) {
+                verts.push_back({sg.a.x, sg.a.y, sg.a.z, sg.rgb[0], sg.rgb[1], sg.rgb[2]});
+                verts.push_back({sg.b.x, sg.b.y, sg.b.z, sg.rgb[0], sg.rgb[1], sg.rgb[2]});
+            }
+            classMarkerMesh_ = e.device()->createLineMesh(verts.data(), static_cast<u32>(verts.size()));
+            const Mat4 cmId = Mat4::identity();
+            if (classMarkerMesh_) e.device()->drawLines(classMarkerMesh_, &cmId.m[0][0]);
+        }
+    }
+#endif
 #if AVER_MODULE_PHYSICS
     // ---- COLLIDERS, which could not be seen at all until now --------------------------------
     // No collider overlay, toggle or wireframe existed before; the drawLines infrastructure was
