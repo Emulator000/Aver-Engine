@@ -238,6 +238,7 @@ int main() {
         check(undone != kInvalidEntity && pastedStr != kInvalidEntity, "both rebuilds produced an entity");
         const auto* cU = w.component<CSnapStr>(undone, strType);
         const auto* cP = w.component<CSnapStr>(pastedStr, strType);
+        c0 = static_cast<CSnapStr*>(w.component<CSnapStr>(s0, strType));   // the two adds may have moved the pool
         check(cU && cP && c0, "all three entities carry the string component");
         if (cU && cP && c0) {
             check(c0->text != 0 && cU->text != 0 && cP->text != 0, "all three own a pool slot");

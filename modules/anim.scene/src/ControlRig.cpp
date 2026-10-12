@@ -259,9 +259,9 @@ CControlRig* ControlRigSystem::attach(scene::World& world, scene::Entity e, u64 
     if (g_type == 0) return nullptr;
     auto* c = static_cast<CControlRig*>(world.addComponent(e, g_type));
     if (!c) return nullptr;
-    // A FRESH VALUE OVER THE ZERO-FILLED BYTES. addComponent runs no constructor, so without this
-    // `weight` would be 0 and the rig would attach and do nothing -- see the header.
-    *c = CControlRig{};
+    // Every field written over the zero-filled bytes: addComponent runs no constructor, so without this
+    // `weight` would be 0 and the rig would attach and do nothing -- see the header. No `*c = CControlRig{}`:
+    // copying a temporary may carry stack bytes into the padding after `weight`, and snapshots copy raw bytes.
     c->rig = rigAsset;
     c->weight = weight;
     return c;

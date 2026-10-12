@@ -83,6 +83,7 @@ static anim::MontagePlayer make(const anim::MontageAsset& a) {
     p.bind(&a, &findClip);
     return p;
 }
+static anim::MontagePlayer make(anim::MontageAsset&&) = delete;   // bind() keeps the pointer
 
 // The events since the last call as one comma-joined string: S started, n: notify, nb: begin, ne: end,
 // sec: section, bo blend-out, int interrupted, end ended.
@@ -331,7 +332,8 @@ int main() {
         s.advance(0.05f);
         checkNear(s.weight(), 0.5f, 1e-4f, "smooth: the midpoint is 0.5");
 
-        anim::MontagePlayer o = make(oneSecond());
+        const anim::MontageAsset oAsset = oneSecond();   // the player keeps a pointer: no temporary
+        anim::MontagePlayer o = make(oAsset);
         o.start(-1, 1.0f, 0.4f);
         checkNear(o.weight(), 0.0f, 1e-6f, "a blend-in override applies");
         o.advance(0.2f);
@@ -356,7 +358,8 @@ int main() {
 
     AVER_INFO("stopping");
     {
-        anim::MontagePlayer p = make(oneSecond());
+        const anim::MontageAsset pAsset = oneSecond();   // the player keeps a pointer: no temporary
+        anim::MontagePlayer p = make(pAsset);
         p.start(-1, 1.0f, -1.0f);
         drain(p);
         p.advance(0.25f);
@@ -381,7 +384,8 @@ int main() {
         c.stop(-1.0f);
         check(drain(c) == "int,bo,end" && c.finished() && c.weight() == 0.0f, "with blendOut 0 a stop is a cut");
 
-        anim::MontagePlayer r = make(oneSecond());
+        const anim::MontageAsset rAsset = oneSecond();   // the player keeps a pointer: no temporary
+        anim::MontagePlayer r = make(rAsset);
         r.start(-1, 1.0f, -1.0f);
         drain(r);
         r.advance(0.1f);
@@ -389,7 +393,8 @@ int main() {
         check(drain(r) == "int,end,S,sec:Default", "restarting ends the old play, then starts anew");
         checkNear(r.position(), 0.0f, 1e-6f, "from the top");
 
-        anim::MontagePlayer o = make(oneSecond());
+        const anim::MontageAsset oAsset = oneSecond();   // the player keeps a pointer: no temporary
+        anim::MontagePlayer o = make(oAsset);
         o.start(-1, 1.0f, -1.0f);
         drain(o);
         o.stop(0.4f);
@@ -508,7 +513,8 @@ int main() {
 
     AVER_INFO("evaluate");
     {
-        anim::MontagePlayer p = make(oneSecond());
+        const anim::MontageAsset pAsset = oneSecond();   // the player keeps a pointer: no temporary
+        anim::MontagePlayer p = make(pAsset);
         p.start(-1, 1.0f, -1.0f);
         p.advance(0.5f);
         anim::Pose base;
