@@ -261,19 +261,19 @@ depth. A tilted floor, wall or vault no longer rejects its coarse neighbours as 
 oracle fits this resolve, so `kNrd2StageBVersion` is 2 and older captures are refused. The shipped network
 v2 was trained against the previous form and still applies; a recapture and retrain would match it exactly.
 
-## Network v3: sun outside D, three Caldera regions (2026-10-12)
+## Network v3: sun outside D, no Caldera (2026-10-12)
 
-Retrained because the sun left D (`2e538bff`): 296 poses in 8 scenes, 228 training and 68 held out. Caldera
-in three regions (courtyard, streets, seafront; 112 poses, plus 24 with Path Tracing), CyberCity2099 Day and
-Night, NewSponza and NewSponza_Night (each also with Path Tracing). The capture now waits for the
-`--open-level` level and ~10 s of streaming; before, it captured the startup level. Best held-out ratio 0.545
-after 5,750 steps over two resumed sessions (about 1-2 minutes each on the RX 7800 XT). Per scene:
-Caldera 0.88, Caldera PT 0.72, CyberCity Day 0.42, Night 0.73, NewSponza 0.43, PT 0.52, Night 0.30, PT 0.53.
-Caldera's oracle parameters sit close to the defaults, so the network gains least there.
+Retrained because the sun left D (`2e538bff`). Caldera_Capital is Activision's non-commercial dataset, so no
+shipped weights are trained on it: v3 uses 168 poses in 6 scenes, 126 training and 42 held out --
+CyberCity2099 Day and Night, NewSponza and NewSponza_Night, NewSponza and NewSponza_Night with Path Tracing.
+Trained from scratch; it stopped early at 9,750 steps with a best held-out ratio of 0.467 (about 1.5 minutes
+on the RX 7800 XT), and a resumed session found nothing better. The capture now waits for the `--open-level`
+level and ~10 s of streaming; before, it captured the startup level.
 
-In-engine stills against a Path Tracing reference (2,500 frames, fixed exposure, scale 0.5) are unchanged
-from the v2 weights: Caldera courtyard MAE 0.0132 vs 0.0134, NewSponza 0.0071 vs 0.0072, fine-scale residual
-equal. At rest the temporal stage dominates; the network matters on new pixels.
+In-engine stills against a Path Tracing reference (2,500 frames, fixed exposure, scale 0.5) match a variant
+that was also trained on Caldera, to four decimals: NewSponza MAE 0.0047, NewSponza_Night 0.0006,
+CyberCity Night 0.0006, and Caldera (evaluation only, never trained on) 0.0090 vs 0.0091. At rest the
+temporal stage dominates; the network matters on new pixels.
 
 ## Network v2: ray-traced and Path Tracing (2026-10-06)
 

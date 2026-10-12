@@ -226,7 +226,8 @@ Edge-pixel colour error against the 64-sample reference, held out:
 | NewSponza | 0.00997 | 0.01002 | 0.01301 |
 | CyberCity2099 Day | 0.02286 | 0.02209 | 0.02821 |
 
-v2 replaces `neuraa_v1.bin` (same format and file name).
+v2 is not shipped: Caldera_Capital is Activision's non-commercial dataset, so `neuraa_v1.bin` is back to
+v1 (2026-10-12), trained on NeonDistrict and NewSponza only. A Caldera-free v2 needs a recapture.
 
 ### Cost (estimate)
 
