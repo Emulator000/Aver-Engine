@@ -1263,6 +1263,10 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     }
 
     materials_.update();
+    // Last frame's draws are replayed below (GI build, voxelisation); a level change just destroyed some of their sets.
+    if (const auto& gone = materials_.releasedByLastUpdate(); !gone.empty())
+        for (Draw& d : drawsPrev_)
+            if (gone.count(d.matSet)) d.matSet = materials_.fallbackBindingSet();
     // Foliage BLAS dropped if its mesh was destroyed.
     for (rhi::BlasHandle b : foliageBlas_) {
         if (res_->blasMesh(b) != 0) continue;
@@ -5593,8 +5597,8 @@ void VoxiRenderer::recordStagedRayDriven(rhi::IRenderContext& ctx) {
         AVER_INFO("[Voxi] reflection register/filter split running: CSRdRefl (R1) traces the "
                   "reflection ray alone, CSRdReflFilter (R2) runs rtReflectionSpatial's history "
                   "gather in its own pass");
-    } else if (cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f && settings_.rayDrivenReflSplit &&
-               !reflSplit && !rdReflSplitFallbackLogged_) {
+    } else if (!ptRef && !nrd2Frame_ && cb_.shadowParams[2] > 0.5f && cb_.rtParams[3] > 0.5f && settings_.rayDrivenReflSplit &&
+               !reflSplit && !rdReflSplitFallbackLogged_) {   // PT and NRD2 skip the split by design; only missing pipelines warn
         rdReflSplitFallbackLogged_ = true;
         AVER_WARN("[Voxi] voxi.rayDrivenReflSplit requested the reflection register/filter split, "
                   "but the split or filter pipeline did not compile; behaving as the unsplit "

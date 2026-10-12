@@ -8967,7 +8967,7 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     if (!pipe_) { AVER_ERROR("[RHI.D3D12] setBindingSet before setPipeline"); return; }
     if (table >= kBindingTableCount) { AVER_ERROR("[RHI.D3D12] setBindingSet table {} past the {} declarable", table, kBindingTableCount); return; }
     RhiBindingSet* s = res_->bindingSet(set);
-    if (!s || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setBindingSet with an invalid handle"); return; }
+    if (!s || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setBindingSet with an invalid handle ({}, table {})", static_cast<u64>(set), table); return; }
 
     // One generic heap: elide redundant binds the same way boundRootSig_/boundPso_ do.
     ID3D12DescriptorHeap* const heap = res_->heap_.Get();

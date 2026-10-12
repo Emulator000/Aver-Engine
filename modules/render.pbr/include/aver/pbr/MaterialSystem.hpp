@@ -121,6 +121,9 @@ public:
     // The identity material's set: white base colour, flat normal, full roughness, no metal.
     rhi::BindingSetHandle fallbackBindingSet() const { return fallbackSet_; }
     const MaterialConstants& fallbackConstants() const { return fallbackConstants_; }
+    // The sets the last update() destroyed (materials a level change released). A draw list recorded before that
+    // update still names them; its owner repoints such draws to fallbackBindingSet().
+    const std::unordered_set<rhi::BindingSetHandle>& releasedByLastUpdate() const { return releasedSets_; }
 
     u32 textureCacheSize() const { return static_cast<u32>(cache_.size()); }
     // How many cache entries are remembered FAILURES rather than textures.
@@ -269,6 +272,7 @@ private:
     // insert-on-create/erase-on-destroy is the whole contract -- there is no rebuild path to also
     // cover.
     std::unordered_set<rhi::BindingSetHandle> liveSets_;
+    std::unordered_set<rhi::BindingSetHandle> releasedSets_;   // see releasedByLastUpdate()
     // Keyed by the reference — the id when set, else the path — PLUS the slot's colour class, so one
     // texture uploads once per way of decoding it. See colourClass() in the .cpp for why the second
     // half of the key is not optional.

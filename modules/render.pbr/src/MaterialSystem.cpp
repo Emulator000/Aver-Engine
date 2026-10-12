@@ -495,6 +495,7 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
 // would just be a second place this could disagree with the first.
 void MaterialSystem::update() {
     if (!res_) return;
+    releasedSets_.clear();
     const auto t0 = std::chrono::steady_clock::now();
     MaterialLibrary& lib = MaterialLibrary::get();
 
@@ -607,6 +608,7 @@ void MaterialSystem::update() {
                 setTextures_.erase(st);
             }
             setAverage_.erase(it->second.set);
+            releasedSets_.insert(it->second.set);
             res_->destroyBindingSet(it->second.set);
         }
         it = entries_.erase(it);
