@@ -404,6 +404,22 @@ static void testAnimatedBodies() {
 }
 #endif
 
+static void testComponents() {
+    AVER_INFO("COMPONENT records on members");
+    Fixture f;
+    f.levels["Kit"] = parse("OCWORLD 1\nPLACE Meshes/a.ocmesh 0 0 0 0 0 0 1 id=a\n  COMPONENT SkeletalMesh skeleton=Meshes/Char.ocskel\n"
+                            "PLACE Meshes/b.ocmesh 0 0 0 0 0 0 1 id=b\n");
+    f.begin(parse("OCWORLD 1\nLEVELINST Kit pos 0 0 0 id=1\nENDLEVELINST\nLEVELINST Kit pos 500 0 0 id=2\nENDLEVELINST\n"));
+    scene::World& w = scene::World::instance();
+    const u64 skel = fnv1a64(std::string_view("Meshes/Char.ocskel"));
+    for (u32 i = 0; i < f.li.count(); ++i) {
+        const scene::Entity root = f.li.at(i);
+        const auto* sm = w.component<scene::CSkeletalMesh>(f.li.find(root, "a"), scene::kComponentSkeletalMesh);
+        check(sm && sm->skeleton == skel, "instance " + std::to_string(i) + ": the member gets its child placement's component");
+        check(!w.hasComponent(f.li.find(root, "b"), scene::kComponentSkeletalMesh), "instance " + std::to_string(i) + ": a placement without records gets none");
+    }
+}
+
 int main() {
 #if AVER_MODULE_PHYSICS
     aver_phys_init();
@@ -417,6 +433,7 @@ int main() {
     testReloadAssetAndEdit();
     testBreak();
     testClassesLightsDecals();
+    testComponents();
 #if AVER_MODULE_PHYSICS
     testAnimatedBodies();
     aver_phys_shutdown();

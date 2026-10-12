@@ -443,8 +443,8 @@ Rules every `apply*` follows (each is a trap this codebase already fell into):
   Guard with `#if AVER_MODULE_SCENE`. Skip when `legacy`. For a streamed level `inst` is empty here (:276) and the streaming path covers it.
 - `LevelStreaming.cpp`, after the loop that builds `loaded` (:225-243) and before `hooks_.afterLoad` (:250): for each `k`, apply
   `records_[loadedPlacement[k]].components` to `loaded[k]`. Reuse `applyPlacedComponents`; this site logs warnings only (an INFO line per streamed item would be noise on a hitch-sensitive path).
-- Level instances (`LEVELINST`, `Runtime/src/LevelInstances.cpp`) are **not** covered in v1: log one `AVER_WARN` per instance whose child level has
-  placements with components. Non-goal, see 11.
+- Level instances (`LEVELINST`, `Runtime/src/LevelInstances.cpp`): **done 2026-10-12** (was a v1 non-goal). Members get their child level's
+  records through `applyPlacedComponents` after the `created` hook, so an editor Commit captures them back instead of dropping them.
 - `modules/world/src/LevelPack.cpp:56`: `const bool own = ... || !p.components.empty();`. Packed rows are bare transform rows with no entity, so a
   placement with components must stay an entity (same reason as className/vehicle/anim there).
 - `Runtime/CMakeLists.txt`: add `src/LevelComponents.cpp` to `Aver.Runtime.Game.Core` (list at :~186-215) and, next to the Anim.Scene link at :134-136,

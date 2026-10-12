@@ -219,7 +219,7 @@ T3's own `ADD_COMPONENT.md` hunks in these same files are listed in its task bel
 1. **T5 writes into `PTTest` directly** (your test project, add-only, nothing existing modified). Fine, and with the editor closed so the content index is not hot-reloaded half way? The alternative is a staging copy inside the repo that you copy over yourself.
 2. **Soft Body persistence** (ADD 4.9) comes for free with the same record; included as T2's last, droppable item. Keep it?
 3. The existing bug that a **Light or Decal added to a mesh entity is saved twice** (ADD 1.2) is left alone. Want it fixed as a separate task?
-4. **Level instances** (`LEVELINST`) do not apply `COMPONENT` records in v1 (a warning is logged). Acceptable?
+4. **Level instances** (`LEVELINST`) apply `COMPONENT` records to their members (done 2026-10-12; was a v1 warning).
 5. PLACE_CLASS side finding: `spawnFromAssetDrop`'s `.ocprefab` and `.ocworld` branches look unreachable from a viewport drop (`isPlaceableAssetExt` refuses both). Separate fix, not in these tasks.
 6. The demo needs four of your own steps before it runs (chime script, kick-clip Root motion flag, input scheme, reopen). OK, or should an importer/tool step replace the flag one?
 7. DEMO levels need Stop/respawn (T4 Step 9) to survive a second Play; until it lands the README says to reopen the level.

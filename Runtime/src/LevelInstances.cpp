@@ -7,6 +7,7 @@
 #include "aver/formats/OcLevelInst.hpp"
 #include "aver/formats/OcPack.hpp"
 #include "aver/formats/OcStream.hpp"
+#include "aver/game/LevelComponents.hpp"
 #include "aver/game/LevelDecals.hpp"
 #include "aver/game/LevelLights.hpp"
 #include "aver/scene/Components.hpp"
@@ -412,12 +413,11 @@ struct LevelInstances::Impl {
             if (hooks.created) hooks.created(li.entities[k], body, &rc.world.placements[pi]);
         }
         in.animated = li.animatedBodies;
-        // COMPONENT records ride in the child level but are not applied to instance members (v1); say so rather than drop them silently.
-        {
-            usize withComponents = 0;
-            for (const fmt::OcWorldPlacement& p : rc.world.placements) if (!p.components.empty()) ++withComponents;
-            if (withComponents > 0)
-                AVER_WARN("[LevelInstance] '{}' has {} placement(s) with COMPONENT records: not applied to level instances", in.rec.asset, withComponents);
+        // COMPONENT records on the members, after the host's created hook. Also what keeps them through an editor Commit,
+        // which captures the members' live components back into the child level.
+        for (usize k = 0; k < li.entities.size(); ++k) {
+            const fmt::OcWorldPlacement& p = rc.world.placements[li.placementIndex[k]];
+            if (!p.components.empty()) applyPlacedComponents(scene::World::instance(), li.entities[k], p, li.placementIndex[k]);
         }
 
         // CLASS placements wait for scripting (spawnPendingClasses); their world pose is composed here.
