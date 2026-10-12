@@ -150,6 +150,15 @@ public static class HostBridge
     // every frame -- cleared in DispUnbind since a reused id deserves its own first warning. --------
     private static readonly HashSet<(int Entity, string EventName)> s_fireWarnedOnce = new();
 
+    // Events the AI raises on every querier, user, object or listener whether or not anything handles them;
+    // an unhandled one is normal, so it is not warned about. Authored events (FireEvent, slot USE events) still are.
+    private static readonly HashSet<string> s_aiBroadcasts = new(StringComparer.Ordinal)
+    {
+        "EqsFinished", "EqsFailed", "OnSeeTarget", "OnHearNoise",
+        "SmartObjectClaimed", "SmartObjectUsed", "SmartObjectReleased",
+        "SmartObjectSlotClaimed", "SmartObjectSlotUsed", "SmartObjectSlotReleased",
+    };
+
     /// <summary>One discovered [AverHud]: its instance, its display name, and the Draw it promised.</summary>
     private sealed class LiveHud
     {
@@ -1624,6 +1633,7 @@ public static class HostBridge
     private static bool FireEventRouter(int targetEntity, string eventName)
     {
         GraphHost? host = FindGraphHost(targetEntity);
+        bool quiet = s_aiBroadcasts.Contains(eventName);
 
         if (host == null)
         {
@@ -1644,19 +1654,20 @@ public static class HostBridge
                     DisableActor(live, "OnEvent", ex);
                     return false;
                 }
-                if (s_fireWarnedOnce.Add((targetEntity, eventName)))
+                if (!quiet && s_fireWarnedOnce.Add((targetEntity, eventName)))
                     Emit((int)Log.Level.Warn,
                          $"[Graph] FireEvent: entity {targetEntity} is a C# actor ({live.Name}) whose " +
                          $"OnEvent did not handle '{eventName}'");
                 return false;
             }
 
-            if (s_fireWarnedOnce.Add((targetEntity, eventName)))
+            if (!quiet && s_fireWarnedOnce.Add((targetEntity, eventName)))
                 Emit((int)Log.Level.Warn,
                      $"[Graph] FireEvent: entity {targetEntity} has no live graph or actor to fire '{eventName}' at");
             return false;
         }
 
+        if (quiet && !host.HasEvent(eventName)) return false;
         bool ok = host.FireForEntity(eventName, targetEntity, out _, out string? refusal);
         if (!ok && s_fireWarnedOnce.Add((targetEntity, eventName)))
             Emit((int)Log.Level.Warn,

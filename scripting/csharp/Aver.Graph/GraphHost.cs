@@ -131,6 +131,9 @@ public class GraphHost
     /// re-deriving it from Graph.EntryPoints.</summary>
     public bool IsEventDriven => _onStart != null || _onTick != null || _onDemand.Count > 0;
 
+    /// <summary>True when the graph has an on-demand event of this name.</summary>
+    public bool HasEvent(string eventName) => _onDemand.ContainsKey(eventName);
+
     /// <summary>The parsed graph, for inspection (name/description/node count) -- null until a
     /// successful Load(). Exposed read-only; GraphHost owns compiling it, nothing else should.</summary>
     public Graph? Graph => _graph;
