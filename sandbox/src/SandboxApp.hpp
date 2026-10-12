@@ -1653,6 +1653,7 @@ public:
     void setCamWobble(f32 degrees, i32 periodFrames);
     // --cam-wobble-stop, --set: console variables and camera control.
     void setCamWobbleStop(i32 frame);
+    void addCamTeleport(i32 frame, const Vec3& pos) { camTeleports_.push_back({frame, pos}); }
     void setConsoleSets(std::vector<std::pair<std::string, std::string>> sets);
     void setMeshHeapDefault(bool on);
     void setLodShareVertices(bool on);
@@ -3626,6 +3627,7 @@ private:
     i32  camWobblePeriod_=0;         // ...and its period in FRAMES; sin is 0 at every multiple
     f32  camWobbleBaseYaw_=0.0f;     // the yaw to swing about, latched on the first wobbled frame
     bool camWobbleBased_=false;
+    std::vector<std::pair<i32, Vec3>> camTeleports_;   // --cam-teleport FRAME X Y Z (repeatable)
     i32  camWobbleStopFrame_=0;      // --cam-wobble-stop N: wobble only while frame < N; 0 = never stop
     // --set NAME VALUE pairs, applied once through runConsoleLine on the first frame with a device.
     std::vector<std::pair<std::string, std::string>> consoleSets_;

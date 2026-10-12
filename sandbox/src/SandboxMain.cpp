@@ -237,6 +237,12 @@ Application* createApplication(int argc, char** argv) {
     i32 camWobbleStopArg = 0;
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--cam-wobble-stop")) camWobbleStopArg = std::atoi(argv[i + 1]);
+    // --cam-teleport FRAME X Y Z, repeatable: the camera jumps at FRAME the way Show > Go To does (streaming tests).
+    std::vector<std::pair<i32, Vec3>> camTeleportArgs;
+    for (int i = 1; i + 4 < argc; ++i)
+        if (!std::strcmp(argv[i], "--cam-teleport"))
+            camTeleportArgs.push_back({std::atoi(argv[i + 1]), Vec3{static_cast<f32>(std::atof(argv[i + 2])),
+                                       static_cast<f32>(std::atof(argv[i + 3])), static_cast<f32>(std::atof(argv[i + 4]))}});
     std::vector<std::pair<std::string, std::string>> consoleSetArgs;
     for (int i = 1; i + 2 < argc; ++i)
         if (!std::strcmp(argv[i], "--set")) consoleSetArgs.emplace_back(argv[i + 1], argv[i + 2]);
@@ -1190,6 +1196,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRefractionOverrides(refraction, refractionStrength, refractionFade);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
     if (camWobbleStopArg > 0) app->setCamWobbleStop(camWobbleStopArg);
+    for (const auto& [f, p] : camTeleportArgs) app->addCamTeleport(f, p);
     if (!consoleSetArgs.empty()) app->setConsoleSets(std::move(consoleSetArgs));
     if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
     if (camWanderAmp > 0.0f) app->setCamWander(camWanderAmp, camWanderSpeed);

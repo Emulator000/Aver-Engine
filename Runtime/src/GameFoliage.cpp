@@ -229,8 +229,12 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
     }
     if (extrasDirty_) changed = true;   // [wave3/level-instances]
     // Prototype meshes of cells about to load are read on GameContent's workers ahead of time, nearest
-    // first; a residency change waits until every mesh it adds is read, so nothing loads on this thread.
+    // first; a residency change waits until every mesh it adds is held, so nothing loads on this thread.
+    // Each read mesh is taken at once (within kAcquireMs) rather than when the whole set is read: the
+    // reads wait in GameContent's shared, capped pool, and a set larger than the pool (a jump into dense
+    // foliage) would otherwise fill it with reads nobody takes and stall level streaming with it.
     bool ready = true;
+    const auto takeStart = std::chrono::steady_clock::now();
     for (usize i = 0; i < cells_.size(); ++i) {
         if (!soon[i]) continue;
         File& f = files_[cells_[i].file];
@@ -240,7 +244,14 @@ void LevelFoliage::update(const Vec3& viewerCm, f32 dt) {
             const u32 g = f.data.runs[static_cast<usize>(r)].group;
             if (g >= f.held.size() || f.held[g]) continue;
             content_->prefetchMesh(f.objectIds[g], next[i] ? 0.0f : loadCm_);
-            if (next[i] && !content_->meshReady(f.objectIds[g])) ready = false;
+            if (!next[i]) continue;
+            if (rebuilds_ > 0 && content_->meshReady(f.objectIds[g]) &&
+                std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - takeStart).count() < kAcquireMs) {
+                content_->acquireTag = "foliage";
+                if (content_->acquireMesh(*device_, f.objectIds[g])) f.held[g] = 1;
+                content_->acquireTag = nullptr;
+            }
+            if (!f.held[g]) ready = false;
         }
     }
     if (extrasDirty_ && !extrasReady()) ready = false;   // [wave3/level-instances]

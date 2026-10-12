@@ -340,6 +340,14 @@ void LevelStreaming::tick(scene::World& world, const std::vector<Vec3>& viewers)
         lastLoaded_ += static_cast<u32>(now.size());
     }
     hm.mark("pinned");
+    // Progress guarantee: when roots wait but none has all its meshes read for ~30 ticks (the prefetch pool
+    // can saturate with partial sets after a teleport), the nearest waiting root loads with a direct read.
+    stalledTicks_ = (ready.empty() && now.empty() && nearestMissing < FLT_MAX) ? stalledTicks_ + 1u : 0u;
+    if (ready.empty() && stalledTicks_ > 30u) {
+        for (const u32 item : toLoad)
+            if (item < items_.size() && !items_[item].loaded && !streamer_.pinned(item)) { ready.push_back(item); break; }
+        stalledTicks_ = 0;
+    }
     if (ready.empty()) return;
     const f32 loadCm = streamer_.settings().loadCm;
     const f64 t = std::clamp((static_cast<f64>(nearestMissing) / loadCm - 0.25) / 0.5, 0.0, 1.0);

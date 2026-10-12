@@ -5,6 +5,7 @@
 #include "aver/core/HitchMarks.hpp"
 
 #include <algorithm>
+#include <unordered_set>
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
@@ -1288,15 +1289,26 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
         std::sort(finished.begin(), finished.end());
         for (usize i = 0; i < finished.size() && pf.jobs.size() > kMaxJobs * 3 / 4; ++i) pf.jobs.erase(finished[i].second);
         if (pf.jobs.size() >= kMaxJobs) {
-            // Still full of queued reads: the farthest gives way to a nearer one.
+            // Still full: finished reads farther than this request give way, farthest first, down to 7/8 of the
+            // pool. A streamer loads a root only once ALL its meshes are read, so a pool full of finished
+            // reads for half-read sets (a jump into dense content asks for many at once) would otherwise refuse
+            // every remaining mesh forever and nothing would load again.
             std::lock_guard<std::mutex> l(pf.m);
-            auto far = pf.queue.end();
-            for (auto it = pf.queue.begin(); it != pf.queue.end(); ++it)
-                if (far == pf.queue.end() || (*it)->priority > (*far)->priority) far = it;
-            if (far == pf.queue.end() || (*far)->priority <= priority) return;
-            for (auto it = pf.jobs.begin(); it != pf.jobs.end(); ++it)
-                if (it->second == *far) { pf.jobs.erase(it); break; }
-            pf.queue.erase(far);
+            std::vector<std::pair<f32, u64>> far;
+            for (const auto& [jid, j] : pf.jobs)
+                if (j->done.load(std::memory_order_acquire) && j->priority > priority) far.emplace_back(j->priority, jid);
+            std::sort(far.begin(), far.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            for (usize i = 0; i < far.size() && pf.jobs.size() > kMaxJobs * 7 / 8; ++i) pf.jobs.erase(far[i].second);
+            if (pf.jobs.size() >= kMaxJobs) {
+                // Then queued reads: the farthest gives way to a nearer one.
+                auto q = pf.queue.end();
+                for (auto it = pf.queue.begin(); it != pf.queue.end(); ++it)
+                    if (q == pf.queue.end() || (*it)->priority > (*q)->priority) q = it;
+                if (q == pf.queue.end() || (*q)->priority <= priority) return;
+                for (auto it = pf.jobs.begin(); it != pf.jobs.end(); ++it)
+                    if (it->second == *q) { pf.jobs.erase(it); break; }
+                pf.queue.erase(q);
+            }
         }
     }
     auto j = std::make_shared<MeshPrefetch::Job>();
@@ -1314,7 +1326,28 @@ void GameContent::prefetchMesh(u64 id, f32 priority) {
 }
 
 void GameContent::prefetchTick() {
-    if (prefetch_) ++prefetch_->tick;
+    if (!prefetch_) return;
+    MeshPrefetch& pf = *prefetch_;
+    ++pf.tick;
+    // Distance-ranked requests (priority > 0) nobody asked for in ~2 s are dropped: a queued one would keep
+    // its old, now wrong distance and be read before what the viewer needs after a jump, and a finished one
+    // would hold a pool slot forever. (Foliage re-asks on a timer, so not after two ticks.)
+    constexpr u64 kStaleTicks = 120;
+    std::unordered_set<const MeshPrefetch::Job*> stale;
+    for (const auto& [id, j] : pf.jobs)
+        if (j->priority > 0.0f && j->touchedTick + kStaleTicks < pf.tick) stale.insert(j.get());
+    if (stale.empty()) return;
+    std::lock_guard<std::mutex> l(pf.m);
+    std::unordered_set<const MeshPrefetch::Job*> queued;
+    for (const auto& j : pf.queue) queued.insert(j.get());
+    for (auto it = pf.jobs.begin(); it != pf.jobs.end();) {
+        const MeshPrefetch::Job* j = it->second.get();   // one being read stays until it finishes
+        if (stale.count(j) && (queued.count(j) || j->done.load(std::memory_order_acquire))) it = pf.jobs.erase(it);
+        else ++it;
+    }
+    pf.queue.erase(std::remove_if(pf.queue.begin(), pf.queue.end(),
+                                  [&](const std::shared_ptr<MeshPrefetch::Job>& j) { return stale.count(j.get()) != 0; }),
+                   pf.queue.end());
 }
 
 bool GameContent::meshReady(u64 id) const {

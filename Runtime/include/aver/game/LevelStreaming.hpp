@@ -106,6 +106,7 @@ private:
 
     bool active_ = false;
     u32 lastLoaded_ = 0, lastEvicted_ = 0;
+    u32 stalledTicks_ = 0;   // ticks with roots waiting and none read (see tick)
     GameContent* content_ = nullptr;
     rhi::IDevice* device_ = nullptr;
     world::InstantiateOptions opt_;

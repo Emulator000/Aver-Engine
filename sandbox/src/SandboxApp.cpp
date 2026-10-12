@@ -1599,6 +1599,7 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
     }
     if (voxiAttached_ && voxiRenderer_.nrd2CaptureHolding()) neuraaHold = true;
 #endif
+    for (const auto& [f, p] : camTeleports_) if (f > 0 && t.frame == static_cast<u64>(f)) teleportCamera(p);
     if (neuraaHold) ++camWanderHeld_;
     if (camWanderAmp_ > 0.0f && !neuraaHold && (camWobbleStopFrame_ <= 0 || t.frame < (u64)camWobbleStopFrame_)) {
         if (!camWanderBased_) {
