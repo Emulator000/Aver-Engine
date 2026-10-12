@@ -29,9 +29,13 @@
 # the same number -- test.ps1 forwarded ctest's own 8, and gates.ps1 exited the count of failed
 # gates, so two failures exited 2, which this table spells "you invoked me wrong".
 #
-# NOT YET RUN ANYWHERE. This file is committed by someone who cannot execute GitHub Actions; the
-# commands in it are the ones verified locally, but the workflow itself is unproven until it runs
-# once on a real runner. Treat its first red as information about the workflow, not the engine.
+# RUNNER HISTORY. The runs of 2026-10-04/05 got to 770/841 of the build and failed restoring
+# FSharp.Core on the cold package cache (fixed by scripting/Directory.Build.props); the test step
+# never ran there. On 2026-10-12 both configurations were reproduced locally the way this file runs
+# them -- a clean checkout, MSVC 19.44.35229 (the runner's), an empty NUGET_PACKAGES -- and built
+# clean with 301/301 suites passing. What that could not reproduce: the runner has no GPU, so the
+# suites that default to the hardware adapter exit 77 (Skipped), and the WARP ones run on Windows
+# Server 2022's older WARP rather than this machine's.
 
 name: CI
 
