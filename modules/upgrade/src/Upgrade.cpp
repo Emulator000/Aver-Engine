@@ -213,6 +213,23 @@ bool step_0_5_to_0_6(const Context& ctx, std::string* err) {
     return true;
 }
 
+// A 0.6 PROJECT NEEDS NOTHING DONE TO IT. Every project-visible change after 0.6.0 reads absence as the 0.6
+// behaviour:
+//   - `.ocproject` gained LOCALE.DEFAULT and RENDER.NEURAA; absent = the engine default, as for every key.
+//   - `.ocworld` gained COMPONENT, LEVELINST/LIOVERRIDE/ENDLEVELINST, EXTENT, landscape-layer and water-body
+//     records; a level without them loads as before.
+//   - `.ocland` gained optional LLYR/LWGT paint chunks and `.ocinst` optional ICEL/IRUN cells; absent =
+//     unpainted / unstreamed. `.ocinput` gained trigger and modifier tokens; an action without them fires as
+//     before. `.ocrig` 2 adds op kinds and INPUT lines; v1 rigs read unchanged.
+//   - `.ocanim` uses a root-motion flag bit that was always zero in 0.6 clips: off, as before.
+//   - New formats (.ocprefab, .ocpack, .ocseq, .ocstrings, .ocgas, .ocst, .oceqs, .ocso, .ocikrig,
+//     .ocretarget, .ocmotion, .ocmontage, CSV tables, .ocrender) cannot exist in a 0.6 project.
+bool step_0_6_to_0_7(const Context& ctx, std::string* err) {
+    (void)ctx;
+    (void)err;
+    return true;
+}
+
 // EVERY STEP EVER SHIPPED, OLDEST FIRST, AND NONE OF THEM EDITED AFTER THE FACT. A project made in
 // 0.1 will still be opened years from now, and it will run exactly this function.
 const std::vector<Step> kSteps = {
@@ -231,6 +248,9 @@ const std::vector<Step> kSteps = {
     {{0, 5, 0}, {0, 6, 0},
      "Nothing to repair: 0.6's format changes are optional records that read absent as the 0.5 behaviour",
      &step_0_5_to_0_6},
+    {{0, 6, 0}, {0, 7, 0},
+     "Nothing to repair: 0.7's format changes are optional records and new formats; absent reads as 0.6",
+     &step_0_6_to_0_7},
 };
 
 } // namespace
