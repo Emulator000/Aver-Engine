@@ -564,8 +564,10 @@ int32_t aver_phys_body_aabb(int32_t body, float* outMin, float* outMax) {
     if (!shape) return 0;
     const JPH::AABox box =
         shape->GetWorldSpaceBounds(bi().GetCenterOfMassTransform(*id), JPH::Vec3::sOne());
-    writeVec(outMin, fromJolt(box.mMin));
-    writeVec(outMax, fromJolt(box.mMax));
+    // Engine x is Jolt's -z, so the converted corners are not min and max on that axis: re-sort per axis.
+    const Vec3 a = fromJolt(box.mMin), b = fromJolt(box.mMax);
+    writeVec(outMin, Vec3(std::fmin(a.x, b.x), std::fmin(a.y, b.y), std::fmin(a.z, b.z)));
+    writeVec(outMax, Vec3(std::fmax(a.x, b.x), std::fmax(a.y, b.y), std::fmax(a.z, b.z)));
     return 1;
 }
 
