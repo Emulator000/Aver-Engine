@@ -152,9 +152,12 @@ BtStatus runBehaviorTreeAction(i32 subject, const fmt::OcBtNode& node, f32 dt, f
         run.started = true;
     }
     const BtBlackboardCtx ctx{&tree->decorators, board, &tree->children};
-    BusyGuard busy(run);
-    NestGuard guard;
-    const BtStatus s = tickBt(tree->tree, sys.registry(), subject, dt, run.bt, &ctx);
+    BtStatus s;
+    {   // the guards end before eraseNested frees `run`
+        BusyGuard busy(run);
+        NestGuard guard;
+        s = tickBt(tree->tree, sys.registry(), subject, dt, run.bt, &ctx);
+    }
     if (s != BtStatus::Running) sys.eraseNested(subject, &node);
     return s;
 }
@@ -190,9 +193,12 @@ BtStatus runStateTreeAction(i32 subject, const fmt::OcBtNode& node, f32 dt, f32&
         if (board) board->applySchema(tree->asset.schema);
         run.started = true;
     }
-    BusyGuard busy(run);
-    NestGuard guard;
-    const StStatus s = tickStateTree(tree->asset, sys.registry(), subject, dt, run.st, board);
+    StStatus s;
+    {   // the guards end before eraseNested frees `run`
+        BusyGuard busy(run);
+        NestGuard guard;
+        s = tickStateTree(tree->asset, sys.registry(), subject, dt, run.st, board);
+    }
     if (s == StStatus::Running) return BtStatus::Running;
     sys.eraseNested(subject, &node);
     return s == StStatus::Succeeded ? BtStatus::Success : BtStatus::Failure;
