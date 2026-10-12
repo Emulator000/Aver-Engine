@@ -216,7 +216,8 @@ int main() {
         const std::string ptPath = std::string(AVER_REPO_ROOT) + "/modules/render.pt/shaders/pt_pathtrace.hlsl";
         const std::string ptText = readFileRaw(ptPath);
         check(!ptText.empty(), "pt_pathtrace.hlsl was read (non-empty)");
-        check(ptText.find("gPtTrace.z < 0.5 && lastDiffuse") != std::string::npos,
+        // ec22b57b made the gate lobe-independent (any indirect miss reads the calibrated sky), replacing lastDiffuse.
+        check(ptText.find("gPtTrace.z < 0.5 && indirectMiss") != std::string::npos,
               "pt_pathtrace.hlsl's F6 miss gate (root cause R5) matches the contract string");
     }
 

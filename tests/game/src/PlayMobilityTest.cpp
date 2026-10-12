@@ -164,7 +164,8 @@ static void testRule() {
 
     for (int f = 0; f < 5; ++f) {
         frame(pm, w, scene::kInvalidEntity);
-        check(!ask(pm, w, solo) && !ask(pm, w, untouched) && !ask(pm, w, child),
+        // The parent too: an entity first seen after it moved has no earlier matrix to compare (the oracle's rule as well).
+        check(!ask(pm, w, solo) && !ask(pm, w, untouched) && !ask(pm, w, parent) && !ask(pm, w, child),
               "level entities are static until they move");
     }
 

@@ -438,7 +438,8 @@ int main() {
                                         "averShadowLum reduction, not a second formula");
 
         // No unconditional denoised-occlusion readback gate here (df4122cc added denoisedAoUsable guard).
-        const int totalGates = countOccurrences(t, "if (gAverHistoryWrite");
+        // The AO hit-distance write is also gated on the pixel having traced this frame: `if (tracedNow && gAverHistoryWrite)`.
+        const int totalGates = countOccurrences(t, "if (gAverHistoryWrite") + countOccurrences(t, "if (tracedNow && gAverHistoryWrite)");
         const int readbackGates = countOccurrences(t, "if (gAverHistoryWrite && dnW > 0u");
         check(totalGates == 4 && readbackGates == 0,
               "voxi_rt.hlsli has exactly 4 gAverHistoryWrite write gates (AO history/AO hit-distance/"
@@ -469,11 +470,10 @@ int main() {
         check(!precededByHistoryWriteGate(t, skyMissSentinel),
               "...and is NOT behind an `if (gAverHistoryWrite` gate");
 
-        const std::string aoHitDistWrite = "gAoHitDistOut[uint2(i.pos.xy)] = amb.hitDist;";
-        check(has(t, aoHitDistWrite), "PSRayDriven's AO hit-distance write exists");
-        check(!precededByHistoryWriteGate(t, aoHitDistWrite),
-              "...and is NOT behind an `if (gAverHistoryWrite` gate either (only gRtDenoiseParams.w, "
-              "unrelated)");
+        // The AO hit-distance write moved into voxi_rt.hlsli's shared AO path (6c60c27b), gated there (section 9);
+        // PSRayDriven sets gAverHistoryWrite = true above, so its pixels still write it.
+        check(has(rtText(), "if (tracedNow && gAverHistoryWrite) gAoHitDistOut[uint2(pixel)] = hitDist;"),
+              "the AO hit-distance write exists in voxi_rt.hlsli's shared AO path");
     }
 
     // ---- 11. cbuffer VoxiFrame: voxi.hlsl and voxi_gi.hlsli declare IDENTICAL field list ----
@@ -490,13 +490,14 @@ int main() {
 
     // ---- 12. SOURCE ASSERTION: VoxiRenderer.cpp's binding-count static_assert (consumed from L4) ----
     {
-        check(has(rendererCppText(), "kVoxiSrvCount == 23 && kVoxiUavCount == 23"),
-              "VoxiRenderer.cpp asserts the widened binding counts (23 SRV slots, 23 UAV slots) this "
+        check(has(rendererCppText(), "kVoxiSrvCount == 25 && kVoxiUavCount == 25"),
+              "VoxiRenderer.cpp asserts the widened binding counts (25 SRV slots, 25 UAV slots) this "
               "lane's t16/u10 registers depend on (u11-u15 are the staged ray-driven buffers, t17/u16 "
               "are the occlusion-aware fog design's air sky-visibility volume, u17/u18 are the "
               "sub-stage splits' own GI-trace candidate and shadow-probe tile buffers, t18/t19/u19 are "
               "the local-light list and its visibility history, t22/u20/u21 are the radiance cache's "
-              "cascade info, accumulator and cells, u22 is Path Tracing's accumulation)");
+              "cascade info, accumulator and cells, u22 is Path Tracing's accumulation, u23 the reflection "
+              "denoiser input, u24 the volumetric-fog froxel volume)");
     }
 
     if (g_failures == 0) {

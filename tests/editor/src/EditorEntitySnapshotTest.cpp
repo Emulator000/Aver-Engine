@@ -283,6 +283,7 @@ int main() {
         check(dc != nullptr && dc->bytes.size() == sizeof(CSnapDyn) && dc->strings.empty(), "a component with no String field records no text");
         const Entity d1 = aver::editor::instantiateEntity(w, ds, xf1, kInvalidEntity, /*restoreObjectId=*/true);
         const auto* cd1 = w.component<CSnapDyn>(d1, dynType);
+        cd = static_cast<CSnapDyn*>(w.component<CSnapDyn>(d0, dynType));   // the add above may have moved the pool
         check(cd1 != nullptr && cd && std::memcmp(cd1, cd, sizeof(CSnapDyn)) == 0, "the dynamic component round-trips byte-exact");
     }
 

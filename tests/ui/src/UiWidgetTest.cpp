@@ -684,7 +684,8 @@ int main() {
         e.index = 12;
         t.emit(e);
         step(t, at(0, 0));
-        const UiEvent* rb = command(drain(t), "rebind:Fire:0");
+        const std::vector<UiEvent> rbEvents = drain(t);   // named: command() points into it
+        const UiEvent* rb = command(rbEvents, "rebind:Fire:0");
         check(rb && rb->index == 12, "a captured key raises a rebind command naming the action and slot");
         screen.setBinding(1, "K");
         check(rebind.rows[1].binding == "K" && t.get(t.find("bind.1", root))->text == "K", "the host reports the new binding back");
