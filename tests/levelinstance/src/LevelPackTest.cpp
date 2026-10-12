@@ -179,6 +179,24 @@ int main() {
     check(rep5.rows == 1 && lpa.pack.keeps("1") && lpa.pack.keeps("2") && !lpa.pack.keeps("3"),
           "the parent of a kept child is kept; the packed sibling stays a row");
 
+    // A placement that carries COMPONENT records must stay an entity (a packed row has none to attach them to), and
+    // so must its children; a sibling without any still packs.
+    st.set("Levels/Comp.ocworld",
+           "OCWORLD 1\n"
+           "PLACE tower 0 0 0 0 0 0 1 id=1\n"
+           "  COMPONENT SkeletalMesh skeleton=tower.ocskel\n"
+           "BEGIN\n"
+           "  CHILD brick 0 0 5 0 0 0 1 id=2\n"
+           "END\n"
+           "PLACE crate 5 0 0 0 0 0 1 id=3\n");
+    world::PackBakeReport rep6;
+    check(world::bakeLevelPack(lib, "Levels/Comp.ocworld", "", proj.string(), opt, rep6, &why), "component bake succeeds: " + why);
+    world::LoadedLevelPack lpc;
+    check(world::loadLevelPack(proj.string(), "Levels/Comp.ocworld", lib.closureHash("Levels/Comp.ocworld"), lpc, &stale, &why),
+          "the component pack reads back");
+    check(rep6.rows == 1 && rep6.kept == 2 && lpc.pack.keeps("1") && lpc.pack.keeps("2") && !lpc.pack.keeps("3"),
+          "a placement with components and its child stay entities; the plain sibling packs");
+
     // A cycle refuses to bake.
     st.set("CycA", "OCWORLD 1\nLEVELINST CycB pos 0 0 0 id=1\nENDLEVELINST\n");
     st.set("CycB", "OCWORLD 1\nLEVELINST CycA pos 0 0 0 id=2\nENDLEVELINST\n");

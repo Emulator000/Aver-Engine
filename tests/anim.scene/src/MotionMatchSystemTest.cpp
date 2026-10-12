@@ -167,6 +167,11 @@ int main() {
     check(w.fieldId("CMotionMatcher.requireTag3") != 0 && w.fieldId("CMotionMatcher.excludeTag3") != 0 &&
           w.fieldId("CMotionMatcher.switches") != 0 && w.fieldId("CMotionMatcher.desiredVelX") != 0,
           "the last tag slots and the outputs are reachable by name");
+    {
+        const scene::FieldDesc* in = w.field(w.fieldId("CMotionMatcher.inputSource"));
+        check(in && !in->readOnly && in->kind == scene::FieldKind::I32, "inputSource is a writable I32 field");
+        check(w.fieldId("CMotionMatcher.reserved") == 0, "and the old read-only 'reserved' name is gone");
+    }
     anim::animGraphSystem().install(sys, w);
     anim::motionMatchSystem().install(sys, w);
     anim::MotionMatchSystem& mms = anim::motionMatchSystem();
@@ -445,6 +450,44 @@ int main() {
         checkNear(sys.pose(e)->local[1].position.z, hipsBefore, 1.0f, "after the blend-out the matcher's pose is back");
         sys.montages().stopAll();
         retire(e);
+    }
+
+    AVER_INFO("=== inputSource: the matcher follows how the entity moves ===");
+    {
+        mms.clear();
+        const scene::Entity follower = makeEntity("follower", kRigId, locoId);
+        const scene::Entity script = makeEntity("script", kRigId, locoId);
+        const scene::Entity zeroed = g_w->create("zeroed");   // a raw zero-filled matcher, only the database set
+        if (auto* sm = static_cast<scene::CSkeletalMesh*>(g_w->addComponent(zeroed, scene::kComponentSkeletalMesh))) sm->skeleton = kRigId;
+        auto* zc = static_cast<anim::CMotionMatcher*>(g_w->addComponent(zeroed, type));
+        if (zc) zc->database = locoId;
+        waitReady();
+        auto* fc = w.component<anim::CMotionMatcher>(follower, type);
+        auto* sc = w.component<anim::CMotionMatcher>(script, type);
+        check(fc && sc && zc && fc->inputSource == anim::kMotionInputScript && zc->inputSource == 0,
+              "a fresh and a zero-filled matcher both start on the Script input");
+        if (fc) fc->inputSource = anim::kMotionInputEntityVelocity;
+        // The follower and the script entity are both moved at 200 cm/s by something other than a script that
+        // talks to the matcher: nobody writes desiredVel here.
+        for (int i = 0; i < 90; ++i) {
+            for (const scene::Entity e : {follower, script}) {
+                Vec3 p = w.localTransform(e).position;
+                p.x += 200.0f * kDt;
+                w.setLocalPosition(e, p);
+            }
+            frame();
+        }
+        check(fc && std::fabs(fc->desiredVelX - 200.0f) <= 20.0f,
+              "Entity velocity: desiredVelX settles within 10% of the 200 cm/s the entity moves at (" +
+                  std::to_string(fc ? fc->desiredVelX : 0.0f) + ")");
+        check(fc && std::fabs(fc->desiredVelY) <= 20.0f, "and desiredVelY stays near zero");
+        check(fc && fc->clip != 0 && fc->clip != hashOf("idle.ocanim"),
+              "and the matcher picks a moving clip with no script involved");
+        check(sc && sc->desiredVelX == 0.0f && sc->desiredVelY == 0.0f && sc->desiredYaw == 0.0f,
+              "Script input never writes the desired fields back, however the entity moves");
+        check(zc && zc->desiredVelX == 0.0f && zc->inputSource == 0 && zc->clip == hashOf("idle.ocanim"),
+              "a zero-filled matcher on a standing entity still idles, exactly as before");
+        for (const scene::Entity e : {follower, script, zeroed}) retire(e);
     }
 
     sys.montages().stopAll();

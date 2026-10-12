@@ -90,6 +90,7 @@ Zero-filled storage is a valid, enabled component.
 | `playRate`, `searchInterval` | 0 reads as 1 / the database default |
 | `desiredVelX/Y` | world planar velocity (cm/s) the character wants |
 | `desiredYaw` | radians, used with `kMotionFaceYaw` |
+| `inputSource` | `kMotionInputScript` (0, the default: a script writes `desiredVel` / `desiredYaw`) or `kMotionInputEntityVelocity` (1: the matcher follows how the entity actually moves, whatever moves it; each tick it writes the measured velocity and heading into `desiredVelX/Y` and `desiredYaw`, so they read as what is used) |
 | `velHalfLife`, `turnHalfLife` | spring half-lives; 0 = database default |
 | `requireTag0..3`, `excludeTag0..3` | `fnv1a64(tag name)`; 0 = unused |
 | OUT `clip`, `clipTime`, `cost`, `switches`, `row`, `sinceSwitch` | what is playing now |

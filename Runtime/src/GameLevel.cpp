@@ -1,6 +1,7 @@
 #include "aver/game/GameLevel.hpp"
 
 #include "aver/game/GameContent.hpp"
+#include "aver/game/LevelComponents.hpp"
 #include "aver/formats/OcStream.hpp"
 #include "aver/core/Hash.hpp"
 #include "aver/core/HitchMarks.hpp"
@@ -514,6 +515,9 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         AVER_INFO("[Level] {} of those bodies are kinematic, following their placement's animation",
                   animatedBodies_.size());
 #endif
+    // COMPONENT records, before the host's hook so its tables see the finished entities. A streamed level's `inst` is empty here;
+    // LevelStreaming applies the records per batch.
+    if (!legacy) applyLevelComponents(scene::World::instance(), w, inst);
     if (hooks_.afterInstantiate)
         hooks_.afterInstantiate(LoadedLevel{path, w, inst, legacy ? &legacyMap : nullptr});
 

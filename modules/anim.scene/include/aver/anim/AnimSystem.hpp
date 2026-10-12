@@ -173,6 +173,10 @@ public:
     // previous session's placement.
     void setObjectAnimationLive(bool live);
     bool objectAnimationLive() const { return objectLive_; }
+    // OFF by default (every host and test as before). A host with an edit mode turns it on so a root-motion
+    // character's Apply moves its transform only while objectAnimationLive(): outside Play the pose plays in
+    // place and nothing accumulates, so a merely selected character neither walks off nor saves the drift.
+    void setRootMotionRequiresLive(bool on) { rootNeedsLive_ = on; }
     // PAUSED, for a host whose Play can be paused (and frame-stepped by lifting the pause for one
     // tick). While live AND paused every object clock holds, every captured base is KEPT (resuming
     // continues the same session rather than re-basing on wherever the entity was left) and nothing
@@ -329,6 +333,7 @@ private:
     u32 objectStamp_ = 0;
     bool objectLive_ = false;
     bool objectPaused_ = false;
+    bool rootNeedsLive_ = false;
 
     // Observes one animator's clock and fires whatever it passed. Split out of tick() because it
     // is the one part of that loop with nothing to do with posing, and because its own state

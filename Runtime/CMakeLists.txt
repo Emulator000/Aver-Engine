@@ -45,6 +45,8 @@ aver_add_module(Aver.Runtime.Game.Core
     src/GameInput.cpp
     src/GameStreaming.cpp
     src/LevelStreaming.cpp
+    # COMPONENT records (Skeletal Mesh, Animator, ... Smart Object) -> live components, applied by both hosts after a level loads.
+    src/LevelComponents.cpp
     # [wave3/level-instances begin] LEVELINST records at run time: realise, stream as units, overrides, packed rows.
     src/LevelInstances.cpp
     src/LevelInstancesAbiHost.cpp
@@ -133,6 +135,12 @@ if(TARGET Aver.Scene)
 endif()
 if(TARGET Aver.Anim.Scene)
   target_link_libraries(Aver.Runtime.Game.Core PUBLIC Aver.Anim.Scene)
+endif()
+# Brain and Smart Object records (LevelComponents.cpp). PRIVATE on purpose: AVER_MODULE_SYNAPSE_SCENE=1 is a PUBLIC definition of that
+# target, so a PUBLIC link would hand the macro to every Game.Core dependent and compile guarded paths in them that nobody has built there.
+# LevelComponents.hpp names no Synapse type.
+if(TARGET Aver.Synapse.Scene)
+  target_link_libraries(Aver.Runtime.Game.Core PRIVATE Aver.Synapse.Scene)
 endif()
 if(TARGET Aver.Ragdoll)
   # Ragdolls on skinned entities (brings AVER_MODULE_RAGDOLL=1). Installed beside the control rig.

@@ -412,6 +412,13 @@ struct LevelInstances::Impl {
             if (hooks.created) hooks.created(li.entities[k], body, &rc.world.placements[pi]);
         }
         in.animated = li.animatedBodies;
+        // COMPONENT records ride in the child level but are not applied to instance members (v1); say so rather than drop them silently.
+        {
+            usize withComponents = 0;
+            for (const fmt::OcWorldPlacement& p : rc.world.placements) if (!p.components.empty()) ++withComponents;
+            if (withComponents > 0)
+                AVER_WARN("[LevelInstance] '{}' has {} placement(s) with COMPONENT records: not applied to level instances", in.rec.asset, withComponents);
+        }
 
         // CLASS placements wait for scripting (spawnPendingClasses); their world pose is composed here.
         {

@@ -477,6 +477,12 @@ add_executable(LightFormatTest src/LightFormatTest.cpp)
 target_link_libraries(LightFormatTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(LightFormatTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcWorldComponentsTest -- the .ocworld COMPONENT record (docs/plans/parity_demo/ADD_COMPONENT.md section 3):
+# attachment to the right placement, awkward values, renumbering, byte-identity for a level without any. No device.
+add_executable(OcWorldComponentsTest src/OcWorldComponentsTest.cpp)
+target_link_libraries(OcWorldComponentsTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcWorldComponentsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ExrWriteTest -- the render queue's file side: the OpenEXR writer (header bytes, half/float round
 # trips, truncation) and the .ocrender job (round trip, defaults, clamping, refusals). No device.
 add_executable(ExrWriteTest src/ExrWriteTest.cpp)

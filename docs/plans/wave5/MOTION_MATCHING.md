@@ -373,11 +373,11 @@ struct CMotionMatcher {
     f32 clipTime = 0.0f, cost = 0.0f;
     u32 switches = 0, row = 0;
     f32 sinceSwitch = 0.0f;
-    u32 reserved = 0;
+    u32 inputSource = 0;    // kMotionInputScript = 0, kMotionInputEntityVelocity = 1
 };
 static_assert(sizeof(CMotionMatcher) == 136, "CMotionMatcher must be padding-free");
 ```
-Zero-filled storage is a valid, enabled component (rate 0 reads 1, face-the-velocity, database defaults). Registered fields: `database` (I64), `flags` (I32), `playRate, searchInterval, desiredVelX, desiredVelY, desiredYaw, velHalfLife, turnHalfLife` (F32), `requireTag0..3`, `excludeTag0..3` (I64), and read-only `clip` (I64), `clipTime, cost, sinceSwitch` (F32), `switches, row, reserved` (I32). Names live in static arrays like `CAnimGraph`'s (`AnimGraphSystem.cpp:26-33`). `static CMotionMatcher* attach(world, e, u64 database)` assigns a fresh value over the zero-filled bytes.
+Zero-filled storage is a valid, enabled component (rate 0 reads 1, face-the-velocity, database defaults). Registered fields: `database` (I64), `flags`, `inputSource` (I32), `playRate, searchInterval, desiredVelX, desiredVelY, desiredYaw, velHalfLife, turnHalfLife` (F32), `requireTag0..3`, `excludeTag0..3` (I64), and read-only `clip` (I64), `clipTime, cost, sinceSwitch` (F32), `switches, row` (I32). Names live in static arrays like `CAnimGraph`'s (`AnimGraphSystem.cpp:26-33`). `static CMotionMatcher* attach(world, e, u64 database)` assigns a fresh value over the zero-filled bytes.
 
 ### 6.2 `MotionMatchSystem` (`MotionMatchSystem.hpp` / `MotionMatchSystem.cpp`)
 

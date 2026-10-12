@@ -27,6 +27,9 @@ namespace aver::anim {
 
 inline constexpr u32 kMotionTagSlots = 4;
 inline constexpr u32 kMotionPaused = 0x1, kMotionForceSearch = 0x2, kMotionFaceYaw = 0x4;
+// Where the matcher takes its intent from: the desiredVel / desiredYaw fields (a script writes them), or the
+// entity's own measured velocity and heading (anything that moves it, with no script).
+inline constexpr u32 kMotionInputScript = 0, kMotionInputEntityVelocity = 1;
 
 struct CMotionMatcher {
     u64 database = 0;          // .ocmotion ObjectId; 0 = none (a state-machine motionmatch state names its own)
@@ -42,7 +45,7 @@ struct CMotionMatcher {
     f32 clipTime = 0.0f, cost = 0.0f;
     u32 switches = 0, row = 0;
     f32 sinceSwitch = 0.0f;
-    u32 reserved = 0;
+    u32 inputSource = 0;       // kMotionInputScript (0, today's behaviour) / kMotionInputEntityVelocity; the latter writes desiredVel/Yaw back each tick
 };
 static_assert(sizeof(CMotionMatcher) == 136, "CMotionMatcher must be padding-free");
 

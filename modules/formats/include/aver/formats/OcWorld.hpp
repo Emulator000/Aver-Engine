@@ -13,9 +13,20 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace aver::fmt {
+
+// One component attached to a PLACEMENT (the COMPONENT record). The format does not know what a type means:
+// the host's applier (aver/game/LevelComponents.hpp) does, so a new component needs no format change. Keys are
+// lower-case; values are stored decoded. Unknown types and keys parse and write back untouched.
+struct OcPlacedComponent {
+    std::string type;                                      // canonical case on write, case-insensitive on read
+    std::vector<std::pair<std::string, std::string>> kv;   // file order
+    const std::string* find(std::string_view key) const;   // nullptr when absent
+    bool operator==(const OcPlacedComponent&) const = default;
+};
 
 // One placed thing. Covers both record forms: PLACE (uniform scale) and PLACEG (non-uniform).
 struct OcWorldPlacement {
@@ -122,6 +133,11 @@ struct OcWorldPlacement {
     bool hasBounds = false;
     f32  boundsMin[3] = {0, 0, 0};   // world-space AABB in cm
     f32  boundsMax[3] = {0, 0, 0};
+
+    // COMPONENT records attached to this placement, in file order. Empty means an ordinary placement,
+    // byte-identical to a level written before this field existed. They travel inside the struct so
+    // placementEmitSteps' renumbering cannot detach them.
+    std::vector<OcPlacedComponent> components;
 
     bool uniform() const { return sx == sy && sy == sz; }
 };

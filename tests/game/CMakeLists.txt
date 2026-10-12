@@ -54,6 +54,17 @@ target_link_libraries(LevelLightsTest PRIVATE Aver.Runtime.Game.Core Aver.Scene 
 set_target_properties(LevelLightsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # [wave3/level-instances end]
 
+# LevelComponentsTest -- game::applyPlacedComponent / capturePlacedComponent / applyLevelComponents (aver/game/LevelComponents.hpp):
+# the COMPONENT record -> live Skeletal Mesh, Animator, Root Motion, Motion Matching, Control Rig, IK Rig, Brain, Smart Object and Soft
+# Body components and back. A real scene::World; no device. The AI cases compile only where Aver.Synapse.Scene exists (it brings
+# AVER_MODULE_SYNAPSE_SCENE); Game.Core links it PRIVATE, so the test links it itself.
+add_executable(LevelComponentsTest src/LevelComponentsTest.cpp)
+target_link_libraries(LevelComponentsTest PRIVATE Aver.Runtime.Game.Core Aver.Anim.Scene Aver.Scene Aver.Formats Aver.Core)
+if(TARGET Aver.Synapse.Scene)
+  target_link_libraries(LevelComponentsTest PRIVATE Aver.Synapse.Scene)
+endif()
+set_target_properties(LevelComponentsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GameLandscapeLayersTest -- GameLandscape's paint layers headless (wave 3, landscape layers): the by-name layer remap,
 # ground samples, weight strokes with exact undo / redo, save and reload, carve, and the derived section / ring materials.
 # A temp .ocland; no device, no window, no physics.

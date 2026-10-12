@@ -167,11 +167,37 @@ std::vector<EmitStep> placementEmitSteps(const std::vector<OcWorldPlacement>& pl
     return steps;
 }
 
+// COMPONENT type names the editor and the applier know (ADD_COMPONENT.md 3.4). The format only uses the list to
+// fix the case of a hand-typed `SKELETALMESH`; any other type is kept exactly as written.
+constexpr std::string_view kKnownComponentTypes[] = {
+    "SkeletalMesh", "Animator", "RootMotion", "MotionMatcher", "ControlRig", "IkRig", "Brain", "SmartObject", "SoftBody"};
+
+std::string canonicalComponentType(std::string_view t) {
+    for (const std::string_view k : kKnownComponentTypes)
+        if (equalsCI(t, k)) return std::string(k);
+    return std::string(t);
+}
+
+// A key is percent-encoded like a value: the '#' of a `skeleton#` key (the "id, no path" spelling) would otherwise
+// start a comment and cut the line, and a literal '=' would move the key/value split. Ordinary keys stay readable.
+std::string encodeComponentKey(std::string_view k) {
+    std::string e = percentEncode(k);
+    for (usize i = 0; i < e.size(); ++i)
+        if (e[i] == '=') { e.replace(i, 1, "%3D"); i += 2; }
+    return e;
+}
+
 } // namespace
 
 const OcPostValue* OcPostVolume::find(std::string_view key) const {
     for (const OcPostValue& v : values)
         if (equalsCI(v.key, key)) return &v;
+    return nullptr;
+}
+
+const std::string* OcPlacedComponent::find(std::string_view key) const {
+    for (const auto& e : kv)
+        if (equalsCI(e.first, key)) return &e.second;
     return nullptr;
 }
 
@@ -710,6 +736,23 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             out.foliageFiles.push_back(std::string(t[1]));
         } else if (parseSeqRecord(key, t, out.sequences, seqState)) {
             // SEQUENCE / SEQTRACK / SEQKEY / ENDSEQUENCE: consumed (OcSeq.cpp)
+        } else if (equalsCI(key, "COMPONENT") && t.size() >= 2) {
+            // Attaches to the most recent placement and, unlike BEGIN, leaves it the current one. With no placement
+            // yet it is skipped like any unknown record. A token without '=' reads as key=1; keys are lower-cased,
+            // and keys and values are percent-decoded (the writer encoded them).
+            if (lastPlacement >= 0) {
+                OcPlacedComponent c;
+                c.type = canonicalComponentType(t[1]);
+                for (usize i = 2; i < t.size(); ++i) {
+                    const usize eq = t[i].find('=');
+                    std::string k = percentDecode(eq == std::string_view::npos ? t[i] : t[i].substr(0, eq));
+                    if (k.empty()) continue;
+                    for (char& ch : k) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                    c.kv.emplace_back(std::move(k), eq == std::string_view::npos ? std::string("1")
+                                                                                 : percentDecode(t[i].substr(eq + 1)));
+                }
+                out.placements[static_cast<usize>(lastPlacement)].components.push_back(std::move(c));
+            }
         } else if (equalsCI(key, "BEGIN")) {
             // OPENS A SCOPE ON THE MOST RECENT PLACEMENT. See the grammar note above parseOcworld.
             if (lastPlacement < 0) {
@@ -1269,7 +1312,7 @@ std::string writeOcworld(const OcWorldData& w) {
     // [wave3/level-instances end]
 
     s += "\n";
-    const auto line = [&](const OcWorldPlacement& p, const char* keyword, const char* keywordG) {
+    const auto line = [&](const OcWorldPlacement& p, const char* keyword, const char* keywordG, usize depth) {
         if (p.uniform()) {
             s += keyword; s += " " + p.asset + " " +
                  num(p.x) + " " + num(p.y) + " " + num(p.z) + " " +
@@ -1311,6 +1354,14 @@ std::string writeOcworld(const OcWorldData& w) {
         }
         // Bounds are generated data: they live in the level's .ocstream, never here.
         s += "\n";
+        // COMPONENT lines sit right after the placement line, before its BEGIN, one level deeper. Omitted when
+        // there are none, so a level without components writes what it always did.
+        for (const OcPlacedComponent& c : p.components) {
+            s.append((depth + 1) * 2, ' ');
+            s += "COMPONENT "; s += canonicalComponentType(c.type);
+            for (const auto& [k, v] : c.kv) { s += " "; s += encodeComponentKey(k); s += "="; s += percentEncode(v); }
+            s += "\n";
+        }
     };
 
     for (const EmitStep& st : steps) {
@@ -1320,8 +1371,8 @@ std::string writeOcworld(const OcWorldData& w) {
         s.append(st.depth * 2, ' ');
         if (st.kind == EmitStep::Kind::Place) {
             const OcWorldPlacement& p = w.placements[static_cast<usize>(st.index)];
-            if (st.depth == 0) line(p, "PLACE", "PLACEG");
-            else               line(p, "CHILD", "CHILDG");
+            if (st.depth == 0) line(p, "PLACE", "PLACEG", st.depth);
+            else               line(p, "CHILD", "CHILDG", st.depth);
         } else {
             s += st.kind == EmitStep::Kind::Begin ? "BEGIN\n" : "END\n";
         }

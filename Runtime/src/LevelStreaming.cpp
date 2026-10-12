@@ -3,6 +3,7 @@
 
 #if AVER_MODULE_SCENE
 #  include "aver/game/GameContent.hpp"
+#  include "aver/game/LevelComponents.hpp"
 #  include "aver/core/Hash.hpp"
 #  include "aver/core/Log.hpp"
 #  include "aver/scene/scene_abi.h"
@@ -247,6 +248,12 @@ void LevelStreaming::loadItems(scene::World& world, const std::vector<u32>& item
     }
     if (!inst.animatedBodies.empty()) rebuildAnimated();
     hm.mark("bookkeeping");
+    // COMPONENT records of the batch, before the host sees it. Warnings only: an INFO line per streamed item would be noise here.
+    for (usize k = 0; k < loaded.size(); ++k) {
+        const fmt::OcWorldPlacement& rec = records_[loadedPlacement[k]];
+        if (!rec.components.empty()) applyPlacedComponents(scene::World::instance(), loaded[k], rec, loadedPlacement[k]);
+    }
+    hm.mark("components");
     if (hooks_.afterLoad && !loaded.empty()) hooks_.afterLoad(loaded, loadedPlacement, loadedBody);
     hm.mark("hook");
 }

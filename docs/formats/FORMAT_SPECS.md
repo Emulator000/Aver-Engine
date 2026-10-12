@@ -926,6 +926,62 @@ PLACE  Meshes/Cars/sedan.ocmesh  1200 400 0  0 0 0  1  M_Paint  nocollide vehicl
 PLACE  Meshes/Cars/bus.ocmesh    5000 400 0  90 0 0  1  nocollide vehicle bus
 ```
 
+**`COMPONENT`** (`OcWorldPlacement::components`, `OcPlacedComponent` in `OcWorld.hpp`; `modules/formats/src/OcWorld.cpp`) attaches
+a component to the **placement** above it, so a level can say that a mesh is a skinned character, drives a motion matcher,
+runs a behaviour tree and so on, without a graph class. The format carries the record and never interprets it; the host's
+applier (`Runtime/include/aver/game/LevelComponents.hpp`, run by `GameLevel::load` and placement streaming) does, so a new component type
+needs no format change.
+
+```
+COMPONENT <Type> [key=value]...
+```
+
+- **Position.** Any line after a `PLACE`/`PLACEG`/`CHILD`/`CHILDG` and before the next one. It attaches to the most recent
+  placement, exactly as `BEGIN` does, and does not change which placement that is (a `COMPONENT` after an `END` belongs to
+  the last placement parsed). The writer puts it directly after the placement line, **before** that placement's `BEGIN`, indented
+  one level deeper than the placement. With no placement before it, or with no type token, the line is skipped like any unknown record.
+- **Values** are percent-encoded like `name` (whitespace, `%`, quotes, control bytes, `#` and `;` escaped), because the
+  tokenizer has no quoting and `#` and `;` are stripped before it runs. A token splits at its **first** `=`, so a value may
+  contain more; a token with no `=` reads as `key=1`; `key=` is an empty value. Keys are lower-cased on read and percent-decoded
+  too, so a key containing `#` (see the asset keys below) is written `skeleton%23`.
+- **Lists** (`axes=x,y,yaw`, `sources=graph,montage`) are comma-joined lower-case words in the canonical order of the table; the
+  reader accepts any order. **Numbers** are `%.6g` text and are opaque to the format.
+- **Asset keys** (`skeleton`, `clip`, `database`, `rig`, `asset`) hold a content-relative forward-slash path with its
+  extension, the spelling `PLACE`'s asset column and `anim` use; the applier hashes it with `fnv1a64`. When the editor cannot turn an
+  id back into a path (the asset left Content) it writes the key with a trailing `#` and 16 hex digits instead
+  (`skeleton%23=00ff00ff00ff00ff`, key `skeleton#` in memory); the applier accepts either. `Brain` and `SmartObject` have no hex form.
+- **Unknown** types and keys parse and write back untouched (the type keeps the spelling it had; the nine below are written in
+  canonical case whatever case was read). An older reader skips every `COMPONENT` line and loses only the components.
+- **Packing.** A placement that has components stays an entity in a baked level pack (`.ocpack`/`.ocinst`), and so do its
+  children. `world::instantiate` ignores the records; **level instances** (`LEVELINST`) do not apply them either (a warning is logged),
+  and neither does a `class` placement, which has no entity to attach to.
+
+| Type | Keys (default when omitted) | Component |
+|---|---|---|
+| `SkeletalMesh` | `skeleton` (`.ocskel`) | `CSkeletalMesh` |
+| `Animator` | `clip` (`.ocanim`), `speed` (1), `weight` (1), `once` (0), `paused` (0) | `CAnimator`; `time` is not saved |
+| `RootMotion` | `mode` (`apply`; `ignore`, `accumulate`), `axes` (`x,y,yaw`; any of `x,y,z,yaw`), `sources` (`graph,montage`), `scale` (1), `external` (0) | `CRootMotion` |
+| `MotionMatcher` | `database` (`.ocmotion`), `input` (`script`; `velocity`), `facing` (`velocity`; `yaw`), `playrate` (1), `interval` (0), `velhalflife` (0), `turnhalflife` (0), `paused` (0) | `CMotionMatcher`; `input=velocity` is `inputSource` 1 (the entity's measured velocity drives the matcher) |
+| `ControlRig` | `rig` (`.ocrig`), `weight` (1) | `CControlRig` |
+| `IkRig` | `asset` (`.ocikrig`), `weight` (1), `feet` (1), `goals` (1), `body` (1) | `CIkRig` |
+| `Brain` | `asset` (`.ocbt` or `.ocst`), `team` ("") | `CSynapseBehavior` |
+| `SmartObject` | `asset` (`.ocso`), `enabled` (1) | `CSmartObject` |
+| `SoftBody` | `maxdist` (0), `compliance` (0), `simulated` (1) | `CSoftBody` |
+
+**Canonical writing** (what the editor's save produces and the golden strings of `OcWorldComponentsTest` pin): the asset key
+(omitted only when the id is 0), `RootMotion.mode` and `MotionMatcher.input` are always written; every other key only when it differs from the
+default in the parentheses. Key order is the order of the table, and the components of one placement are written in the order of the
+table's rows. Defaults on read: the parenthesised ones, plus `mode=apply`, `input=script`, `facing=velocity`, `axes=x,y,yaw`,
+`sources=graph,montage` (so a hand-written `MotionMatcher` without `input` keeps script-driven behaviour, while the editor's Add Component creates `input=velocity`).
+
+```
+PLACE Meshes/KenneyChar.ocmesh 0 0 0 0 0 0 1 nocollide name KenneyChar
+  COMPONENT SkeletalMesh skeleton=Meshes/KenneyChar.ocskel
+  COMPONENT Animator clip=Meshes/KenneyChar_idle.ocanim
+  COMPONENT RootMotion mode=apply axes=x,y
+  COMPONENT MotionMatcher database=Motion/Locomotion.ocmotion input=velocity
+```
+
 **`WATER`/`WAVE`** (`modules/formats/{include,src}/aver/formats/OcWorld.{hpp,cpp}`: `equalsCI(key,
 "WATER"/"WAVE")` in the same trailing-token loop `class` above is parsed by) author a level's own body
 of water instead of the host's `--water <heightCm>` CLI flag. `WATER name <n> level <cm> [infinite |

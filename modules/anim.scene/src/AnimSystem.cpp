@@ -501,7 +501,9 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
                 acc.yaw = rm->accumYaw;
                 composeDelta(acc, rootD);
                 rm->accumSeconds += dt;
-                if (rm->mode == kRootMotionApply && !(rm->flags & kRootMotionExternal)) {
+                const bool applyNow = rm->mode == kRootMotionApply && !(rm->flags & kRootMotionExternal);
+                const bool mayWrite = !rootNeedsLive_ || objectLive_;
+                if (applyNow && mayWrite) {
                     // E o delta, the object-animation rule. Through World, not a raw write: see writeObject.
                     Transform xf = world.localTransform(e);
                     xf.position = xf.position + xf.rotation.rotate(acc.move);
@@ -509,8 +511,8 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
                     world.setLocalTransform(e, xf);
                     acc = RootDelta{};
                     rm->accumSeconds = 0.0f;
-                } else if (rm->mode == kRootMotionApply && rm->accumSeconds > 0.5f) {
-                    // External, but nobody has consumed it for half a second: drop it.
+                } else if (applyNow || (rm->mode == kRootMotionApply && rm->accumSeconds > 0.5f)) {
+                    // Gated off (not live), or external and unconsumed for half a second: drop it.
                     acc = RootDelta{};
                     rm->accumSeconds = 0.0f;
                 }

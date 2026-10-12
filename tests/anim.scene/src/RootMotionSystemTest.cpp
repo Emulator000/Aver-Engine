@@ -287,6 +287,47 @@ int main() {
         retire(sys, e);
     }
 
+    AVER_INFO("=== Apply only while Play is live (an editor opts in) ===");
+    {
+        // Default off: Apply moves the entity whether or not a Play session is live, as every case above relies on.
+        const scene::Entity d = makeEntity("default", walkId, anim::kRootMotionApply);
+        check(!sys.objectAnimationLive(), "no Play session is live");
+        sys.tick(w, 0.25f);
+        sys.tick(w, 0.25f);
+        checkNear(w.localTransform(d).position.x, 25.0f, 1e-3f, "default: Apply moves the entity with no session live");
+        retire(sys, d);
+
+        sys.setRootMotionRequiresLive(true);
+        const scene::Entity e = makeEntity("gated", walkId, anim::kRootMotionApply);
+        const scene::Entity acc = makeEntity("gatedAccum", walkId, anim::kRootMotionAccumulate);
+        for (int i = 0; i < 2; ++i) sys.tick(w, 0.25f);
+        check(w.localTransform(e).position.x == 0.0f, "gated and not live: the entity stays at its placement");
+        check(rm(e)->accumX == 0.0f && rm(e)->accumSeconds == 0.0f, "and nothing accumulates");
+        const auto* an = w.component<scene::CAnimator>(e, scene::kComponentAnimator);
+        check(sys.pose(e) != nullptr && an && an->time > 0.0f, "while the pose and the clock still advance");
+        checkNear(rm(acc)->accumX, 25.0f, 1e-3f, "Accumulate is not gated");
+        check(w.localTransform(acc).position.x == 0.0f, "and does not move the entity either");
+        retire(sys, acc);
+        retire(sys, e);
+
+        sys.setObjectAnimationLive(true);
+        const scene::Entity live = makeEntity("live", walkId, anim::kRootMotionApply);
+        sys.tick(w, 0.25f);
+        sys.tick(w, 0.25f);
+        checkNear(w.localTransform(live).position.x, 25.0f, 1e-3f, "gated and live: Apply moves the entity exactly as before");
+        check(rm(live)->accumX == 0.0f && rm(live)->accumSeconds == 0.0f, "and spends the accumulator");
+        retire(sys, live);
+
+        // Leaving Play puts the gate back in force for what is placed next.
+        sys.setObjectAnimationLive(false);
+        const scene::Entity after = makeEntity("afterPlay", walkId, anim::kRootMotionApply);
+        sys.tick(w, 0.25f);
+        sys.tick(w, 0.25f);
+        check(w.localTransform(after).position.x == 0.0f, "once the session ends the entity is held again");
+        retire(sys, after);
+        sys.setRootMotionRequiresLive(false);
+    }
+
     AVER_INFO("=== a scrub is not motion ===");
     {
         const scene::Entity e = makeEntity("scrub", walkId, anim::kRootMotionAccumulate);

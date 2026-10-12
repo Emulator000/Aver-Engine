@@ -75,7 +75,7 @@ u32 MotionMatchSystem::registerComponents(scene::World& world) {
         .field("switches", scene::FieldKind::I32, static_cast<u16>(offsetof(CMotionMatcher, switches)), 0, true)
         .field("row", scene::FieldKind::I32, static_cast<u16>(offsetof(CMotionMatcher, row)), 0, true)
         .field("sinceSwitch", scene::FieldKind::F32, static_cast<u16>(offsetof(CMotionMatcher, sinceSwitch)), 0, true)
-        .field("reserved", scene::FieldKind::I32, static_cast<u16>(offsetof(CMotionMatcher, reserved)), 0, true);
+        .field("inputSource", scene::FieldKind::I32, static_cast<u16>(offsetof(CMotionMatcher, inputSource)));
     AVER_ASSERTM(b.verify(sizeof(CMotionMatcher)), "CMotionMatcher");
     g_type = b.typeId();
     return g_type;
@@ -331,8 +331,13 @@ void MotionMatchSystem::tick(scene::World& world, f32 dt) {
 
             SpringParams sp{c->velHalfLife > 0.0f ? c->velHalfLife : defs->spring.velocityHalfLife,
                             c->turnHalfLife > 0.0f ? c->turnHalfLife : defs->spring.turnHalfLife};
-            rt.traj.setIntent(c->desiredVelX, c->desiredVelY, (c->flags & kMotionFaceYaw) != 0, c->desiredYaw,
-                              defs->spring.faceSpeedMin);
+            f32 vx = c->desiredVelX, vy = c->desiredVelY, yaw = c->desiredYaw;
+            if (c->inputSource == kMotionInputEntityVelocity) {
+                const Vec3 v = rt.traj.velocity();   // measured and already smoothed
+                vx = v.x; vy = v.y; yaw = rt.traj.yaw();
+                c->desiredVelX = vx; c->desiredVelY = vy; c->desiredYaw = yaw;   // the inspector and scripts read what is used
+            }
+            rt.traj.setIntent(vx, vy, (c->flags & kMotionFaceYaw) != 0, yaw, defs->spring.faceSpeedMin);
             rt.traj.fill(sp, ref->futureTimes(), ref->pastTimes(), rt.q);
             rt.q.require = ref->tagMaskOf(c->requireTag, kMotionTagSlots);
             rt.q.exclude = ref->tagMaskOf(c->excludeTag, kMotionTagSlots);

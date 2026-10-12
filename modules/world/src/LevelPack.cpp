@@ -45,7 +45,7 @@ struct Baker {
         if (depth > LevelAssetLibrary::kMaxDepth) { error = "level instances nest deeper than 8"; return false; }
         const std::vector<fmt::OcWorldPlacement>& ps = rc.world.placements;
         std::vector<Mat4> m(ps.size());
-        std::vector<char> blocked(ps.size(), 0);   // a class / animated / vehicle placement or something under one
+        std::vector<char> blocked(ps.size(), 0);   // a class / animated / vehicle / component placement or something under one
         std::vector<char> pack(ps.size(), 0);
         u32 tentative = 0;
         for (usize i = 0; i < ps.size(); ++i) {
@@ -53,7 +53,7 @@ struct Baker {
             const Mat4 local = levelPlacementTransform(p).toMatrix();
             const bool hasParent = p.parent >= 0 && static_cast<usize>(p.parent) < i;
             m[i] = hasParent ? local * m[static_cast<usize>(p.parent)] : local * base;
-            const bool own = !p.className.empty() || !p.vehiclePreset.empty() || !p.animClip.empty();
+            const bool own = !p.className.empty() || !p.vehiclePreset.empty() || !p.animClip.empty() || !p.components.empty();
             blocked[i] = own || (hasParent && blocked[static_cast<usize>(p.parent)]);
             if (blocked[i] || !p.visible || p.snapToGround || p.asset.empty() || !meshPackable(p.asset, p.material)) continue;
             if (rep.rows + tentative >= opt.maxRows) { rep.capped = true; continue; }

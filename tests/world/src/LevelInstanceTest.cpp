@@ -180,6 +180,33 @@ static void testAttachAndBodies() {
 }
 // [wave3/level-instances end]
 
+// COMPONENT records ride on the placement but are the host applier's business (aver/game/LevelComponents.hpp):
+// Aver.World must not know Framework, Anim or Synapse, so instantiate() builds the entity exactly as it would
+// without them.
+static void testIgnoresComponents() {
+    scene::World& world = scene::World::instance();
+    fmt::OcWorldData w;
+    std::string why;
+    check(fmt::parseOcworld("OCWORLD 1\n"
+                            "PLACE Meshes/cube.ocmesh 10 0 0 0 0 0 1\n"
+                            "  COMPONENT SkeletalMesh skeleton=Meshes/cube.ocskel\n"
+                            "  COMPONENT Animator clip=Meshes/cube.ocanim\n"
+                            "  COMPONENT Unknown whatever=1\n"
+                            "PLACE Meshes/cube.ocmesh 0 0 40 0 0 0 1\n", w, &why),
+          "the component world parses: " + why);
+    check(w.placements.size() == 2 && w.placements[0].components.size() == 3, "the first placement carries three records");
+    const world::LevelInstance li = world::instantiate(w, world::InstantiateOptions{});
+    check(li.entities.size() == 2 && li.placementIndex.size() == 2, "both placements become entities");
+    if (li.entities.size() == 2) {
+        const scene::Entity e = li.entities[0];
+        check(world.hasComponent(e, scene::kComponentMeshRenderer), "the entity has its mesh renderer");
+        check(!world.hasComponent(e, scene::kComponentSkeletalMesh), "and no skeletal mesh from a SkeletalMesh record");
+        check(!world.hasComponent(e, scene::kComponentAnimator), "and no animator from an Animator record");
+        checkNear(world.localTransform(e).position.x, 10.0f, 0.0f, "its transform is the authored one");
+        check(!world.hasComponent(li.entities[1], scene::kComponentSkeletalMesh), "the plain placement is untouched");
+    }
+}
+
 int main() {
     fmt::OcWorldData w;
     std::string why;
@@ -515,6 +542,7 @@ int main() {
     }
 
     testAttachAndBodies();   // [wave3/level-instances]
+    testIgnoresComponents();
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
