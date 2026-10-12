@@ -473,9 +473,8 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/repo)
   # The C ABI's integer constants against the C# enums that restate them. Unconditional and
   # Aver.Core-only for the same reason tests/repo is: it reads the headers and the .cs files as
-  # SOURCE rather than exercising either side, so it needs no device and no .NET SDK. It lives here
-  # rather than as a managed test because a native *Test.exe is the only thing this repo actually
-  # runs -- Aver.Graph.Tests is wired into nothing and must be invoked by hand.
+  # SOURCE rather than exercising either side, so it needs no device and no .NET SDK, and runs on a
+  # machine without one.
   add_subdirectory(tests/abi)
   # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
   # the test itself skips when averdesign is not staged.
@@ -538,6 +537,7 @@ if(AVER_BUILD_TESTS)
     add_subdirectory(tests/framework_sequence)   # wave5 #27: the sequencer ABI relay
     add_subdirectory(tests/framework_content)
     add_subdirectory(tests/gas)
+    add_subdirectory(tests/managed)   # Aver.Graph.Tests and Aver.DataLoc.Tests, wired into nothing before
   endif()
   if(AVER_MODULE_PARTICLES)
     # The CPU simulation only -- spawn rate, lifetime, gravity/damping integration. Guarded by the
@@ -623,6 +623,8 @@ function(aver_register_ctest_in dir)
           # shipped editor resolves shaders and splash.png.
           WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
           FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ==="
+          # Its own user data dir (editor.ini, weights, caches): never the developer's, never another suite's.
+          ENVIRONMENT "AVER_USER_DATA_DIR=${CMAKE_BINARY_DIR}/Testing/userdata/${_t}"
           # ON EVERY ROW, NOT ONLY THE .vulkan ONES, AND THAT IS NOT BELT-AND-BRACES. The suites
           # that learned to exit 77 reach their skip paths from the PLAIN row too -- a machine with
           # no D3D12 runtime, or a backend with no createLineMesh, skips exactly the same way. Set
@@ -645,6 +647,7 @@ function(aver_register_ctest_in dir)
             TIMEOUT 600
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
             FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ==="
+            ENVIRONMENT "AVER_USER_DATA_DIR=${CMAKE_BINARY_DIR}/Testing/userdata/${_t}.vulkan"
             # SKIPPED IS ITS OWN STATE, and it has to be, or this row is decorative. Both listed
             # suites exit 77 when the backend they were asked for is not on the machine. Without
             # this property that exit code reads as a FAILURE; with the `return 0` these suites

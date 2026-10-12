@@ -12,7 +12,8 @@ if(AVER_DOTNET)
   set_tests_properties(GasManagedTests PROPERTIES
     TIMEOUT 600
     ENVIRONMENT "DOTNET_CLI_TELEMETRY_OPTOUT=1;DOTNET_NOLOGO=1"
-    FAIL_REGULAR_EXPRESSION "FAIL: ")
+    FAIL_REGULAR_EXPRESSION "FAIL: "
+    RESOURCE_LOCK aver_managed_build)   # shares Aver.Framework's obj/ with tests/managed
 else()
   message(STATUS "GasManagedTests skipped: no dotnet on PATH")
 endif()

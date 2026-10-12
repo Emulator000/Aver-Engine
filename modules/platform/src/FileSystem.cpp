@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -122,8 +123,14 @@ std::string executableDir() {
 #endif
 }
 
-// The per-user, per-machine state directory.
+// The per-user, per-machine state directory. AVER_USER_DATA_DIR overrides it (created if missing): ctest gives every
+// suite its own, so tests never touch the developer's editor.ini, weights or caches, nor race each other on them.
 std::string userDataDir() {
+    if (const char* env = std::getenv("AVER_USER_DATA_DIR"); env && *env) {
+        std::error_code ec;
+        std::filesystem::create_directories(env, ec);
+        return env;
+    }
 #if defined(_WIN32)
     const std::string local = knownFolder(FOLDERID_LocalAppData);
     if (!local.empty()) return local + "\\AverEngine";

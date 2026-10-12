@@ -11,6 +11,7 @@ std::string executableDir();
 
 // Per-user, per-machine state that is neither project nor engine content.
 // `%LOCALAPPDATA%\AverEngine` on Windows; the executable directory if the OS will not name it.
+// AVER_USER_DATA_DIR, when set, replaces it (tests use this).
 std::string userDataDir();
 
 // The user's Documents folder, as the OS reports it (it is routinely redirected).
