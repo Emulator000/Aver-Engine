@@ -1444,14 +1444,10 @@ float4 averBlendedOutput(AverSurface s, float3 diffuse, float3 specular) {
 // draw off the gate baselines); at T=0 it goes fully opaque, a column deep enough to swallow
 // everything behind it.
 //
-// ONE LIMITATION, same as the old fluid shader's: a single SCALAR hardware alpha can only attenuate
-// the background by the AVERAGE transmittance, so attenuationColor controls HOW FAST a volume goes
-// opaque with depth -- the dominant cue, and one the old fluid shader could not have at all -- but
-// its HUE does not yet tint what is behind it. A volume's own colour still comes from its authored
-// base colour (as gFluidBody did). Per-channel removal needs the background: either a scene-colour
-// SRV (IRenderContext::copyTexture, proven, one caller today), or a per-channel destination blend
-// factor -- INV_SRC_COLOR multiplies dst by (1 - src.rgb) per channel, nearly free but changes the
-// blend state for every blended draw. Both are real follow-ups, neither a change to make in passing.
+// ONE LIMITATION: a single SCALAR hardware alpha can only attenuate the background by the AVERAGE
+// transmittance, so attenuationColor here controls HOW FAST a volume goes opaque with depth, not the
+// HUE of what is behind it. This is the fallback: when the blend backdrop (gBlendBackdrop, t10) is
+// valid, voxi.hlsl's averBlendedOutputBackdrop tints the background per channel instead.
 float4 averBlendedOutputVolume(AverSurface s, float3 diffuse, float3 specular, float3 T) {
     const float Tavg  = dot(T, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
     const float alpha = saturate(1.0 - (1.0 - s.alpha) * Tavg);

@@ -115,7 +115,6 @@ public:
     bool removeSection(i32 index);
     bool renameSection(i32 index, const std::string& name);
     bool setNext(i32 index, const std::string& next);
-    i32 moveSection(i32 index, f32 start);
     i32 addNotify(f32 time, const std::string& name, f32 duration);
     bool removeNotify(i32 index);
     i32 moveNotify(i32 index, f32 time);

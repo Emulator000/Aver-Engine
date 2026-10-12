@@ -903,9 +903,9 @@ bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
                      const std::vector<std::string>& stems,
                      const SceneCamera* camera = nullptr, const SceneSun* sun = nullptr,
                      // Kept USD PointInstancer instances written as FOLIAGE (the default) rather than
-                     // as PLACE/PLACEG entities -- null or empty when there are none, or when
-                     // --instances-as entities asked for the old behaviour instead (they are folded
-                     // into `placements` in that case, and this stays null).
+                     // as PLACE/PLACEG entities, and sheared or mirrored (exact) placements in any
+                     // mode. Null or empty when there are none; under --instances-as entities the
+                     // other instances are folded into `placements` instead.
                      const std::vector<ScenePlacement>* foliageInstances = nullptr,
                      // Content-relative folder the .ocinst goes in ("Instances" by default).
                      const std::string& instancesDir = "Instances") {

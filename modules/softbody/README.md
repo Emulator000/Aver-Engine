@@ -2,7 +2,7 @@
 
 - **Language:** C++
 - **Depends on:** Core (only)
-- **Status:** implemented, not yet wired into the root build (see docs/SOFTBODY.md "Wiring")
+- **Status:** implemented, wired into the root build (optional editor and C# steps: docs/SOFTBODY.md "Wiring")
 
 The plastic half of soft bodies: a UE-free cage solver — Verlet, then damage/plasticity, then Gauss-Seidel
 PBD — with a material yield curve (elastic to yield, then permanent set), break and tear that duplicates

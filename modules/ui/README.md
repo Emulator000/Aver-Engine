@@ -9,7 +9,7 @@ calls (`Aver.Render.UI`), and the whole thing is testable with no GPU and no win
 | `UiTypes`, `UiWidget` | Geometry, colours and the authored properties of a widget (`UiWidgetProps`). |
 | `UiProps` | The property table: name, type, get/set as text. Feeds the file, the C ABI and the editor inspector. |
 | `UiLayout` | Layout maths: DPI scale, anchors, one-axis stack solving, alignment, scroll clamping. |
-| `UiTree` (`UiTreeLayout/Input/Draw.cpp`) | The tree: layout, pointer/keyboard/gamepad input, focus, events, drawing through a `UiPainter`. |
+| `UiTree` (`UiTree.cpp`, `UiTreeLayout.cpp`, `UiTreeInput.cpp`, `UiTreeDraw.cpp`) | The tree: layout, pointer/keyboard/gamepad input, focus, events, drawing through a `UiPainter`. |
 | `UiStyle` | Themes (`dark`, `light`, `contrast`) and named styles. |
 | `UiFocus` | Tab order and directional navigation as pure functions. |
 | `UiText` | Text metrics, word wrap, and the painter interface (a draw-list painter is included). |

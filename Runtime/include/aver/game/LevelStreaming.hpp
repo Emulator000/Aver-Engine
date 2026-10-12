@@ -70,7 +70,6 @@ public:
     scene::Entity entityOf(u32 placement) const;
     // Keeps the root item holding this placement loaded (selection, gizmo, undo).
     void pin(u32 placement, bool on);
-    void unpinAll();
 
     // Kinematic bodies of resident animated placements, for world::driveKinematicBodies.
     const std::vector<world::AnimatedBody>& animatedBodies() const { return animated_; }

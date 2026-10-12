@@ -125,7 +125,6 @@ public:
     // ---- run mode: the command-line capture driver (--sequence-play) and the render queue ----
     // True when the CURRENT sequence has a camera (a free camera track with keys, or an actor camera).
     bool hasCamera() const;
-    bool hasCameraKeys() const { return hasCamera(); }
     // True when any sequence of the level does.
     bool anyCamera() const;
     // Makes the sequence called `name` the current one; an empty name picks the first with a camera.
@@ -160,9 +159,6 @@ public:
     // while a bound actor has no unique name). Paths are full paths.
     bool importOcseq(const std::string& fullPath, const std::function<scene::Entity(const std::string&)>& findByName = {});
     bool exportOcseq(const std::string& fullPath);
-    // The .ocseq file the current sequence is linked to (opened or last exported) and whether it has unsaved edits.
-    const std::string& linkedFile() const { return linkedFile_; }
-    bool linkedDirty() const { return linkedDirty_ && !linkedFile_.empty(); }
     const std::string& status() const { return status_; }
 
     // ---- UI ----
@@ -191,7 +187,6 @@ private:
     void undoEdit();
     void redoEdit();
     void releaseUndrivenBases();
-    void evaluateAll();                              // both phases now (a scrub, a render queue pose)
     std::vector<fmt::OcSequence> takeAll();
     void adopt(std::vector<fmt::OcSequence>&& all, usize slot);
 
@@ -227,7 +222,6 @@ private:
     void clampSelection();
     int  selectedCount() const;
     void stepFrames(int frames);
-    int  indexOfName(const std::string& name) const;
     void setAudition(bool on);
     bool animationTracks() const;
     void drawKeyDetails(SequenceHost& host);

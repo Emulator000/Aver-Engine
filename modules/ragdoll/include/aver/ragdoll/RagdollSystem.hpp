@@ -63,8 +63,6 @@ public:
 
     BuildOptions& buildOptions() { return opt_; }
     void setUserLayer(u32 layer) { userLayer_ = layer; }
-    // Forgets cached definitions (content changed on disk); live ragdolls keep theirs.
-    void clearCache();
     // Destroys every ragdoll.
     void clear();
 

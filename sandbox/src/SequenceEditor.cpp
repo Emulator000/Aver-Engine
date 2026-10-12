@@ -249,13 +249,6 @@ void SequenceEditor::tickPost() {
     }
 }
 
-void SequenceEditor::evaluateAll() {
-    scene::World& w = scene::World::instance();
-    player_.evaluate(w, game::SeqPhase::Pre);
-    player_.evaluate(w, game::SeqPhase::Post);
-    evalDirty_ = false;
-}
-
 void SequenceEditor::restoreBases() {
     player_.restore(scene::World::instance());
     evalDirty_ = true;
@@ -593,12 +586,6 @@ int SequenceEditor::findTrack(OcSeqTrackKind kind, scene::Entity e) const {
             return static_cast<int>(i);
         }
     }
-    return -1;
-}
-
-int SequenceEditor::indexOfName(const std::string& name) const {
-    for (usize i = 0; i < model_.tracks.size(); ++i)
-        if (model_.tracks[i].kind == OcSeqTrackKind::Camera && game::seqCameraName(model_.tracks[i]) == name) return static_cast<int>(i);
     return -1;
 }
 

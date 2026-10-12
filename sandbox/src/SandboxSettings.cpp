@@ -1074,12 +1074,10 @@ void SandboxApp::buildWindowSettings() {
     }
     settingInt("Resizable", &project_.windowResizable, 0, 1, 1, "0 or 1.");
     settingInt("Fullscreen", &project_.windowFullscreen, 0, 1, 0,
-               "Borderless-fullscreen INTENT. Recorded now; WindowDesc has no fullscreen\n"
-               "field yet, so nothing consumes it -- see the note below.");
+               "Borderless fullscreen, applied when the game window is created.");
     ImGui::Spacing();
-    ImGui::TextDisabled("Title, size and resizable reach platform::WindowDesc through the game's");
-    ImGui::TextDisabled("BootConfig. FULLSCREEN IS RECORDED BUT NOT YET APPLIED: WindowDesc is");
-    ImGui::TextDisabled("{title,width,height,resizable,activate} and has no fullscreen field.");
+    ImGui::TextDisabled("Title, size, resizable and fullscreen reach platform::WindowDesc through");
+    ImGui::TextDisabled("the game's BootConfig, at window creation.");
 #endif
 }
 

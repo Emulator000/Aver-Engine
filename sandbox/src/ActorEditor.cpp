@@ -634,7 +634,7 @@ void ActorEditor::buildTree() {
 namespace {
 // Returns the tint a component kind is drawn in. ImVec4-typed, so it exists only with UI on -- its
 // three callers (drawTreeNode, drawComponentTree, drawComponentWireframes) are themselves reachable
-// only from draw()'s own AVER_WITH_IMGUI body. Same precedent as GraphEditor.cpp's toIm/fromIm: an
+// only from draw()'s own AVER_WITH_IMGUI body. Same precedent as GraphEditor.cpp's fromIm: an
 // ImGui-typed free helper guarded inside an anonymous namespace that itself stays unconditional.
 #if AVER_WITH_IMGUI
 ImVec4 kindColour(ComponentKind k) {

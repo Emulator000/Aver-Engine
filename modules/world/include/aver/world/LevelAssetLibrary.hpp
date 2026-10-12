@@ -66,8 +66,6 @@ public:
     bool resolve(const fmt::OcLevelInstance& rec, ResolvedContents& out, std::string* why = nullptr);
     // World AABB of the instance (EXTENT through the TRS; nested fallback). False = unknown.
     bool instanceBounds(const fmt::OcLevelInstance& rec, AABB& out);
-    // The child's own-frame bounds (EXTENT, else the union of its nested instances'). False = unknown.
-    bool assetBounds(const std::string& path, AABB& out);
 
     // The authored key of a cached asset whose forward-slash path hashes (fnv1a64) to `hash`; empty when none.
     std::string keyForHash(u64 hash) const;

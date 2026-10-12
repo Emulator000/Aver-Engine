@@ -62,7 +62,7 @@ struct WaterFrameCB {
     f32 shallowColor[4];
     f32 deepColor[4];
 };
-// Six float4 rows per wave slot pair plus four more rows, at kMaxGerstnerWaves=4: (4+4)*16 + 4*16 =
+// Two float4 rows per wave slot (waveDirSteep, waveLenAmp) plus four more rows, at kMaxGerstnerWaves=4: (4+4)*16 + 4*16 =
 // 192 bytes. This assert exists for the same reason PathTracer.cpp's FrameCB one does: it cannot
 // catch a field reordered within the same total size, but it catches the common mistake of a row
 // added on one side of the C++/HLSL boundary and not the other.

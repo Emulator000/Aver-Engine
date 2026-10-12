@@ -106,7 +106,7 @@ public:
         i32             material = 0;
     };
 
-    // Uploads every .ocmesh under the project's content root.
+    // Uploads every .ocmesh under the project's content root except lazy-folder meshes, which are only indexed.
     void loadProjectMeshes(rhi::IDevice& device);
 
     // On-demand meshes (those under a level's STREAM lazy= folders; indexed, not uploaded, by

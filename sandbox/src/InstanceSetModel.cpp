@@ -231,13 +231,6 @@ void InstanceSetModel::setAssetBounds(const std::string& asset, const InstanceBo
     indexValid_ = false;
 }
 
-void InstanceSetModel::setDefaultBounds(const InstanceBounds& b) {
-    defaultBounds_ = b;
-    for (Group& g : groups_)
-        if (assetBounds_.find(g.asset) == assetBounds_.end()) g.local = b;
-    indexValid_ = false;
-}
-
 void InstanceSetModel::setCellSize(f32 cellCm) {
     requestedCellCm_ = cellCm > 0.0f ? cellCm : 0.0f;
     indexValid_ = false;

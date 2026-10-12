@@ -71,7 +71,6 @@ public:
     // are queued while an API call or a tick runs and delivered when the outermost call ends, so a graph
     // handler that calls back never sees half-applied state. Depth 8, then dropped with one warning.
     void setNotify(NotifyFn fn, void* user) { notify_ = fn; notifyUser_ = user; }
-    bool hasNotify() const { return notify_ != nullptr; }
     void raise(scene::Entity e, const char* name);
     struct CallScope {
         explicit CallScope(SynapseAi& a) : ai(a) { ++ai.depth_; }

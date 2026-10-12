@@ -1991,10 +1991,8 @@ public:
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
-    // NOT IMPLEMENTED ON THIS BACKEND YET; refused out loud rather than stubbed silently.
-    // DeviceCaps::rtBindlessTextures already gates every caller, and this backend sets that bit
-    // from real descriptor-indexing features, so reaching these at all means the gate was
-    // bypassed -- worth a log, not a quiet zero. See the Vulkan parity stage.
+    // The ray path's bindless texture table. DeviceCaps::rtBindlessTextures gates every caller; this
+    // backend sets that bit from real descriptor-indexing features.
     BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
     void destroyBindlessTextureTable(BindlessTableHandle h) override;
     bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;

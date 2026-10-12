@@ -86,20 +86,6 @@ std::string stTaskText(const fmt::OcBtNode& n) {
     return s;
 }
 
-std::string stCondText(const StCond& c) {
-    std::string s = c.negate ? "not " : "";
-    if (c.isBlackboard) {
-        synapse::BbExpr e;
-        e.key = c.bb.key;
-        e.op = c.bb.op;
-        e.value = c.bb.value;
-        s += synapse::bbFormatExpr(e);
-    } else {
-        s += "cond " + c.leaf.name;
-    }
-    return s;
-}
-
 std::string stTransitionText(const StateTreeAsset& a, const StTransition& t) {
     std::string s;
     switch (t.trigger) {
@@ -210,12 +196,6 @@ bool StateTreeEditor::beginEdit() {
     if (!loaded_ || !sel()) return false;
     pushUndo();
     return true;
-}
-
-void StateTreeEditor::resolveTargets() {
-    for (StState& s : asset_.states)
-        for (StTransition& t : s.transitions)
-            if (t.target == StTargetKind::Goto) t.targetState = asset_.findPath(t.targetPath);
 }
 
 // ---- state edits ------------------------------------------------------------------------------------
@@ -479,15 +459,6 @@ bool StateTreeEditor::removeTransitionCond(usize transition, usize cond) {
     return true;
 }
 
-bool StateTreeEditor::setTransitionCond(usize transition, usize cond, const StCond& c) {
-    StState* s = sel();
-    if (!loaded_ || !s || transition >= s->transitions.size() || cond >= s->transitions[transition].conds.size()) return false;
-    pushUndo();
-    sel()->transitions[transition].conds[cond] = c;
-    endEdit();
-    return true;
-}
-
 // ---- evaluators, header, schema -----------------------------------------------------------------------
 
 bool StateTreeEditor::addEvaluator(const std::string& leaf) {
@@ -505,15 +476,6 @@ bool StateTreeEditor::removeEvaluator(usize index) {
     if (!loaded_ || index >= asset_.evaluators.size()) return false;
     pushUndo();
     asset_.evaluators.erase(asset_.evaluators.begin() + static_cast<isize>(index));
-    dirty_ = true;
-    return true;
-}
-
-bool StateTreeEditor::setEvaluator(usize index, const fmt::OcBtNode& n) {
-    if (!loaded_ || index >= asset_.evaluators.size() || !validLeafName(n.name)) return false;
-    pushUndo();
-    asset_.evaluators[index] = n;
-    asset_.evaluators[index].kind = fmt::OcBtNodeKind::Action;
     dirty_ = true;
     return true;
 }

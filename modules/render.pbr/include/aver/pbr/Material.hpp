@@ -125,11 +125,9 @@ struct MaterialDesc {
     // 0 = opaque as far as this field goes, which is every material authored before it existed. Read
     // only where it matters -- see MaterialConstants::transmission and averBuildSurface's
     // AVER_MAT_ALPHA_BLEND branch in PbrShaders.cpp, which pulls the blended coverage down toward
-    // (1 - transmission) before the view-Fresnel term lifts it back at grazing angles. NOT YET READ
-    // BY THE BRDF ITSELF: this only reshapes alpha compositing, exactly like reflectance/f90 already
-    // did before this change -- there is still no refraction, and light does not actually bend
-    // passing through a transmissive surface. Say that here rather than let someone assume otherwise
-    // from the field's name.
+    // (1 - transmission) before the view-Fresnel term lifts it back at grazing angles. It also scales
+    // the diffuse lobe by (1 - transmission) (kdAlbedo in material_prelude.hlsl). Refraction is a
+    // separate switch (voxi Settings::refractionMode).
     f32 transmission = 0.0f;
 
     // ---- volume absorption: what the INTERIOR of a transmissive material does to light ----

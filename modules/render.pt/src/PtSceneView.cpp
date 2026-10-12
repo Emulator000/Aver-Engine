@@ -778,8 +778,8 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     //
     // TWO TRACES PER BOUNCE, NOT ONE. This block used to read "(bounces+1)*samples = 5*8 = 40
     // RayQuery traces per pixel" and tabulate from that. It counted only the bounce ray and silently
-    // omitted ptDirectSun's next-event shadow ray, which fires at every non-dielectric hit and whose
-    // own comment (pt_pathtrace.hlsl:306) says so in capitals. The real budget is (bounces+1)*2
+    // omitted ptDirectSun's next-event shadow ray (pt_pathtrace.hlsl), which fires at every
+    // non-dielectric hit. The real budget is (bounces+1)*2
     // traces per sample -- 26 now that kMaxBounces is 12, not the 10 it was at the old 4-bounce
     // default -- times kSamplesPerStep (8) per pixel per dispatch, so every figure below is
     // RECOMPUTED FOR 12 BOUNCES, not merely doubled the way this comment once said:

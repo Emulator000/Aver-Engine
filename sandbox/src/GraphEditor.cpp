@@ -129,7 +129,6 @@ std::string nodeTitle(const fmt::OcGraphNode& n, const GraphNodeDesc* desc,
 // `#if AVER_WITH_IMGUI`) -- guarding these too is what lets GraphEditorLoadSaveTest compile this TU
 // with no ImGui headers or context (see that test's own file comment).
 #if AVER_WITH_IMGUI
-inline ImVec2 toIm(Vec2 v) { return ImVec2(v.x, v.y); }
 inline Vec2 fromIm(ImVec2 v) { return Vec2(v.x, v.y); }
 
 // Pin colour is by declared type (kept from Unreal's palette: green=float, white=exec); header colour

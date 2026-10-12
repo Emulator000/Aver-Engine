@@ -218,14 +218,12 @@ void solveIkRig(const fmt::OcSkeleton& skel, const IkRigBound& bound, IkRigState
             if (in.probe) {
                 f32 delta = 0.0f;
                 normal = Vec3{0, 0, 1};
-                fs.hadHit = false;
                 if (in.ground) {
                     Vec3 hit{0, 0, 0}, n{0, 0, 1};
                     if (in.ground(Vec3{pos.x, pos.y, bf.groundZ + bf.probeUp}, bf.probeUp + bf.probeDown,
                                   bound.foot.layerMask, hit, n, in.groundUser)) {
                         delta = hit.z - bf.groundZ;
                         normal = n.sizeSquared() > 0.25f ? n.getSafeNormal() : Vec3{0, 0, 1};
-                        fs.hadHit = true;
                     }
                 }
                 ++rep.probes;

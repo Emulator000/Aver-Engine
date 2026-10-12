@@ -425,10 +425,10 @@ private:
     static constexpr u32 kRouletteDepth = 2;
     // 8 samples per still frame. THE TRACE COUNT IS TWO PER BOUNCE, NOT ONE, and this comment said
     // one for as long as next-event estimation has existed: the bounce ray is joined by ptDirectSun's
-    // shadow ray at every non-dielectric hit, which pt_pathtrace.hlsl:306 states outright ("COSTS ONE
-    // EXTRA RayQuery PER DIFFUSE HIT"). So the budget is up to (bounces+1)*2 = 10 traces per sample
-    // and 80 per pixel per dispatch -- 480x270 = ~10.4M traces/dispatch, twice the 5.2M this used to
-    // claim. The old figure was not a rounding error; it halved the headline number in every
+    // shadow ray at every non-dielectric hit (ptDirectSun in pt_pathtrace.hlsl: one extra RayQuery per
+    // diffuse hit). So the budget is up to (bounces+1)*2 = 26 traces per sample at kMaxBounces = 12
+    // and 208 per pixel per dispatch -- 480x270 = ~27M traces/dispatch (the old one-trace-per-bounce,
+    // 4-bounce claim was 5.2M). The old figure was not a rounding error; it halved the headline number in every
     // comparison drawn against it. See PtSceneView.cpp's own comment at the accumulate() call site
     // for how the corrected budget sits beside VoxiRenderer's measured, TDR-conscious ray budget.
     static constexpr u32 kSamplesPerStep = 8;

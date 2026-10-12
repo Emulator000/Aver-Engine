@@ -72,7 +72,7 @@ int32_t aver_sb_build(int32_t h);
 int32_t aver_sb_set_config(int32_t h, const AverSbConfig* cfg);
 
 // ---- synchronous driving --------------------------------------------------------------------------
-// One fixed step. Bit 0 set: something broke. Bit 1 set: settled. -1: bad handle or not built.
+// One fixed step. Bit 0 set: something broke. Bit 1 set: settled. -1: bad handle, not built, or async running (see aver_sb_last_error).
 int32_t aver_sb_step(int32_t h);
 // Moves a pinned (kinematic) particle. 1/0.
 int32_t aver_sb_move_particle(int32_t h, int32_t particle, float x, float y, float z);
@@ -97,7 +97,7 @@ int32_t aver_sb_pieces(int32_t h);
 // are then routed to the worker, and aver_sb_step is refused. 1/0.
 int32_t aver_sb_async_start(int32_t h, float hz);
 void    aver_sb_async_stop(int32_t h);
-// Takes the newest snapshot if there is one: returns the particle count, or -1 when nothing is new.
+// Takes the newest snapshot if there is one: returns the particle count, or -1 when nothing is new (or on failure: see aver_sb_last_error).
 // `settledOut` (optional) receives 1 when the worker has gone idle.
 int32_t aver_sb_async_poll(int32_t h, float* outXyz, int32_t maxParticles, int32_t* settledOut);
 

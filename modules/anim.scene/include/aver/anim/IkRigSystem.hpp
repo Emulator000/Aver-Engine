@@ -99,8 +99,6 @@ public:
     bool setFootWeight(scene::Entity e, u64 foot, f32 weight, f32 blendSeconds);   // foot 0 = every foot
     bool footState(scene::Entity e, u64 foot, f32* offsetPlantNormal) const;       // foot 0 = the pelvis
 
-    u32 trackedEntities() const { return static_cast<u32>(ents_.size()); }
-
 private:
     struct Info {
         IkRigAsset asset;

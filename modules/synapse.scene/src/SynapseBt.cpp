@@ -278,16 +278,6 @@ u64 BtSystem::loadStateTree(const std::string& path) {
     return id;
 }
 
-u64 BtSystem::registerStateTree(const std::string& name, const StateTreeAsset& asset) {
-    const u64 id = fnv1a64(name);
-    StateTreeRuntime rt;
-    rt.asset = asset;
-    rt.asset.path = name;
-    rt.path = name;
-    stateTrees_[id] = std::move(rt);
-    return id;
-}
-
 const StateTreeRuntime* BtSystem::findStateTree(u64 id) const {
     const auto it = stateTrees_.find(id);
     return it == stateTrees_.end() ? nullptr : &it->second;

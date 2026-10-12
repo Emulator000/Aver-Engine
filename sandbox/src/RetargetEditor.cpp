@@ -330,15 +330,6 @@ bool RetargetEditor::removeChain(i32 index) {
     return true;
 }
 
-bool RetargetEditor::setBones(i32 index, const std::string& srcStart, const std::string& srcEnd, const std::string& dstStart,
-                              const std::string& dstEnd) {
-    if (!loaded_) return false;
-    pushUndo();
-    if (!rtgSetBones(asset_, index, srcStart, srcEnd, dstStart, dstEnd)) { history_.cancelPush(); return false; }
-    markDirty();
-    return true;
-}
-
 void RetargetEditor::autoMap() {
     if (!srcOk_ || !dstOk_) return;
     draft_ = rtgAutoMap(src_, dst_);

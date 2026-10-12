@@ -163,11 +163,6 @@ bool SmartObjectRegistry::setSlotEnabled(u32 object, u32 slot, bool enabled) {
     return true;
 }
 
-bool SmartObjectRegistry::objectEnabled(u32 object) const {
-    const auto it = objects_.find(object);
-    return it != objects_.end() && it->second.enabled;
-}
-
 u32 SmartObjectRegistry::find(const SoQuery& q, SoSlotRef* out, f32* distOut, u32 cap) const {
     struct Hit { f32 d; u32 object, slot; };
     std::vector<Hit> hits;

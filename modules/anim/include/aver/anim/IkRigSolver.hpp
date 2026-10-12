@@ -69,7 +69,6 @@ struct IkFootState {
     f32 plant = 1.0f;
     Vec3 normal{0, 0, 1};
     bool init = false;
-    bool hadHit = false;
 };
 struct IkRigState {
     std::vector<IkFootState> feet;

@@ -93,7 +93,6 @@ public:
     // Both ids are fnv1a64(path as written, content-relative); the file is read through resolveAiAsset.
     u64 loadBrain(const std::string& path);             // by extension; 0 for anything else or a failed load
     u64 loadStateTree(const std::string& path);
-    u64 registerStateTree(const std::string& name, const StateTreeAsset& asset);
     const StateTreeRuntime* findStateTree(u64 id) const;
     // Gives `e` the brain at `path` (attaching CSynapseBehavior when missing). The assignment path that
     // did not exist: editor, graph and C# all come through here.

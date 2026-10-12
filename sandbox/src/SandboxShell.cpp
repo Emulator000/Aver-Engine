@@ -2111,7 +2111,7 @@ void SandboxApp::buildUI(Engine& e) {
             uiReg_.track("window.gameUiDemo");
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, until there is a widget tree to produce one."
+                ImGui::SetTooltip(gameUi_ ? "A hand-written Aver.UI draw list, not built from a widget tree."
                                           : "The UI render feature is unavailable on this backend.");
             ImGui::Separator();
             // Reset Layout applies to the focused tab.

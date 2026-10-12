@@ -125,7 +125,6 @@ public:
     const fmt::OcLevelInstance* recordOf(scene::Entity root) const;
     bool setRecordName(scene::Entity root, const std::string& name);
     bool setRecordStream(scene::Entity root, i32 stream);        // -1 follow the host level, 0 resident, 1 streamed
-    bool setRecordTransform(scene::Entity root, const Transform& local);   // keeps the stored record in step with the entity
     u32 assetCount(scene::Entity root) const;                    // placements in the child asset (the Details warning above 5000)
     std::string assetOf(scene::Entity root) const;
     u64 assetIdOf(scene::Entity root) const;
@@ -136,13 +135,6 @@ public:
     bool isNested(scene::Entity root) const;
     // The editor's per-member collide flag (a Details checkbox) feeds the override diff.
     void setMemberCollide(scene::Entity member, bool collide);
-    // Members created by the host after the load (a paste, an undo) join the table of the instance being edited.
-    void adoptMember(scene::Entity root, scene::Entity member, u64 placementId);
-    // Host: classes can now be found; deferred class placements spawn at the next spawnPendingClasses().
-    void setClassesReady(bool ready) { classesReady_ = ready; }
-    // The EXTENT of the instances placed in the host level, for the editor's save.
-    world::LevelAssetLibrary* library() const { return lib_; }
-    const ContentPort& content() const { return port_; }
 
 private:
     struct Impl;

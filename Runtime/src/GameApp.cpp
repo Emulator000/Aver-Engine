@@ -1536,7 +1536,7 @@ void GameApp::applyLevelSky() {
     const fmt::OcWorldEnv& w = level_.env();
     if (!w.hasSun && !w.hasSky && !w.hasFog && !w.hasClouds) return;
 
-    // Shared mapping (aver::voxi::applyLevelEnv) ensures game and editor don't drift
+    // Shared mapping (aver::assets::applyLevelEnv) ensures game and editor don't drift
     assets::applyLevelEnv(w, sky_);
 
     // Reseed from atmosphere (frame loop resets sunColor_ every frame)

@@ -7,7 +7,8 @@
 # a machine with no GPU, no device and no .NET.
 #
 # The renderer half is a SEPARATE target for the reason Aver.Render.Voxi.Renderer is one: it needs the
-# RHI, and giving this target that dependency would end the property above. It is not added yet.
+# RHI, and giving this target that dependency would end the property above. It is
+# Aver.Landscape.Renderer, below.
 add_library(Aver.Landscape STATIC
   src/LandscapeTree.cpp
   src/ChunkMesh.cpp

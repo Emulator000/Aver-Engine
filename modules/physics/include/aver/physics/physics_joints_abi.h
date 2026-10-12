@@ -7,7 +7,7 @@
 // ragdoll were all equally impossible without writing the solver yourself.
 //
 // A SEPARATE HEADER FROM physics_abi.h, and the reason is the C# side rather than the C side: the ABI
-// parity test pairs one header with one C# file by path, so a joints header and a Joints.cs can be
+// parity test pairs one header with one C# file by path, so a joints header and its C# file (Joint.cs) can be
 // checked against each other as a unit. Including this one alone is fine -- it needs nothing from
 // physics_abi.h but the handle convention, which it restates below.
 //

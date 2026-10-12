@@ -68,7 +68,7 @@ public:
     void setWaterLevelCm(f32 zCm) { waterLevelCm_ = zCm; }
     f32 waterLevelCm() const { return waterLevelCm_; }
 
-    // Copies up to kMaxGerstnerWaves waves, silently clamping `count` down to that if the caller
+    // Copies up to kMaxGerstnerWaves waves, clamping `count` down to that if the caller
     // asked for more, and logging that clamp exactly ONCE per WaterRenderer instance (not once per
     // call) so a host that calls this every frame with a fixed, oversized list does not spam the log
     // -- the general shape D3D12Device's own "log once" warnings use.

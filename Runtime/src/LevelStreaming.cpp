@@ -401,10 +401,6 @@ void LevelStreaming::pin(u32 placement, bool on) {
     if (placement < itemOf_.size() && itemOf_[placement] != ~0u) streamer_.pin(itemOf_[placement], on);
 }
 
-void LevelStreaming::unpinAll() {
-    for (u32 i = 0; i < items_.size(); ++i) streamer_.pin(i, false);
-}
-
 void LevelStreaming::updateRecord(u32 placement, fmt::OcWorldPlacement p, bool keepParent) {
     if (placement >= records_.size()) return;
     if (keepParent) p.parent = records_[placement].parent;

@@ -69,11 +69,6 @@ usize StringTableEditor::missingCount() const {
     return n;
 }
 
-std::string StringTableEditor::fileOf(usize cul) const {
-    const auto it = cul < grid_.cultures.size() ? files_.find(grid_.cultures[cul]) : files_.end();
-    return it == files_.end() ? std::string() : it->second.path;
-}
-
 bool StringTableEditor::refuse(std::string why) {
     editError_ = std::move(why);
     return false;

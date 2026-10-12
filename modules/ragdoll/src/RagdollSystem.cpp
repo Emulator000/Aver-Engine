@@ -359,7 +359,6 @@ void RagdollSystem::tick(f32 dt) {
     }
 }
 
-void RagdollSystem::clearCache() { defs_.clear(); }
 
 void RagdollSystem::clear() {
     for (auto& [e, s] : states_) destroyPhysics(s);

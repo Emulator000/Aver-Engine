@@ -5,7 +5,7 @@
 # Jolt -- tests/softbody links nothing else. Jolt keeps the ELASTIC path (aver_phys_softbody_*);
 # nothing here includes or links Aver.Physics, and the two never share state.
 #
-# NOT in the default module list until wired: see docs/SOFTBODY.md section "Wiring".
+# Added by the root CMakeLists.txt and default-on; docs/SOFTBODY.md section "Wiring" lists the optional rest.
 aver_add_module(Aver.SoftBody
   SOURCES
     src/Cage.cpp

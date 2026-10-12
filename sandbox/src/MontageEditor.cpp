@@ -352,16 +352,6 @@ bool MontageEditor::setNext(i32 index, const std::string& next) {
     return true;
 }
 
-i32 MontageEditor::moveSection(i32 index, f32 start) {
-    if (!loaded_) return -1;
-    pushUndo();
-    const i32 to = mtgMoveSection(asset_, index, start);
-    if (to < 0) { history_.cancelPush(); return -1; }
-    selectSection(to);
-    markDirty();
-    return to;
-}
-
 i32 MontageEditor::addNotify(f32 time, const std::string& name, f32 duration) {
     if (!loaded_) return -1;
     pushUndo();

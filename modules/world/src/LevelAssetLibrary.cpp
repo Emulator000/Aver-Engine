@@ -409,10 +409,6 @@ bool LevelAssetLibrary::boundsRec(const std::string& path, u32 depth, AABB& out)
     return true;
 }
 
-bool LevelAssetLibrary::assetBounds(const std::string& path, AABB& out) {
-    return boundsRec(path, 0, out);
-}
-
 bool LevelAssetLibrary::instanceBounds(const fmt::OcLevelInstance& rec, AABB& out) {
     AABB local;
     if (!boundsRec(rec.asset, 1, local)) return false;

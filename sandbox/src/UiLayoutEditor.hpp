@@ -125,8 +125,6 @@ public:
     // The preview tree is rebuilt from the document after every edit. Layout needs text metrics, so
     // the caller supplies them (the tab uses ImGui's; a test uses the estimate).
     void setPreviewSize(f32 w, f32 h);
-    f32 previewWidth() const { return previewW_; }
-    f32 previewHeight() const { return previewH_; }
     void layoutPreview(const ui::UiTextMetrics& m);
     ui::UiTree& preview() { return preview_; }
     const ui::UiTree& preview() const { return preview_; }

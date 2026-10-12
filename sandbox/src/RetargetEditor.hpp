@@ -82,7 +82,6 @@ public:
     i32 addChain(const std::string& name, const std::string& srcStart, const std::string& srcEnd,
                  const std::string& dstStart, const std::string& dstEnd, anim::RtgMode mode);
     bool removeChain(i32 index);
-    bool setBones(i32 index, const std::string& srcStart, const std::string& srcEnd, const std::string& dstStart, const std::string& dstEnd);
     // Runs the auto-mapper into the draft (not applied).
     void autoMap();
     const anim::AutoMapResult& draft() const { return draft_; }

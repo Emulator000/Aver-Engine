@@ -251,7 +251,6 @@ public:
 
     u32 loadedSkeletons() const { return static_cast<u32>(skeletons_.size()); }
     u32 loadedClips() const { return static_cast<u32>(clips_.size()); }
-    u32 posedEntities() const { return static_cast<u32>(posed_.size()); }
 
     // How many attachments the last tick actually placed. A test can assert on it, and a host can
     // tell "the socket name is wrong" (0) from "nothing is attached" (also 0, but with no

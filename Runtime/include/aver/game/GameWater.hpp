@@ -110,9 +110,6 @@ public:
     // down (a live simulated volume's teardown calls into the solver).
     void shutdown(rhi::IDevice* device);
 
-    // Whether any water is currently live: the analytic or displaced ocean, or a river / lake (wave 3).
-    bool attached() const { return waterAttached_ || surfaceActive_ || !bodyDraws_.empty(); }
-
     // Holds the displaced surface still (no wave clock, no re-centring) so a path-traced reference can
     // trace it: PtSceneView::setIncludeDynamicMeshes needs geometry that only changes with a revision.
     void setFrozen(bool frozen) { frozen_ = frozen; }

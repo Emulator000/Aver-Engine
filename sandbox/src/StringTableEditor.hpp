@@ -60,8 +60,6 @@ public:
     bool isMissing(usize cul, usize k) const;
     usize missingCount() const;
     const std::vector<std::string>& diagnostics() const { return diagnostics_; }
-    // The file a culture's table lives in (or will be created at).
-    std::string fileOf(usize cul) const;
 
     // ---- edits (keys are unique and match [A-Za-z0-9_.-]+; every one pushes an undo step unless refused) ----
     bool addKey(std::string key);

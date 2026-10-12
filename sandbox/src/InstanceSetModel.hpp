@@ -171,7 +171,6 @@ public:
 
     // Local bounds per asset. Applies to existing and future groups of that asset; rebuilds the index.
     void setAssetBounds(const std::string& asset, const InstanceBounds& b);
-    void setDefaultBounds(const InstanceBounds& b);
     // Index cell edge in cm; 0 = pick from the data at the next (re)build.
     void setCellSize(f32 cellCm);
 

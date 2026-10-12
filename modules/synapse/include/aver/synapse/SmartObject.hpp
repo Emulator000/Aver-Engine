@@ -80,7 +80,6 @@ public:
     u32 slotCount(u32 object) const;
     bool slotInfo(u32 object, u32 slot, SoSlotInfo& out) const;
     bool setSlotEnabled(u32 object, u32 slot, bool enabled);
-    bool objectEnabled(u32 object) const;
 
     // Slots near the origin satisfying the query, nearest first (ties by object then slot).
     u32 find(const SoQuery& q, SoSlotRef* out, f32* distOut, u32 cap) const;

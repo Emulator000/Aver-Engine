@@ -99,7 +99,6 @@ public:
     // kCheckSeconds throttle, once the prototype meshes are read.
     void setExtraTable(u64 owner, fmt::OcInstanceData rowsInWorldSpace, std::vector<std::string> groupMaterial);
     void clearExtraTable(u64 owner);
-    u32 extraTables() const { return static_cast<u32>(extras_.size()); }
     // [wave3/level-instances end]
 
     bool streamed() const { return streamed_; }
@@ -113,7 +112,6 @@ public:
     u32 residentCells() const { return residentCount_; }
     u32 instances() const { return result_.instances; }       // in the last push
     u32 rebuilds() const { return rebuilds_; }
-    f32 lastRebuildMs() const { return lastRebuildMs_; }
     const FoliageLoadResult& result() const { return result_; }
 
 private:

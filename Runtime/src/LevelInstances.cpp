@@ -1505,33 +1505,6 @@ bool LevelInstances::setRecordStream(scene::Entity root, i32 stream) {
     return true;
 }
 
-bool LevelInstances::setRecordTransform(scene::Entity root, const Transform& local) {
-    Impl& d = *d_;
-    Impl::Inst* in = d.byRootEntity(root);
-    if (!in) return false;
-    in->local = local;
-    world_->setLocalTransform(root, local);
-    in->rec.x = local.position.x; in->rec.y = local.position.y; in->rec.z = local.position.z;
-    const Vec3 e = world::eulerDegFromQuat(local.rotation);
-    in->rec.roll = e.x; in->rec.pitch = e.y; in->rec.yaw = e.z;
-    in->rec.sx = local.scale.x; in->rec.sy = local.scale.y; in->rec.sz = local.scale.z;
-    in->world = compose(in->containerId ? d.get(in->containerId)->world : Transform{}, local);
-    if (in->containerId == 0 && lib_) {
-        AABB lb;
-        if (lib_->instanceBounds(in->rec, lb)) {
-            in->bounds = transformBox(lb, Transform{});
-            in->hasBounds = true;
-            if (in->streamItem >= 0) d.streamer.setBounds(static_cast<u32>(in->streamItem), in->bounds);
-        }
-    }
-    // Static bodies are placed in world space: a moved instance rebuilds so they follow.
-    if (in->loaded) {
-        d.syncOverrides(*in);
-        d.rebuild(*in);
-    }
-    return true;
-}
-
 u32 LevelInstances::assetCount(scene::Entity root) const {
     const Impl::Inst* in = d_->byRootEntity(root);
     if (!in) return 0;
@@ -1573,16 +1546,6 @@ void LevelInstances::setMemberCollide(scene::Entity member, bool collide) {
     Impl::Inst* in = d.get(l->instanceId);
     if (!in) return;
     for (Impl::Member& m : in->members) if (m.entity == member) { m.collide = collide; return; }
-}
-
-void LevelInstances::adoptMember(scene::Entity root, scene::Entity member, u64 placementId) {
-    Impl& d = *d_;
-    Impl::Inst* in = d.byRootEntity(root);
-    if (!in || !world_->valid(member)) return;
-    d.addLink(member, scene::CLevelInstanceLink{assetIdOf(root), placementId, root, in->id, in->depth,
-                                                in->editing ? scene::kLinkEditing : 0u});
-    for (Impl::Member& m : in->members) if (m.entity == member) return;
-    in->members.push_back(Impl::Member{member, placementId, -1, true});
 }
 
 } // namespace aver::game

@@ -28,7 +28,6 @@ bool stateTreeWriteStarter(const std::string& path, std::string* why = nullptr);
 
 // One-line texts the canvas and lists use.
 std::string stTaskText(const fmt::OcBtNode& n);               // "Wait p0=3 \"s\""
-std::string stCondText(const synapse::StCond& c);             // "not Alert is set" / "cond CanSeeTarget"
 std::string stTransitionText(const synapse::StateTreeAsset& a, const synapse::StTransition& t);   // "tick -> Combat.Search"
 
 class StateTreeEditor final : public AssetEditor, public SchemaEditHost {
@@ -90,11 +89,9 @@ public:
     bool setTransitionTarget(usize index, synapse::StTargetKind kind, i32 state);
     bool addTransitionCond(usize transition, bool blackboard);
     bool removeTransitionCond(usize transition, usize cond);
-    bool setTransitionCond(usize transition, usize cond, const synapse::StCond& c);
 
     bool addEvaluator(const std::string& leaf);
     bool removeEvaluator(usize index);
-    bool setEvaluator(usize index, const fmt::OcBtNode& n);
 
     bool setDescription(const std::string& text);
     bool setRestartOnFinish(bool on);
@@ -110,7 +107,6 @@ private:
     synapse::StState* sel();
     bool beginEdit();                // loaded and something selected; pushes the undo snapshot
     void endEdit() { dirty_ = true; }
-    void resolveTargets();           // re-resolves every Goto path after an edit
 
     std::string path_;
     synapse::StateTreeAsset asset_;

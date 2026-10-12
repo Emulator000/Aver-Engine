@@ -37,11 +37,6 @@
 
 namespace aver::assets {
 
-// Applies a level's SUN, SKY, FOG and CLOUDS records to `sky`.
-//
-// Each record is applied only when the level actually carried it, so a level with no SKY line is
-// left with whatever atmosphere the host had -- which is what every level written before these
-// records existed depends on.
 // The fog density that makes a level view from height `viewZ` reach `opacity` at `distanceCm`, under
 // `sky`'s fog start, height falloff and max opacity (averFogFactor solved backwards). The falloff
 // boost is bounded (20x) so a camera high above the fog does not drown the ground. 0 when no density
@@ -66,6 +61,11 @@ inline f32 fogForStreamEdge(const fmt::OcStreamSettings& st, const rhi::SkyAtmos
     return d > authored ? d : authored;
 }
 
+// Applies a level's SUN, SKY, FOG and CLOUDS records to `sky`.
+//
+// Each record is applied only when the level actually carried it, so a level with no SKY line is
+// left with whatever atmosphere the host had -- which is what every level written before these
+// records existed depends on.
 inline void applyLevelEnv(const fmt::OcWorldEnv& w, rhi::SkyAtmosphere& sky) {
     if (w.hasSun) {
         for (int i = 0; i < 3; ++i) {
