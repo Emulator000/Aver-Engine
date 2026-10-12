@@ -4153,11 +4153,24 @@ private:
 
     void unloadLevel(Engine& eng);
 
-    bool saveLevel(const std::string& path);
+    // `playSnapshot`: Play's own copy of the level -- no "saved" mark, no prefab asset writes, no autosave retire.
+    bool saveLevel(const std::string& path, bool playSnapshot = false);
 
-    bool saveLevelAsOcmap(const std::string& path);
+    bool saveLevelAsOcmap(const std::string& path, bool playSnapshot = false);
 
-    // Snapshot of transforms/visibility/spawned entities at Play start; restored on Stop (not a full reload).
+    // EXITING PLAY RELOADS THE LEVEL (owner decision 2026-10-12): startPlay writes the level as it stands,
+    // unsaved edits included, to pieSnapshotPath_; stopPlay destroys every entity born during Play and the
+    // next frame reloads that copy under levelPath_ (GameLevel::setNextLoadSource), so sidecars resolve as
+    // usual. Undo history does not survive it. The transform restore below still runs first, as a fallback.
+    void writePlaySnapshot();
+    void destroyPlaySpawned();
+    void reloadAfterPlay(Engine& eng);
+    std::string pieSnapshotPath_;
+    std::vector<scene::Entity> piePreEntities_;   // every live entity at Play start, sorted
+    bool pieReloadPending_ = false;
+    bool pieWasUnsaved_ = false;
+
+    // Snapshot of transforms/visibility/spawned entities at Play start; restored on Stop.
     bool defaultPawnPlay_ = false;  // True while engine's default GameMode is active.
     struct PlaySavedTransform { scene::Entity e; Transform xf; bool visible = true; };
     std::vector<PlaySavedTransform> playWorldSnapshot_;

@@ -123,6 +123,8 @@ void bindInstanceMeshMaterials(GameContent& content, u64 meshId) {
 
 void GameLevel::load(const std::string& path, GameContent& content) {
     unload();
+    const std::string src = nextSource_.empty() ? path : nextSource_;   // the records' file (setNextLoadSource)
+    nextSource_.clear();
 
     fmt::OcWorldData w;
     std::string why;
@@ -133,11 +135,11 @@ void GameLevel::load(const std::string& path, GameContent& content) {
     // genuinely legacy file went through fmt::loadOcworld, which "succeeds" on the same `OCMAP 1`
     // header line while silently dropping every ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM record --
     // the level loaded with no placements and no warning at all.
-    const bool legacy = fmt::levelFileIsLegacyOcmap(path);
+    const bool legacy = fmt::levelFileIsLegacyOcmap(src);
     fmt::OcMapData legacyMap;   // the legacy file's own records, handed to afterInstantiate
     if (legacy) {
-        if (!loadLegacyOcmap(path, legacyMap, w, &why)) { AVER_WARN("[Level] {}", why); return; }
-    } else if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+        if (!loadLegacyOcmap(src, legacyMap, w, &why)) { AVER_WARN("[Level] {}", why); return; }
+    } else if (!fmt::loadOcworld(src, w, &why)) { AVER_WARN("[Level] {}", why); return; }
     // STAGE 1 OF 3 (see LoadHooks::progress): the file is parsed.
     if (hooks_.progress) hooks_.progress("Parsing level", 0.05f);
 

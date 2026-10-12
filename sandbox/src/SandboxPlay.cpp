@@ -17,7 +17,9 @@
 #  include "aver/ragdoll/RagdollSystem.hpp"
 #endif
 
+#include <algorithm>
 #include <cfloat>
+#include <filesystem>
 // For teleportPawnToCamera: finding and measuring a capsule this file did not create, and a ray
 // that can skip it.
 #if AVER_MODULE_PHYSICS
@@ -263,6 +265,9 @@ void SandboxApp::startPlay() {
 #if AVER_MODULE_SCENE
     // Animate's preview pose is not the level: the actors go back to their authored transforms first.
     seqEditor_.restoreBases();
+#endif
+#if AVER_MODULE_SCENE
+    writePlaySnapshot();   // before capturePlayWorld builds physics: the level exactly as edited
 #endif
     capturePlayWorld();
 #if AVER_MODULE_SCENE
@@ -737,8 +742,82 @@ void SandboxApp::stopPlay() {
                   "GI bake; they rejoin it now", playMobility_.movableCount());
         playMobility_.end();
     }
+    // The level is reloaded from the Play-start copy next frame, and what the session created dies with
+    // it there; without a copy, the session's entities go now and the transform restore above stands.
+    if (pieSnapshotPath_.empty()) destroyPlaySpawned();
+    else pieReloadPending_ = true;
 #endif
 }
+
+#if AVER_MODULE_SCENE
+// The level as it stands, unsaved edits included, written beside nothing the author owns (a temp file).
+void SandboxApp::writePlaySnapshot() {
+    pieSnapshotPath_.clear();
+    pieReloadPending_ = false;
+    piePreEntities_.clear();
+    scene::World& w = scene::World::instance();
+    piePreEntities_.reserve(w.count());
+    for (u32 i = 0, n = w.count(); i < n; ++i) piePreEntities_.push_back(w.at(i));
+    std::sort(piePreEntities_.begin(), piePreEntities_.end());
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec) / "AverEngine";
+    std::filesystem::create_directories(dir, ec);
+    const std::string path = (dir / (levelIsLegacyOcmap_ ? "play_snapshot.ocmap" : "play_snapshot.ocworld")).string();
+    pieWasUnsaved_ = levelHasUnsavedEdits();
+    if (saveLevel(path, /*playSnapshot=*/true)) pieSnapshotPath_ = path;
+    else AVER_WARN("[Sandbox] Play: could not snapshot the level; Stop will restore transforms only");
+}
+
+// Every entity alive now that was not alive when Play began: actors, bodies and props a session spawned.
+// Chunk-world tiles are left to the chunk world, which owns their bookkeeping.
+void SandboxApp::destroyPlaySpawned() {
+    if (piePreEntities_.empty()) return;
+    scene::World& w = scene::World::instance();
+    std::vector<scene::Entity> doomed;
+    for (u32 i = 0, n = w.count(); i < n; ++i) {
+        const scene::Entity e = w.at(i);
+        if (std::binary_search(piePreEntities_.begin(), piePreEntities_.end(), e)) continue;
+        if (anyChunkWorldOwns(e)) continue;
+        doomed.push_back(e);
+    }
+    for (const scene::Entity e : doomed) if (w.valid(e)) w.destroy(e);
+    w.flush();
+    piePreEntities_.clear();
+    if (!doomed.empty()) AVER_INFO("[Sandbox] Stop: destroyed {} entity/entities the session created", doomed.size());
+}
+
+// Unloads the level and loads the Play-start copy under the level's own path. The editor camera and the
+// unsaved-changes state carry over; selection and undo history do not (a reload owns new entities).
+void SandboxApp::reloadAfterPlay(Engine& eng) {
+    pieReloadPending_ = false;
+    const std::string snapshot = std::move(pieSnapshotPath_);
+    pieSnapshotPath_.clear();
+    if (snapshot.empty()) return;
+    const std::string path = levelPath_.empty() ? snapshot : levelPath_;
+    const std::string keepPath = levelPath_;
+    const Vec3 cam = camPos_; const f32 yaw = yaw_, pitch = pitch_, speed = flySpeed_;
+    const bool wasUnsaved = pieWasUnsaved_;
+    projectLoading_ = std::make_unique<LoadingScreen>(
+        eng, eng.window() != nullptr && maxFrames_ == 0, executableDir() + "\\splash.png");
+    startupSettleCount_ = -2;
+    startupSettleFrames_ = 0;
+    projectLoadingFrames_ = 0;
+    projectLoading_->stage("Restoring level after Play");
+    destroyPlaySpawned();
+    level_.setNextLoadSource(snapshot);
+    loadLevel(eng, path);
+#if AVER_MODULE_SCRIPTING
+    if (scripts_.ready())
+#endif
+        spawnClassPlacements();
+    levelPath_ = keepPath;
+    camPos_ = cam; yaw_ = yaw; pitch_ = pitch; flySpeed_ = speed;
+    if (wasUnsaved) markLevelUnsaved();
+    std::error_code ec;
+    std::filesystem::remove(snapshot, ec);
+    AVER_INFO("[Sandbox] Stop: level reloaded as it was when Play began{}", wasUnsaved ? " (unsaved edits kept)" : "");
+}
+#endif
 
 // Publishes this frame's keyboard and mouse into the framework, for the C# Input class -- by
 // filling in the editor's policy and handing it to the SHARED publisher, which is now the only

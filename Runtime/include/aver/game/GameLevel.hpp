@@ -84,6 +84,10 @@ public:
     // fmt::levelFileIsLegacyOcmap, as the editor's loadLevel does: a legacy .ocmap is translated into
     // OcWorldData placements and spawn, then goes through the same pipeline.
     void load(const std::string& path, GameContent& content);
+    // One-shot: the next load() reads its records from `file` while everything else (the level's identity,
+    // its .ocland / .oclanes / streaming sidecars) still resolves against the path load() is given. The
+    // editor reloads its Play-start snapshot this way.
+    void setNextLoadSource(std::string file) { nextSource_ = std::move(file); }
 
     // Loads the project's start map, unless `overridePath` names a level to open instead -- the
     // editor's loadStartMap/openMapPath_ precedence: the override is checked first, even with no valid
@@ -284,6 +288,7 @@ private:
     SpawnPoint spawn_{};
 
     LoadHooks hooks_;
+    std::string nextSource_;   // setNextLoadSource
 
     // See vehiclePresetOf(). In FILE ORDER, which seeds each car's random stream, so the same level drives
     // the same way every run.

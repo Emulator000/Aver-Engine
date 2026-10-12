@@ -1516,6 +1516,10 @@ void SandboxApp::onUpdate(Engine& e, const Timestep& t)  {
 #endif
         }
     } frameStepGuard;
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+    // Stop asked for the level back as it was when Play began (stopPlay; it cannot load from inside the UI).
+    if (pieReloadPending_ && !anyPlayActive()) reloadAfterPlay(e);
+#endif
     // --set NAME VALUE applied at frame 5 (after project's RENDER.* apply).
 #if AVER_WITH_IMGUI
     if (!consoleSetsApplied_ && !consoleSets_.empty() && t.frame >= 5 && e.device()) {

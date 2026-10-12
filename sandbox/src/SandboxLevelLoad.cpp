@@ -1091,6 +1091,9 @@ void SandboxApp::unloadLevel(Engine& eng) {
     // animation stops and the Play snapshot is restored before the entities it names go away.
     if (anyPlayActive()) stopPlay();
 #endif
+#if AVER_MODULE_SCENE
+    pieReloadPending_ = false;   // leaving the level (or reloading it): a pending Play reload is moot
+#endif
     // FIRST, while levelPath_ still names the level being left: every way out of a level (another
     // level, New Level) comes through here. Closing the editor does not; onShutdown calls it too.
     storeLevelView();

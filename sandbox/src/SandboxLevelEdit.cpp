@@ -479,8 +479,8 @@ bool SandboxApp::fillPlacementFromEntity(scene::Entity e, fmt::OcWorldPlacement&
     return true;
 }
 
-bool SandboxApp::saveLevel(const std::string& path) {
-    if (levelIsLegacyOcmap_) return saveLevelAsOcmap(path);
+bool SandboxApp::saveLevel(const std::string& path, bool playSnapshot) {
+    if (levelIsLegacyOcmap_) return saveLevelAsOcmap(path, playSnapshot);
 
     scene::World& world = scene::World::instance();
     // THE AUTHORED PLACEMENTS ARE SAVED, NOT AN ANIMATE PREVIEW POSE: the sequence's actors go back to
@@ -583,7 +583,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
     // [wave3/level-instances] A prefab that lives inside a level instance is the child level's record, not this level's.
     w.prefabInstances = prefabSys_.captureLevelInstances([this](scene::Entity r) { return !level_.instances().isMember(r); });
     w.levelInstances = level_.instances().captureRecords();   // [wave3/level-instances] LEVELINST: links, not members
-    {
+    if (!playSnapshot) {
         std::string prefabWhy;
         if (!prefabModel_.saveDirtyAssets(&prefabWhy))
             AVER_WARN("[Editor] could not write an edited prefab asset: {}", prefabWhy);
@@ -753,6 +753,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
     std::string why;
     if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
     AVER_INFO("[Level] saved {} placement(s) to {}", w.placements.size(), path);
+    if (playSnapshot) return true;
     // THE DOCUMENT AND THE FILE NOW AGREE. Without this the exit prompt claims unsaved
     // changes forever -- see levelHasUnsavedEdits.
     markLevelSaved();
@@ -766,7 +767,7 @@ bool SandboxApp::saveLevel(const std::string& path) {
 // saveLevel's legacy-OCMAP twin -- the exact "start from what the file said, overwrite only what
 // the editor genuinely owns" shape saveLevel itself uses against levelHeader_, here against
 // legacyMapHeader_ (ROOT, CLIENT, the SURFACE table, GROUND, KILLZ).
-bool SandboxApp::saveLevelAsOcmap(const std::string& path) {
+bool SandboxApp::saveLevelAsOcmap(const std::string& path, bool playSnapshot) {
     scene::World& world = scene::World::instance();
     fmt::OcMapData m = legacyMapHeader_;
     m.name = levelName_.empty() ? std::string("untitled") : levelName_;
@@ -815,7 +816,7 @@ bool SandboxApp::saveLevelAsOcmap(const std::string& path) {
     std::string why;
     if (!fmt::saveOcmap(path, m, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
     AVER_INFO("[Level] saved {} placement(s) to {} (legacy .ocmap)", m.placements.size(), path);
-    markLevelSaved();
+    if (!playSnapshot) markLevelSaved();
     return true;
 }
 
