@@ -941,6 +941,8 @@ private:
     f32 authoredCenter_[3] = {0, 0, 0};
     f32 authoredExtent_ = 2000.0f;
     bool volumeFollowing_ = false;
+    f32  followLastEye_[3] = {0, 0, 0};
+    u32  followSlowFrames_ = 0;   // consecutive frames the eye moved under kFollowSlowCm
 
     // Mirrors `cbuffer VoxiFrame : register(b4)` field for field.
     struct FrameConstants {

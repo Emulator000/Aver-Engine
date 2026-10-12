@@ -719,8 +719,15 @@ void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
     authoredExtent_ = extent;
 
     // Follow the camera (last frame's eye) while it is outside the authored volume's inner three quarters.
-    // Recentre in quarter-volume steps once it strays half a volume from the current centre: each step
-    // re-voxelises, so the hysteresis keeps that to one rebuild per ~half volume of travel.
+    // Recentre in quarter-volume steps once it strays half a volume from the current centre. Each step
+    // re-voxelises (20-30 ms of GPU over a few frames), so it waits until the eye has moved slower than
+    // ~6 m/s for half a second: flying over a level costs one rebuild where it stops, not one every 28 m.
+    constexpr f32 kFollowSlowCm = 10.0f;   // per frame
+    constexpr u32 kFollowSettleFrames = 30;
+    f32 step2 = 0.0f;
+    for (int i = 0; i < 3; ++i) step2 += (curCamPos_[i] - followLastEye_[i]) * (curCamPos_[i] - followLastEye_[i]);
+    for (int i = 0; i < 3; ++i) followLastEye_[i] = curCamPos_[i];
+    followSlowFrames_ = step2 < kFollowSlowCm * kFollowSlowCm ? followSlowFrames_ + 1u : 0u;
     f32 c[3] = {center[0], center[1], center[2]};
     bool follow = false;
     if (settings_.giVolumeFollow && extent > 0.0f) {
@@ -728,6 +735,7 @@ void VoxiRenderer::setVolume(const f32 center[3], f32 extent) {
         if (follow) {
             bool stray = !volumeFollowing_ || authoredMoved;
             for (int i = 0; i < 3; ++i) stray = stray || std::abs(curCamPos_[i] - center_[i]) > 0.5f * extent;
+            if (volumeFollowing_ && !authoredMoved && followSlowFrames_ < kFollowSettleFrames) stray = false;
             const f32 step = 0.25f * extent;
             for (int i = 0; i < 3; ++i) c[i] = stray ? std::round(curCamPos_[i] / step) * step : center_[i];
         }
